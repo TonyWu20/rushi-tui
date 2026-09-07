@@ -211,9 +211,9 @@ Three repos; the kernel stays this tree.
 
 | Repo | Contents after the split |
 |---|---|
-| kernel (this repo) | loop stages, `hook-*`, `tools/*`, `bin/rushi` (with the new `[[external]]` fetch), `crates/rushi`, `crates/goal-state`, `schemas/`, `lean/RushiSpec.lean` (the lakefile sheds the TUI libs), `rushi.toml` / `rushi.lock` design |
+| kernel (this repo) | loop stages, `hook-compact` / `hook-handoff` (the goal-mode `harness-hook-goal-*` hooks live in rushi-exts `goal-hooks/`), `tools/*`, `bin/rushi` (with the new `[[external]]` fetch), `crates/rushi`, `crates/goal-state`, `schemas/`, `lean/RushiSpec.lean` (the lakefile sheds the TUI libs), `rushi.toml` / `rushi.lock` design |
 | `rushi-tui` (new) | `bin/tui`, `bin/tui-stream-drt`, the TUI half of `lean/` (`TuiStreamSpec`, `TuiStreamDrt`, `TuiViewportSpec` + the lake plumbing they need), `docs/tui*.md`, `docs/ui-extension*.md`, `docs/goal-ux.md`, `scripts/tui-pty-smoke.py`, `scripts/tui-capture.py`, `scripts/tui-stream-drt-inputs.sh`, its own flake (git dep on the kernel for `rushi-common`; Lean toolchain inputs for the DRT gate), its `.envrc` |
-| `rushi-exts` (new) | `ui_extensions/`, `ext-rs/`, `ui_extensions-demos/`, `ext-fixture/` (the fixture entries, out of `scripts/`), `scripts/ext-env.sh`, the two READMEs |
+| `rushi-exts` (new) | `ui_extensions/`, `ext-rs/`, `ui_extensions-demos/`, `goal-hooks/` (the four `harness-hook-goal-*` loop hooks), `ext-env.sh` (exts root), `run-idle-continue-e2e.sh` (the goal-mode e2e; the kernel keeps `scripts/ext-fixture/` host-test inputs and the generic `hook-compact` / `hook-handoff`), the two READMEs |
 
 Changes, by area:
 
@@ -297,6 +297,15 @@ behave exactly as today).**
 15. The TUI config contract (`[ext] dir`, `[loop]`, `[paths]`,
     `[active]`, `[tui]`) is unchanged: the config file stays a
     kernel project file the TUI reads.
+16. Goal-mode ownership: the four `harness-hook-goal-*` loop hooks
+    move from the kernel `bin/` to the exts repo's `goal-hooks/`
+    group as standalone packages (the same sibling `goal-state` dep
+    the goal ext uses); the goal-mode e2e moves to the exts root as
+    `run-idle-continue-e2e.sh` (kernel-side paths via `KERNEL_ROOT`,
+    default the sibling checkout). The kernel keeps the generic
+    `hook-compact` / `hook-handoff`; config.toml's `[hooks]` still
+    registers the bare goal-hook names, which resolve on PATH from
+    the exts build (`ext-env.sh` / the exts `.envrc`).
 
 ## 5. Cross-repo invariants
 
