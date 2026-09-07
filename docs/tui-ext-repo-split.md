@@ -1,11 +1,16 @@
 # TUI and TUI-extensions repo split — research and plan
 
-Status: research complete. The in-tree enablers are implemented
-(section 4, items 4–6: `EXTS_ROOT` in `scripts/tui-pty-smoke.py`
-and `scripts/ext-env.sh`, plus the quit-budget fix in the same
-smoke script). The split itself is not executed: the new
-repos are created when the work starts, and this doc fixes the
-boundary so both move in one pass.
+Status: EXECUTED (local path-dep bootstrap, no remote yet). The
+in-tree enablers are implemented (section 4, items 4–6: `EXTS_ROOT`
+in `scripts/tui-pty-smoke.py` and `scripts/ext-env.sh`, plus the
+quit-budget fix in the same smoke script). The split itself has
+been executed: `rushi-tui` and `rushi-exts` now exist as sibling
+repos under `/home/tony/programming/`, each re-pointing its one
+cross-repo dep to the kernel as a sibling path dep
+(`../../../rust-unix-harness/crates/...`), marked to flip to a git
+dep at hosting time. The two-repo PTY smoke (`EXTS_ROOT=rushi-exts`,
+`REPO=kernel`) passes all 17 cases. This doc fixed the boundary so
+both move in one pass.
 
 Prerequisite (machine-local): the plain cases open the repo's
 `sessions/tui-test` session, and the scroll-burst case asserts two
