@@ -973,6 +973,26 @@ def active_model_from_config(path):
     return None
 
 
+def repo_config_with_ext_dir(src_cfg, ext_dir, name=".ext-pty-smoke-cfg.toml"):
+    """A copy of a real repo config with `[ext] dir` pointed at ext_dir.
+
+    Written inside the source config's own directory so relative paths
+    such as sessions_root still resolve against the checkout. The repo
+    config has no `[ext]` section, so appending one is safe. Returns the
+    derived config's path.
+    """
+    with open(src_cfg) as f:
+        body = f.read()
+    out = os.path.join(os.path.dirname(os.path.abspath(src_cfg)), name)
+    with open(out, "w") as f:
+        f.write(body)
+        if not body.endswith("\n"):
+            f.write("\n")
+        f.write("\n[ext]\n")
+        f.write(f'dir = "{ext_dir}"\n')
+    return out
+
+
 def ext_statusline_repo():
     """The repo config on a real session: the global layer loads the
     reference extensions. The statusline shows the live dir, the git
@@ -984,7 +1004,14 @@ def ext_statusline_repo():
     to its last 16 chars, so the dir marker is the basename's last
     12. A missing value drops its marker, so the case passes on any
     branch or config."""
-    cfg = REPO + "/config.toml"
+    # Two-repo split: the kernel no longer owns ui_extensions/, so its
+    # default [ext] dir (kernel/ui_extensions) is absent. Point the
+    # global layer at the exts checkout (EXTS_ROOT) while keeping the
+    # real repo's [active] model, sessions_root, and git checkout. The
+    # derived config lives inside REPO so the relative sessions_root
+    # still resolves against the kernel checkout.
+    src_cfg = REPO + "/config.toml"
+    cfg = repo_config_with_ext_dir(src_cfg, EXTS_ROOT + "/ui_extensions")
     master, pid = spawn(SESSION, cfg)
     screen = Screen(24, 80)
     markers = [os.path.basename(REPO)[-12:]]
@@ -1049,6 +1076,10 @@ def ext_statusline_repo():
         try:
             os.close(master)
         except OSError:
+            pass
+        try:
+            os.unlink(cfg)
+        except (OSError, NameError):
             pass
 
 
