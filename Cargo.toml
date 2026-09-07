@@ -1,0 +1,19 @@
+# The `rushi-tui` repo: the swappable TUI front-end (Tier-2,
+# docs/tui-ext-repo-split.md). It builds the `tui` binary and the
+# std-only `tui-stream-drt` DRT mirror.
+#
+# Bootstrap split (local path-dep, no remote yet): `rushi-common` is a
+# path dep on the sibling kernel checkout (../rust-unix-harness/).
+# Flip it to a pinned git dep on the kernel repo at hosting time.
+
+[workspace]
+resolver = "2"
+members = [
+    "bin/tui",
+    "bin/tui-stream-drt",
+]
+
+[workspace.dependencies]
+# Inherited by `bin/tui` (`bon = { workspace = true }`); it was a member
+# of the kernel's root workspace before the split.
+bon = "3"

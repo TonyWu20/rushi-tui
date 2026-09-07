@@ -1,0 +1,15 @@
+## Rust build output
+**/target/
+target
+
+## Lean build output
+lean/.lake/
+
+## Runtime data (created by the harness / the PTY smoke's temp sessions)
+sessions/
+
+## Python bytecode
+__pycache__/
+
+## direnv
+.direnv/
