@@ -211,9 +211,9 @@ Three repos; the kernel stays this tree.
 
 | Repo | Contents after the split |
 |---|---|
-| kernel (this repo) | loop stages, `hook-compact` / `hook-handoff` (the goal-mode `harness-hook-goal-*` hooks live in rushi-exts `goal-hooks/`), `tools/*`, `bin/rushi` (with the new `[[external]]` fetch), `crates/rushi`, `crates/goal-state`, `schemas/`, `lean/RushiSpec.lean` (the lakefile sheds the TUI libs), `rushi.toml` / `rushi.lock` design |
+| kernel (this repo) | loop stages, `hook-compact` / `hook-handoff` (the goal-mode `harness-hook-goal-*` hooks live in rushi-exts `goal-hooks/`, the goal-mode loop tools in `goal-tools/`), the generic `tools/*` (`read`, `write`, `edit`, `bash`), `bin/rushi` (with the new `[[external]]` fetch), `crates/rushi`, `crates/goal-state`, `schemas/`, `lean/RushiSpec.lean` (the lakefile sheds the TUI libs), `rushi.toml` / `rushi.lock` design |
 | `rushi-tui` (new) | `bin/tui`, `bin/tui-stream-drt`, the TUI half of `lean/` (`TuiStreamSpec`, `TuiStreamDrt`, `TuiViewportSpec` + the lake plumbing they need), `docs/tui*.md`, `docs/ui-extension*.md`, `docs/goal-ux.md`, `scripts/tui-pty-smoke.py`, `scripts/tui-capture.py`, `scripts/tui-stream-drt-inputs.sh`, its own flake (git dep on the kernel for `rushi-common`; Lean toolchain inputs for the DRT gate), its `.envrc` |
-| `rushi-exts` (new) | `ui_extensions/`, `ext-rs/`, `ui_extensions-demos/`, `goal-hooks/` (the four `harness-hook-goal-*` loop hooks), `ext-env.sh` (exts root), `run-idle-continue-e2e.sh` (the goal-mode e2e; the kernel keeps `scripts/ext-fixture/` host-test inputs and the generic `hook-compact` / `hook-handoff`), the two READMEs |
+| `rushi-exts` (new) | `ui_extensions/`, `ext-rs/`, `ui_extensions-demos/`, `goal-hooks/` (the four `harness-hook-goal-*` loop hooks), `goal-tools/` (the goal-mode loop tools `goal`, `goal_blocked`, `goal_complete` + `lean-verify`; manifests discovered by the loop's route/parse/assemble from the extra tools root `RUSHI_EXTRA_TOOLS_ROOT`), `ext-env.sh` (exts root), `run-idle-continue-e2e.sh` (the goal-mode e2e; the kernel keeps `scripts/ext-fixture/` host-test inputs and the generic `hook-compact` / `hook-handoff`), the two READMEs |
 
 Changes, by area:
 
@@ -300,12 +300,24 @@ behave exactly as today).**
 16. Goal-mode ownership: the four `harness-hook-goal-*` loop hooks
     move from the kernel `bin/` to the exts repo's `goal-hooks/`
     group as standalone packages (the same sibling `goal-state` dep
-    the goal ext uses); the goal-mode e2e moves to the exts root as
-    `run-idle-continue-e2e.sh` (kernel-side paths via `KERNEL_ROOT`,
-    default the sibling checkout). The kernel keeps the generic
-    `hook-compact` / `hook-handoff`; config.toml's `[hooks]` still
-    registers the bare goal-hook names, which resolve on PATH from
-    the exts build (`ext-env.sh` / the exts `.envrc`).
+    the goal ext uses); the goal-mode loop tools (`goal`,
+    `goal_blocked`, `goal_complete`, `lean-verify`) move from the
+    kernel `tools/` to the exts repo's `goal-tools/` group as
+    standalone packages. The loop's `route` (tool dispatch),
+    `parse` (tool-name validation), and `assemble` (model tool
+    schemas) discover their `tool.toml` manifests from the extra
+    tools root `RUSHI_EXTRA_TOOLS_ROOT` (set by the exts `.envrc` /
+    this e2e); route resolves the binaries on PATH from the exts
+    build. The
+    kernel's `tools/` keeps the generic `read` / `write` / `edit` /
+    `bash` only (the former `list` tool is deleted: directory
+    listing goes through `bash` `ls`). The goal-mode e2e moves to
+    the exts root as `run-idle-continue-e2e.sh` (kernel-side paths
+    via `KERNEL_ROOT`, default the sibling checkout). The kernel
+    keeps the generic `hook-compact` / `hook-handoff`; config.toml's
+    `[hooks]` still registers the bare goal-hook names, which
+    resolve on PATH from the exts build (`ext-env.sh` / the exts
+    `.envrc`).
 
 ## 5. Cross-repo invariants
 
