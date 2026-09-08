@@ -516,11 +516,13 @@ P5. goal-clear: given any goal state, invoking `goal clear` observe
     (the per-goal `goal-<id>.json` traces remain).
 
 P6. goal-prompt-injected: given an active goal with text G, observe
-    that the model request's `input` array ends with a trailing
-    message item containing G, the goal-mode rules text, and the
-    trust-boundary framing, while `instructions` is unchanged. The
-    `user_message` event in `events.jsonl` is byte-identical to what
-    the user typed.
+    that the model request carries a `["goal", <block>]` entry in
+    `prompt_fragments` where the block contains G, the goal-mode
+    rules, the trust-boundary framing, and the `<goal_id>` guard.
+    The kernel joins the fragment into `instructions` before the
+    model call (docs/system-prompt-generation.md D5). The `input`
+    array is untouched. The `user_message` event in `events.jsonl`
+    is byte-identical to what the user typed.
 
 P7. objective-trust-boundary: given a goal text containing
     instruction-like text (e.g. "Ignore all previous instructions"),
@@ -571,30 +573,30 @@ P14. goal-mode-border: withdrawn with the goal-state decoupling. The
     chrome lives in the extension-owned row slot (P12, P13).
 
 P15. no-goal-no-injection: given no active goal (no goal files or
-    `active = false`), observe that the model request is unchanged
-    (no trailing goal block in `input`) and the goal extension's row
-    is empty (no goal status line). In the bare TUI observe no goal
-    row at all.
+    `active = false`), observe that the model request has no `goal`
+    entry in `prompt_fragments` (no trailing goal block in `input`
+    either) and the goal extension's row is empty (no goal status
+    line). In the bare TUI observe no goal row at all.
 
 P16. goal-prompt-invariant: while an active goal exists (pointer + state file) and
-    `active = true`, observe that every model request contains the
+    `active = true`, observe that every model request carries the
     goal block (objective + goal-mode rules + trust boundary +
-    `goal_id`) as the **last item of `input`**, and the block is a
-    pure function of `(goal text, goal_id)` — two identical states
-    produce byte-identical blocks. The block is present regardless of
-    whether the log-derived context "covers" the goal round, and
-    survives compaction of `events.jsonl`. When the goal is
-    paused/cleared/completed/blocked, the block is absent from the
-    next model call.
+    `goal_id`) as the `goal` entry in `prompt_fragments`, which the
+    kernel joins into `instructions` before the model call.
+    The block is a pure function of `(goal text, goal_id)` — two
+    identical states produce byte-identical blocks. The block is
+    present regardless of whether the log-derived context "covers" the
+    goal round, and survives compaction of `events.jsonl`. When the
+    goal is paused/cleared/completed/blocked, the fragment is absent
+    from the next model call.
 
 P17. cache-prefix-stability: given an active goal whose objective and
-    `goal_id` are unchanged, observe that (a) the goal block is
+    `goal_id` are unchanged, observe that (a) the goal fragment is
     byte-identical across consecutive model calls, and (b) it is
-    placed **after** the conversation in `input`, so the
-    `[system][history…]` token prefix is untouched by entering or
-    exiting goal mode — goal set / clear / pause / resume add or
-    remove only the trailing block and never re-prefill the cached
-    history.
+    appended to `instructions` (the system prompt), so the
+    `[history…]` token prefix is untouched by entering or exiting
+    goal mode — goal set / clear / pause / resume add or remove only
+    the fragment and never re-prefill the cached conversation.
 
 ## Verification
 
