@@ -23,6 +23,7 @@ repo argument.
 """
 import os
 import pty
+import re
 import select
 import shutil
 import signal
@@ -977,19 +978,35 @@ def repo_config_with_ext_dir(src_cfg, ext_dir, name=".ext-pty-smoke-cfg.toml"):
     """A copy of a real repo config with `[ext] dir` pointed at ext_dir.
 
     Written inside the source config's own directory so relative paths
-    such as sessions_root still resolve against the checkout. The repo
-    config has no `[ext]` section, so appending one is safe. Returns the
-    derived config's path.
-    """
+    such as sessions_root still resolve against the checkout. If the
+    source config already has an `[ext]` table (the kernel config.toml
+    points `[ext] dir` at the sibling exts checkout, section 4 item 4),
+    its `dir` key is replaced: a second `[ext]` table would be a TOML
+    parse error and the TUI would die at startup. Otherwise the table
+    is appended. Returns the derived config's path."""
     with open(src_cfg) as f:
         body = f.read()
+    # The `[ext]` table: from its header line to the next section
+    # header (a line starting with `[`) or end of file.
+    m = re.search(r"(?ms)^\[ext\](.*?)(?=^\[|\Z)", body)
+    if m:
+        block = m.group(1)
+        if re.search(r"(?m)^[ \t]*dir[ \t]*=", block):
+            block = re.sub(
+                r"(?m)^[ \t]*dir[ \t]*=[^\n]*$",
+                f'dir = "{ext_dir}"',
+                block,
+            )
+        else:
+            block += f'dir = "{ext_dir}"\n'
+        body = body[: m.start()] + "[ext]" + block + body[m.end():]
+    else:
+        if not body.endswith("\n"):
+            body += "\n"
+        body += f'\n[ext]\ndir = "{ext_dir}"\n'
     out = os.path.join(os.path.dirname(os.path.abspath(src_cfg)), name)
     with open(out, "w") as f:
         f.write(body)
-        if not body.endswith("\n"):
-            f.write("\n")
-        f.write("\n[ext]\n")
-        f.write(f'dir = "{ext_dir}"\n')
     return out
 
 

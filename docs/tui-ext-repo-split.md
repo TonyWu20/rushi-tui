@@ -243,6 +243,12 @@ behave exactly as today).**
    the `scripts/ext-fixture/` host-test inputs, temp configs)
    stay under `REPO`. Post-split, CI runs the gate against kernel
    + tui + exts checkouts with `EXTS_ROOT` at the exts checkout.
+   The interactive TUI instead takes a **config-file** override:
+   `[ext] dir` in the harness config (relative paths resolve
+   against the config's directory, docs/ui-extension.md section 3).
+   The kernel `config.toml` / `config-low.toml` set it to
+   `../rushi-exts/ui_extensions`, so a plain `tui` launch in the
+   kernel checkout loads the exts layer tree with no env var.
 5. `scripts/ext-env.sh`: the same `EXTS_ROOT` override on the
    build root (default: the tree the script lives in). Today it
    can build a separate exts checkout; post-split the script
