@@ -1,4 +1,9 @@
-# TUI `:` command palette
+# [SUPERSEDED] TUI `:` command palette
+
+> **Status marker:** The `:` command palette is now implemented in
+> `bin/tui/src/palette/` and wired into `main.rs` / `app.rs` (see the
+> built-in items in `palette/items.rs` and the `:` key handler in
+> `app.rs`). The "Spec, not yet built" status below is outdated.
 
 Status: Spec, not yet built (2026-09-11). The request lives in
 `docs/tui_feature_requests_from_human.md` (the 2026-09-11 item).

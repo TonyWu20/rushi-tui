@@ -1,4 +1,10 @@
-# TUI and TUI-extensions repo split — research and plan
+# [STALE] TUI and TUI-extensions repo split — research and plan
+
+> **Status marker:** The "no remote yet" note below is outdated.
+> The `rushi-tui` remote now exists on GitHub
+> (`github.com/TonyWu20/rushi-tui`). The local path-dep bootstrap
+> described here is still the current dev-time wiring; the git
+> re-pointing step has not yet landed.
 
 Status: EXECUTED (local path-dep bootstrap, no remote yet). The
 in-tree enablers are implemented (section 4, items 4–6: `EXTS_ROOT`

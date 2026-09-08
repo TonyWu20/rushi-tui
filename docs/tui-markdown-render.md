@@ -1,4 +1,11 @@
-# TUI message markdown rendering
+# [SUPERSEDED] TUI message markdown rendering
+
+> **Status marker:** The marker-free markdown rendering is now
+> implemented in `bin/tui/src/highlight.rs` (presentation pass) and
+> `bin/tui/src/render.rs`. Tests such as
+> `markdown_content_renders_without_the_markers` in
+> `bin/tui/src/render.rs` confirm the shipped behaviour. The "Status:
+> open" below is outdated.
 
 Status: open. The request lives in
 `docs/tui_feature_requests_from_human.md` (2026-09-02 item).
