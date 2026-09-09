@@ -60,6 +60,10 @@ pub enum Key {
     /// standard → show git-ignored → also show hidden → back to
     /// standard. The item list is re-enumerated on each press.
     CtrlI,
+    /// Standard Unix job control: suspend the TUI with SIGTSTP so the
+    /// shell can background it. The user resumes with `fg`
+    /// (docs/tui_feature_requests_from_human.md, issue #2).
+    CtrlZ,
     /// Alt+Up: recall the pending message queue into the editor
     /// (docs/user-message-editing.md).
     AltUp,
@@ -154,6 +158,9 @@ pub enum Action {
     },
     /// Bulk recall of pending user messages (docs/user-message-editing.md).
     RecallQueue,
+    /// Suspend the TUI process via SIGTSTP (standard Unix job control,
+    /// issue #2). The shell backgrounds the process; `fg` resumes it.
+    Suspend,
 }
 
 /// The oldest pending `approval_request` in the active session log.
@@ -232,6 +239,18 @@ pub struct App {
     /// is `editor.lines`; sending trims and appends it as a
     /// `user_message`.
     editor: Editor,
+    /// The shared vim register store (docs/tui-conversation-browsing.md
+    /// section 11.3): one store between the `Editor` and the `Browse`
+    /// overlay. The editor's `p` / operators read and write it through
+    /// [`App::editor_press`]; the browse `y` writes it.
+    registers: std::collections::HashMap<char, crate::vim_editor::RegContent>,
+    /// The pending OSC 52 host-clipboard writes (docs/tui-
+    /// conversation-browsing.md section 11.3): a browse `y` that
+    /// targets the `+` / `*` register — or the unnamed one under
+    /// `[tui] clipboard = "unnamed"` — queues the escape here; the
+    /// host writes it to the terminal before the next frame. A
+    /// terminal side effect, not persisted state.
+    host_clipboard: Vec<String>,
     /// The first editor line shown in the input area (the area shows
     /// two editor lines plus its border; scrolling moves this window).
     edit_scroll: usize,
@@ -254,11 +273,17 @@ pub struct App {
     /// enters or leaves browse mode. Any other key disarms. Mirrors
     /// the `q q` arm of FT-012 for the `s s` gate (section 4.2).
     ss_arm: Option<Instant>,
-    /// The last rendered browse layout: `(total, h, text_w, line
-    /// texts)`, refreshed by the renderer each frame while browse is
-    /// active. Browse motions and the search read it; tests prime it
-    /// by hand.
-    browse_layout: Option<(usize, usize, usize, Vec<String>)>,
+    /// The last rendered browse layout: `(total, h, text_w, line`
+    /// `raw, texts)` — refreshed by the renderer each frame while
+    /// browse is active. Browse motions and the search read it;
+    /// tests prime it by hand.
+    browse_layout: Option<(
+        usize,
+        usize,
+        usize,
+        Vec<String>,
+        Vec<Option<String>>,
+    )>,
     /// A rendered event landed since the last browse sync
     /// (section 4.6): the transcript growth is event growth, not a
     /// pane rewrap, so the browse view does not follow.
@@ -282,6 +307,7 @@ pub struct App {
         crate::color::Level,
         crate::color::Palette,
         Vec<Line<'static>>,
+        Vec<Option<String>>,
     )>,
     /// The terminal's color capability the built-in palette is lowered
     /// to, and the selected color scheme (docs/tui-color-scheme.md
@@ -477,6 +503,8 @@ impl App {
             events: Vec::new(),
             scroll: 0,
             editor: Editor::new(),
+            registers: std::collections::HashMap::new(),
+            host_clipboard: Vec::new(),
             edit_scroll: 0,
             loops: HashMap::new(),
             status: None,
@@ -609,6 +637,10 @@ impl App {
         // The browse state never survives a session switch (section
         // 4.7): the reset rides the scroll reset.
         self.browse.reset(&mut self.scroll);
+        // The shared register store resets with the browse state
+        // (section 11.3, "no persisted state across a session
+        // switch or a TUI restart"), like the scroll reset.
+        self.registers.clear();
         self.ss_arm = None;
         self.events_grew = false;
         self.events_version += 1;
@@ -909,7 +941,7 @@ impl App {
         ext: Option<&crate::ext::ExtHost>,
     ) -> &[Line<'static>] {
         let ext_ver = ext.map(|h| h.replies_version()).unwrap_or(0);
-        if let Some((v, w, ev, cl, p, _)) = &self.transcript_cache {
+        if let Some((v, w, ev, cl, p, _, _)) = &self.transcript_cache {
             if *v == self.events_version
                 && *w == width
                 && *ev == ext_ver
@@ -919,7 +951,9 @@ impl App {
                 return &self.transcript_cache.as_ref().unwrap().5;
             }
         }
-        let lines = crate::render::build_transcript_lines(self, width, ext);
+        let build = crate::render::build_transcript(self, width, ext);
+        let lines = build.lines;
+        let line_raw = build.line_raw;
         self.transcript_cache = Some((
             self.events_version,
             width,
@@ -927,8 +961,23 @@ impl App {
             self.palette.level(),
             self.palette.clone(),
             lines,
+            line_raw,
         ));
         &self.transcript_cache.as_ref().unwrap().5
+    }
+
+    /// The per-line raw source map a browse yank reads (docs/tui-
+    /// conversation-browsing.md section 11.3): `line_raw[i]` is the
+    /// shareable source for rendered line `i` (`None` on separators
+    /// and UI chrome). Sourced from the transcript cache which
+    /// `transcript_lines` keeps in step with it.
+    pub fn transcript_raw(
+        &mut self,
+        width: usize,
+        ext: Option<&crate::ext::ExtHost>,
+    ) -> Vec<Option<String>> {
+        let _lines = self.transcript_lines(width, ext);
+        self.transcript_cache.as_ref().unwrap().6.clone()
     }
 
     /// Events of the active session, oldest first.
@@ -1062,16 +1111,20 @@ impl App {
     }
 
     /// The browse layout of the last render: `(total, h, text_w,`
-    /// `texts)`. The renderer refreshes it each frame while browse is
-    /// active; browse motions and the search read it (section 4.1).
+    /// `texts, line_raw)`. The renderer refreshes it each
+    /// frame while browse is active; browse motions and the search read
+    /// it (section 4.1). `line_raw[j]` is the shareable raw source
+    /// for rendered line `j` (`None` on separators and UI chrome),
+    /// used by the raw-source yank (section 11.3).
     pub fn set_browse_layout(
         &mut self,
         total: usize,
         h: usize,
         text_w: usize,
         texts: Vec<String>,
+        line_raw: Vec<Option<String>>,
     ) {
-        self.browse_layout = Some((total, h, text_w, texts));
+        self.browse_layout = Some((total, h, text_w, texts, line_raw));
     }
 
     /// The browse highlight inputs for one frame: the match-line
@@ -1083,7 +1136,7 @@ impl App {
         total: usize,
     ) -> (std::collections::HashSet<usize>, Option<(usize, usize)>) {
         match &self.browse_layout {
-            Some((_, _, _, texts)) => {
+            Some((_, _, _, texts, ..)) => {
                 let (hl, am) = self.browse.highlight_lines(total, texts.as_slice());
                 (hl.clone(), am)
             }
@@ -1126,8 +1179,13 @@ impl App {
             }
             return;
         }
-        let (total, h, texts) = match &self.browse_layout {
-            Some((total, h, _w, texts)) => (*total, *h, texts.as_slice()),
+        let (total, h, texts, line_raw) = match &self.browse_layout {
+            Some((total, h, _w, texts, line_raw)) => (
+                *total,
+                *h,
+                texts.as_slice(),
+                line_raw.as_slice(),
+            ),
             None => return,
         };
         let half = self.half_page();
@@ -1137,13 +1195,31 @@ impl App {
             scroll: &mut self.scroll,
             half,
             texts,
+            line_raw,
         };
-        if let Some(hint) = self.browse.key(key, &mut view) {
+        if let Some(hint) = self.browse.key(key, &mut view, &mut self.registers) {
             self.flash(hint);
+        }
+        // The OSC 52 host-clipboard write of a browse yank
+        // (section 11.3): queued for the host, written to the
+        // terminal before the next frame.
+        if let Some(esc) = self.browse.take_host_clipboard() {
+            self.host_clipboard.push(esc);
         }
     }
 
-    // ── @ file picker (docs/tui-file-picker.md) ─────────────────
+    /// The `[tui] clipboard = "unnamed"` flag (section 11.3): a bare
+    /// unnamed browse yank also emits the OSC 52 host-clipboard
+    /// write. Set once at config load.
+    pub fn set_clipboard_unnamed(&mut self, on: bool) {
+        self.browse.set_clipboard_unnamed(on);
+    }
+
+    /// The pending OSC 52 host-clipboard escapes (section 11.3),
+    /// drained in order. The host writes each to the terminal.
+    pub fn drain_host_clipboard(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.host_clipboard)
+    }
 
     /// The picker state machine, read-only.
     pub fn picker_ref(&self) -> &crate::picker::state::PickerState {
@@ -1597,6 +1673,17 @@ impl App {
         &mut self.editor
     }
 
+    /// One editor key over the shared register store
+    /// (docs/tui-conversation-browsing.md section 11.3): the editor
+    /// and the browse overlay both run against `self.registers`, so
+    /// a browse `y` lands where the editor's `p` reads. The two
+    /// disjoint field borrows keep the call borrow-checker clean.
+    pub fn editor_press(&mut self, key: Key) -> Option<String> {
+        let registers = &mut self.registers;
+        let editor = &mut self.editor;
+        editor.press(key, registers)
+    }
+
     /// The editor's scroll window, so the renderer keeps the cursor
     /// line in view.
     pub fn edit_scroll(&self) -> usize {
@@ -1916,6 +2003,13 @@ impl App {
         if self.quitting {
             return Vec::new();
         }
+        // Ctrl+Z is a system-level suspend (SIGTSTP): it works in every
+        // mode and suspends the whole TUI so the shell can background
+        // it. `fg` resumes (docs/tui_feature_requests_from_human.md
+        // issue #2).
+        if key == Key::CtrlZ {
+            return vec![Action::Suspend];
+        }
         // Any key other than the second `q` disarms a pending quit.
         if key != Key::Quit {
             self.quit_arm = None;
@@ -1981,7 +2075,7 @@ impl App {
                 // editor owns the text, and the picker re-syncs its
                 // query from the `@` token.
                 Key::Backspace => {
-                    if let Some(h) = self.editor().press(Key::Backspace) {
+                    if let Some(h) = self.editor_press(Key::Backspace) {
                         self.flash(h);
                     }
                     self.sync_picker();
@@ -1997,7 +2091,7 @@ impl App {
                     return Vec::new();
                 }
                 Key::Char(c) => {
-                    if let Some(h) = self.editor().press(Key::Char(c)) {
+                    if let Some(h) = self.editor_press(Key::Char(c)) {
                         self.flash(h);
                     }
                     self.sync_picker();
@@ -2177,7 +2271,7 @@ impl App {
                     Vec::new()
                 } else {
                     // A typing mode or the search box: `q` is text.
-                    if let Some(h) = self.editor().press(Key::Char('q')) {
+                    if let Some(h) = self.editor_press(Key::Char('q')) {
                         self.flash(h);
                     }
                     Vec::new()
@@ -2189,7 +2283,7 @@ impl App {
                 // via Ctrl-J). The naming bar confirms on Enter.
                 if self.editor().mode() == Mode::CommandLine {
                     // The search command line runs its query on Enter.
-                    if let Some(h) = self.editor().press(Key::Enter) {
+                    if let Some(h) = self.editor_press(Key::Enter) {
                         self.flash(h);
                     }
                     return Vec::new();
@@ -2218,7 +2312,7 @@ impl App {
                     // The naming bar is single-line: ignore.
                     return Vec::new();
                 }
-                if let Some(h) = self.editor().press(Key::CtrlJ) {
+                if let Some(h) = self.editor_press(Key::CtrlJ) {
                     self.flash(h);
                 }
                 Vec::new()
@@ -2247,7 +2341,7 @@ impl App {
                 // mode: in insert they edit or move (the newline key
                 // is Ctrl-J; Enter sends the draft); in normal, they
                 // are motions.
-                if let Some(h) = self.editor().press(key) {
+                if let Some(h) = self.editor_press(key) {
                     self.flash(h);
                 }
                 self.sync_picker();
@@ -2277,7 +2371,7 @@ impl App {
                 // pre-session editor, Ctrl-C is the vim insert-exit
                 // key and the editor decides.
                 if self.active.is_none() {
-                    if let Some(h) = self.editor().press(Key::CtrlC) {
+                    if let Some(h) = self.editor_press(Key::CtrlC) {
                         self.flash(h);
                     }
                     Vec::new()
@@ -2311,7 +2405,7 @@ impl App {
                 // editor's Ctrl-U). Otherwise it is the half-page
                 // log scroll.
                 if self.editor().mode() == Mode::CommandLine {
-                    self.editor().press(Key::CtrlU);
+                    self.editor_press(Key::CtrlU);
                     return Vec::new();
                 }
                 if self.editor().mode() == Mode::Insert && self.active.is_none() {
@@ -2405,9 +2499,15 @@ impl App {
                 // touch the draft text — vim's Esc cancels, it does
                 // not delete. The draft is cleared only by send (Enter)
                 // or an explicit delete motion.
-                if let Some(h) = self.editor().press(Key::Esc) {
+                if let Some(h) = self.editor_press(Key::Esc) {
                     self.flash(h);
                 }
+                Vec::new()
+            }
+            Key::CtrlZ => {
+                // Unreachable: handled at the top of press() before
+                // reaching this match. Satisfies the compiler's
+                // exhaustiveness check.
                 Vec::new()
             }
             Key::Char(c) => {
@@ -2460,7 +2560,7 @@ impl App {
                 {
                     // The editor keeps the `s` role (change one
                     // char); the hint names the browse path.
-                    if let Some(h) = self.editor().press(Key::Char('s')) {
+                    if let Some(h) = self.editor_press(Key::Char('s')) {
                         self.flash(h);
                     }
                     self.flash("ss browses — clear the draft first");
@@ -2476,7 +2576,7 @@ impl App {
                     self.open_palette();
                     return Vec::new();
                 }
-                if let Some(h) = self.editor().press(Key::Char(c)) {
+                if let Some(h) = self.editor_press(Key::Char(c)) {
                     self.flash(h);
                 }
                 // Open the picker when `@` is freshly typed at a valid
@@ -2640,6 +2740,19 @@ mod tests {
         assert_eq!(app.press(Key::CtrlC), vec![Action::StopLoop]);
         let mut none = App::new();
         assert!(none.press(Key::CtrlC).is_empty(), "no session: no intent");
+    }
+
+    #[test]
+    fn ctrl_z_emits_the_suspend_intent() {
+        // Ctrl+Z is a system-level key: it suspends the TUI via
+        // SIGTSTP regardless of session state or editor mode
+        // (docs/tui_feature_requests_from_human.md, issue #2).
+        let mut app = app_with(vec![], "s1");
+        assert_eq!(app.press(Key::CtrlZ), vec![Action::Suspend]);
+
+        // Works even with no active session.
+        let mut bare = App::new();
+        assert_eq!(bare.press(Key::CtrlZ), vec![Action::Suspend]);
     }
 
     #[test]
@@ -3616,7 +3729,7 @@ mod tests {
     /// editor in normal mode, an empty draft.
     fn browse_gated_app() -> App {
         let mut app = app_with(vec![], "s1");
-        app.editor().press(Key::Esc); // insert to normal
+        app.editor_press(Key::Esc); // insert to normal
         app
     }
 
@@ -3679,7 +3792,7 @@ mod tests {
         let total = 50usize;
         let h = 24usize;
         let scroll = app.scroll();
-        app.set_browse_layout(total, h, 40, vec!["line".to_string(); total]);
+        app.set_browse_layout(total, h, 40, vec!["line".to_string(); total], Vec::new());
         app.browse.sync(total, h, &mut app.scroll, false);
         let (l, c) = app.browse_ref().line_col();
         assert_eq!(l, total - h, "the cursor is the first visible line");
@@ -3718,6 +3831,101 @@ mod tests {
         assert!(app.editor().text().trim().is_empty(), "the draft is still empty");
     }
 
+    // ── Contract 3: register handoff (section 11.9) ─────────────
+
+    #[test]
+    fn browse_yank_handoff_to_editor_paste() {
+        // "register handoff": a browse yank, `ss` exits browse,
+        // `p` in the editor pastes the yanked text into the draft.
+        let mut app = browse_gated_app();
+        // Set up a browse layout so the yank has text. No raw source
+        // texts here: the yank falls back to the rendered text.
+        let texts = vec!["the yanked line".to_string()];
+        app.set_browse_layout(
+            1,
+            24,
+            40,
+            texts,
+            Vec::new(),
+        );
+        // Enter browse mode.
+        app.press(Key::Char('s'));
+        app.press(Key::Char('s'));
+        assert!(app.browse_ref().active(), "browse is active");
+        // Position the cursor on line 0.
+        app.browse.sync(1, 24, &mut app.scroll, false);
+        // Yank the current line (linewise).
+        app.press(Key::Char('y'));
+        app.press(Key::Char('y'));
+        // The `"` register now holds the yanked text.
+        // Exit browse.
+        app.press(Key::Char('s'));
+        app.press(Key::Char('s'));
+        assert!(!app.browse_ref().active(), "browse is exited");
+        // Paste into the draft with `p` (the editor reads the shared
+        // register store).
+        app.press(Key::Char('p'));
+        let draft = app.draft();
+        assert!(
+            draft.contains("the yanked line"),
+            "the draft gains the yanked text, got: {draft}"
+        );
+    }
+
+    // End-to-end raw-source yank (section 11.3): a browse `yy` over a
+    // user-message transcript line must carry the shareable markdown
+    // source (not the rendered, gutter-prefixed line) into the
+    // unnamed register, and a subsequent editor `p` must land that
+    // source into the draft so it can be re-sent or saved to a .md.
+    #[test]
+    fn browse_yank_yields_the_raw_markdown_source() {
+        let ev = ev(
+            r##"{"v":1,"type":"user_message","ts":"t","id":"u1","content":"# Title\n\n- a **bold** item"}"##,
+        );
+        let mut app = app_with(vec![ev], "s1");
+        app.editor_press(Key::Esc); // ensure normal mode so 's' arms the gate
+        let width = 100usize;
+        let total = app.transcript_lines(width, None).len();
+        let texts: Vec<String> = app
+            .transcript_lines(width, None)
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        let line_raw = app.transcript_raw(width, None);
+        assert!(!line_raw.is_empty(), "the raw source is wired to the layout");
+        app.set_browse_layout(total, 24, width, texts, line_raw);
+
+        // Enter browse and yank the first line (the user message header).
+        app.press(Key::Char('s'));
+        app.press(Key::Char('s'));
+        assert!(app.browse_ref().active(), "browse is active");
+        app.browse.sync(total, 24, &mut app.scroll, false);
+        app.press(Key::Char('y'));
+        app.press(Key::Char('y'));
+        let reg = app.registers.get(&'"').map(|r| r.text.clone()).unwrap();
+        // Per-line raw: yy on line 0 yields only that line's raw source,
+        // not the entire event content.
+        assert!(
+            reg.contains("# Title"),
+            "the unnamed register holds the raw source, got: {reg}"
+        );
+
+        // Exit browse and paste into the editor draft.
+        app.press(Key::Char('s'));
+        app.press(Key::Char('s'));
+        assert!(!app.browse_ref().active(), "browse is exited");
+        app.press(Key::Char('p'));
+        let draft = app.draft();
+        assert!(
+            draft.contains("# Title"),
+            "the paste carries the raw markdown source into the draft, got: {draft}"
+        );
+        assert!(
+            !draft.contains("|  # Title"),
+            "the rendered gutter prefix must not leak into the yank"
+        );
+    }
+
     #[test]
     fn browse_quit_gate_holds() {
         // "quit in browse": in browse, `q q` — the gate still holds
@@ -3740,7 +3948,7 @@ mod tests {
         // for the picker; no session cycle for now.
         let mut app = app_with(vec![], "s1");
         app.set_sessions(vec![SessionId::new("s1"), SessionId::new("s2")]);
-        app.editor().press(Key::Esc);
+        app.editor_press(Key::Esc);
         app.press(Key::Char('s'));
         app.press(Key::Char('s'));
         assert!(app.browse_ref().active());
@@ -3754,7 +3962,7 @@ mod tests {
         // Section 4.4: `Ctrl+C` / `Ctrl+R` keep the host stop /
         // start roles under the overlay.
         let mut app = app_with(vec![], "s1");
-        app.editor().press(Key::Esc);
+        app.editor_press(Key::Esc);
         app.press(Key::Char('s'));
         app.press(Key::Char('s'));
         assert_eq!(app.press(Key::CtrlR), vec![Action::RunLoop], "the start role");
@@ -3771,7 +3979,7 @@ mod tests {
         app.press(Key::Char('s'));
         let total = 30usize;
         let h = 24usize;
-        app.set_browse_layout(total, h, 40, vec!["line".to_string(); total]);
+        app.set_browse_layout(total, h, 40, vec!["line".to_string(); total], Vec::new());
         app.browse.sync(total, h, &mut app.scroll, false);
         let (l0, _) = app.browse_ref().line_col();
         let scroll0 = app.scroll();
@@ -3781,7 +3989,7 @@ mod tests {
             cursor: crate::port::TailCursor::end(),
         });
         let total2 = total + 1;
-        app.set_browse_layout(total2, h, 40, vec!["line".to_string(); total2]);
+        app.set_browse_layout(total2, h, 40, vec!["line".to_string(); total2], Vec::new());
         app.browse.sync(total2, h, &mut app.scroll, true);
         let (l1, _) = app.browse_ref().line_col();
         assert_eq!(l1, l0, "the cursor pins to its line number");
@@ -3798,14 +4006,14 @@ mod tests {
         app.press(Key::Char('s'));
         let total = 30usize;
         let h = 24usize;
-        app.set_browse_layout(total, h, 40, vec!["line".to_string(); total]);
+        app.set_browse_layout(total, h, 40, vec!["line".to_string(); total], Vec::new());
         app.browse.sync(total, h, &mut app.scroll, false);
         app.on_watch_item(WatchItem::Event {
             event: crate::event::produce::user_message("more"),
             cursor: crate::port::TailCursor::end(),
         });
         let total2 = total + 1;
-        app.set_browse_layout(total2, h, 40, vec!["line".to_string(); total2]);
+        app.set_browse_layout(total2, h, 40, vec!["line".to_string(); total2], Vec::new());
         app.browse.sync(total2, h, &mut app.scroll, true);
         // The view to the top inside browse.
         app.press(Key::Char('g'));
@@ -3824,7 +4032,7 @@ mod tests {
         // scroll (section 4.7).
         let mut app = app_with(vec![], "s1");
         app.set_sessions(vec![SessionId::new("s1"), SessionId::new("s2")]);
-        app.editor().press(Key::Esc);
+        app.editor_press(Key::Esc);
         app.press(Key::Char('s'));
         app.press(Key::Char('s'));
         assert!(app.browse_ref().active());
@@ -3958,7 +4166,7 @@ mod tests {
             SessionId::new("beta"),
             SessionId::new("gamma"),
         ]);
-        app.editor().press(Key::Esc);
+        app.editor_press(Key::Esc);
         // Open the palette with `:`.
         app.press(Key::Char(':'));
         assert!(app.palette_state().open);
@@ -4012,7 +4220,7 @@ mod tests {
             SessionId::new("beta"),
             SessionId::new("gamma"),
         ]);
-        app.editor().press(Key::Esc);
+        app.editor_press(Key::Esc);
         app.press(Key::Char(':'));
         app.press(Key::Char('b'));
         app.press(Key::Char(' '));
@@ -4027,7 +4235,7 @@ mod tests {
     #[test]
     fn palette_q_key_types_into_query() {
         let mut app = app_with(vec![], "s1");
-        app.editor().press(Key::Esc);
+        app.editor_press(Key::Esc);
         app.press(Key::Char(':'));
         assert!(app.palette_state().open);
         // `q` is mapped to Key::Quit in main.rs; in the palette it
