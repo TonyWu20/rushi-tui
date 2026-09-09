@@ -223,8 +223,10 @@ macchiato` as the first internal color scheme. Shipped in
 
 ## New requests (2026-09-06)
 
-- [ ] Accept `ctrl+z` the standard keybinding that send our tui to
-      background jobs in the shell.
+- [x] Accept `ctrl+z` the standard keybinding that send our tui to
+      background jobs in the shell. Shipped: `Ctrl+Z` sends SIGTSTP,
+      the shell backgrounds the TUI; `fg` resumes it. The terminal is
+      restored before suspend and re-initialised on resume.
 - [ ] The current markdown table rendering of the messages cannot correctly
       distinguish if `|` is used as the table column marker or written as part of the
       text or code, e.g. the closure syntax in Rust `.map(|e| ...)`/`.unwrap_or(|e| ...)`
@@ -289,3 +291,13 @@ macchiato` as the first internal color scheme. Shipped in
       `sessions/goal-ux-impl`
 - [ ] `tool:edit` shows diff in vertica split when terminal is wide, horizontal
       split when terminal is narrow.
+- [ ] Bug: the input box does not highlight the whole visual
+      selection. In `VISUAL` / `V-LINE` the draft shows only the
+      inverted block on the cursor cell; the chars between the
+      anchor and the cursor are not shaded, so the selection is not
+      visible as a block. Fix: expose the visual range from
+      `VimEditor` (`visual_range` is private today), shade the
+      selected span with a background in the editor-box render
+      (char-visual spans its chars across wrapped display rows;
+      line-visual shades whole display rows), and add a test. Not
+      shipped.

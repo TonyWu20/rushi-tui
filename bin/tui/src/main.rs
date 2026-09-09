@@ -99,6 +99,7 @@ fn key_input(k: &cevent::KeyEvent) -> Option<Key> {
             cevent::KeyCode::Char('r') => Some(Key::CtrlR),
             cevent::KeyCode::Char('u') => Some(Key::CtrlU),
             cevent::KeyCode::Char('d') => Some(Key::CtrlD),
+            cevent::KeyCode::Char('z') => Some(Key::CtrlZ),
             _ => None,
         };
     }
@@ -348,6 +349,10 @@ fn main() {
     // The tool-result display config (docs/tui-tool-display-port.md
     // section 2, the config part): the `[tui] tool_display` table.
     app.set_tool_display(cfg.tool_display);
+    // The [tui] clipboard flag (docs/tui-conversation-browsing.md
+    // section 11.3): `unnamed` routes a bare browse `y` to the host
+    // clipboard as well, not only the explicit `+` / `*` yank.
+    app.set_clipboard_unnamed(cfg.clipboard_unnamed);
     let host = ext::ExtHost::new(&disc, &cfg);
 
     for item in host.start() {
@@ -591,6 +596,18 @@ fn main() {
                 // Resize: ratatui re-queries the terminal on each draw.
                 _ => {}
             }
+        }
+
+        // 3.5 The host-clipboard writes of the browse `y` (docs/tui-
+        // conversation-browsing.md section 11.3): the OSC 52 escapes
+        // go to the terminal before the next frame, like the
+        // extension notify OSCs. On a terminal without OSC 52
+        // support the escape is ignored; the in-memory register still
+        // serves the editor's `p`.
+        for esc in app.drain_host_clipboard() {
+            let mut out = std::io::stdout();
+            let _ = out.write_all(esc.as_bytes());
+            let _ = out.flush();
         }
 
         // 4. Execute the port-level actions.
@@ -1097,6 +1114,30 @@ fn main() {
                     host.stop();
                     return finish(&mut term);
                 }
+                Action::Suspend => {
+                    // Standard Unix job control: suspend the TUI so the
+                    // shell can background it (issue #2). Restore the
+                    // terminal, send SIGTSTP, then re-init when the
+                    // shell resumes us with SIGCONT (via `fg`).
+                    let _ = terminal::disable_raw_mode();
+                    let mut out = std::io::stdout();
+                    let _ = out.execute(cevent::DisableMouseCapture);
+                    let _ = out.execute(terminal::LeaveAlternateScreen);
+                    let _ = out.execute(crossterm::cursor::Show);
+                    let _ = out.flush();
+                    unsafe {
+                        libc::raise(libc::SIGTSTP);
+                    }
+                    // Re-enter the TUI terminal state after SIGCONT.
+                    let _ = terminal::enable_raw_mode();
+                    let _ = out.execute(cevent::EnableMouseCapture);
+                    let _ = out.execute(terminal::EnterAlternateScreen);
+                    let _ = out.execute(crossterm::cursor::Hide);
+                    let _ = out.flush();
+                    let _ = term.clear();
+                    app.flash("resumed");
+                    continue 'ui;
+                }
             }
         }
 
@@ -1595,5 +1636,17 @@ mod key_input_tests {
         // so Ctrl+I works end to end (docs/tui-file-picker.md P9).
         let ev = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
         assert_eq!(key_input(&ev), Some(Key::Tab));
+    }
+
+    #[test]
+    fn ctrl_z_maps_to_key_ctrl_z() {
+        let ev = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL);
+        assert_eq!(key_input(&ev), Some(Key::CtrlZ));
+    }
+
+    #[test]
+    fn plain_z_is_not_ctrl_z() {
+        let ev = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE);
+        assert_eq!(key_input(&ev), Some(Key::Char('z')));
     }
 }
