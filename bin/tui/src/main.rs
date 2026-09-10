@@ -21,6 +21,7 @@ mod picker;
 mod port;
 mod port_file;
 mod render;
+mod syntect_highlight;
 mod tool_display;
 mod vim_editor;
 
@@ -388,7 +389,8 @@ fn main() {
         // persistent probe marks the session running, so the status
         // bit shows the real state, not this process's memory.
         resync_external_loop(&rt, &port, &mut app, &id);
-        host.send_history(&events);
+        let init_width = term.size().map(|s| s.width as usize).unwrap_or(80).saturating_sub(16).max(40);
+        host.send_history(&events, init_width);
     } else {
         // No session argument: ask for a new session name instead of
         // resuming the most recent session.
@@ -442,7 +444,14 @@ fn main() {
                         .collect::<String>();
                     trace(&rt, &port, app.active(), "malformed_line", &raw);
                 }
-                host.forward_event((evs.len() - 1) as u64, &ev);
+                host.forward_event((evs.len() - 1) as u64, &ev, last_width.saturating_sub(16).max(40));
+                // Register the spawn time for fade-in tracking
+                // (docs/tui-tool-display-fancy.md section 7).
+                if ev.kind() == EventKind::ToolResult {
+                    if let Some(id) = ev.get_str("id") {
+                        app.register_block_spawn(id);
+                    }
+                }
             }
         }
         // 1.5 Extension items: log appends, terminal notify ops, and
@@ -529,11 +538,9 @@ fn main() {
         // sat in the queue and the UI looked hung. Draining keeps
         // keys responsive (docs/tui_feature_requests_from_human.md).
         let mut evs: Vec<cevent::Event> = Vec::new();
-        // While a response is streaming, tick at 16 ms (about 60 FPS)
-        // so the paced stream release renders at a smooth frame rate
-        // (docs/tui-streaming-response.md section 6.5); the idle 100 ms
-        // wait is enough otherwise.
-        let poll_to = if app.stream_live() {
+        // While a response is streaming or animations are in flight,
+        // tick at 16 ms (~60 FPS). Otherwise 100 ms idle.
+        let poll_to = if app.stream_live() || app.is_animating() {
             Duration::from_millis(16)
         } else {
             Duration::from_millis(100)
@@ -591,6 +598,35 @@ fn main() {
                 cevent::Event::Mouse(m) => match m.kind {
                     cevent::MouseEventKind::ScrollUp => actions.extend(app.press(Key::Wheel(-1))),
                     cevent::MouseEventKind::ScrollDown => actions.extend(app.press(Key::Wheel(1))),
+                    cevent::MouseEventKind::Down(_) => {
+                        // Mouse-click hit-test on tool-result blocks
+                        // (docs/tui-tool-display-fancy.md section 6).
+                        // Convert screen (row, col) to a transcript line
+                        // index, then look up which tool-result block
+                        // contains that line.
+                        let top_row = app.transcript_top_row() as usize;
+                        let visible_start = app.transcript_visible_start();
+                        let transcript_line = (m.row as usize)
+                            .saturating_sub(top_row)
+                            .saturating_add(visible_start);
+                        let expand_mode = app.tool_display().expand_mode;
+                        match expand_mode {
+                            crate::tool_display::ExpandMode::Click => {
+                                if let Some(id) = app.block_at_transcript_line(transcript_line).map(|s| s.to_string()) {
+                                    app.toggle_block_expand(&id);
+                                }
+                            }
+                            crate::tool_display::ExpandMode::Focus => {
+                                // In focus mode a click sets focus to the
+                                // nearest block; the draw loop will
+                                // animate it open.
+                                if let Some(id) = app.block_at_transcript_line(transcript_line).map(|s| s.to_string()) {
+                                    app.set_focus_block(&id);
+                                }
+                            }
+                            crate::tool_display::ExpandMode::Global => {}
+                        }
+                    }
                     _ => {}
                 },
                 // Resize: ratatui re-queries the terminal on each draw.
@@ -888,7 +924,7 @@ fn main() {
                             // reply caches and resend this session's
                             // history (docs/ui-extension.md section 4).
                             host.clear_replies();
-                            host.send_history(&events);
+                            host.send_history(&events, last_width.saturating_sub(16).max(40));
                             resync_external_loop(&rt, &port, &mut app, &id);
                         }
                     } else {
@@ -917,7 +953,7 @@ fn main() {
                     }
                     app.flash(format!("session {name} opened"));
                     host.clear_replies();
-                    host.send_history(&events);
+                    host.send_history(&events, last_width.saturating_sub(16).max(40));
                     resync_external_loop(&rt, &port, &mut app, &sid);
                 }
                 Action::Handoff(name) => {
@@ -959,7 +995,7 @@ fn main() {
                         app.set_sessions(list);
                     }
                     host.clear_replies();
-                    host.send_history(&events);
+                    host.send_history(&events, last_width.saturating_sub(16).max(40));
                     // Reattach the target's persistent loop state and
                     // block a double start (FT-003): a live loop for
                     // the target would get a second start here.
@@ -1063,7 +1099,7 @@ fn main() {
                     app.set_active(sid.clone(), events.clone());
                     app.set_watch_rx(port.watch(&sid, TailCursor::end()));
                     host.clear_replies();
-                    host.send_history(&events);
+                    host.send_history(&events, last_width.saturating_sub(16).max(40));
                     resync_external_loop(&rt, &port, &mut app, &sid);
                     app.flash(format!("switched to {name}"));
                 }
@@ -1115,10 +1151,26 @@ fn main() {
                     return finish(&mut term);
                 }
                 Action::Suspend => {
-                    // Standard Unix job control: suspend the TUI so the
-                    // shell can background it (issue #2). Restore the
-                    // terminal, send SIGTSTP, then re-init when the
-                    // shell resumes us with SIGCONT (via `fg`).
+                    // Standard Unix job control: suspend the TUI's whole
+                    // foreground job so the shell can background it
+                    // (issue #2). Restore the terminal first, stop the
+                    // job, then re-init when the shell resumes it with
+                    // SIGCONT (via `fg`).
+                    //
+                    // The TUI is a child of the `rushi` launcher
+                    // (`rushi tui`, which blocks in a `wait` on us), so
+                    // the shell's job leader is the *parent*, not this
+                    // process. Stopping only ourselves (`raise`) would
+                    // leave the leader running and the shell would never
+                    // see its job stop, so it never regains the terminal
+                    // and `fg` is unreachable. We therefore send SIGTSTP
+                    // to the whole foreground process group (`kill(0, ..)`
+                    // — pgid 0 is "my process group"): that stops the
+                    // leader too, so the shell prints a prompt where
+                    // `fg` (SIGCONT to the group) resumes us. Loops and
+                    // extensions run in their own sessions (`setsid`),
+                    // so they are insulated and keep running through the
+                    // suspend.
                     let _ = terminal::disable_raw_mode();
                     let mut out = std::io::stdout();
                     let _ = out.execute(cevent::DisableMouseCapture);
@@ -1126,7 +1178,9 @@ fn main() {
                     let _ = out.execute(crossterm::cursor::Show);
                     let _ = out.flush();
                     unsafe {
-                        libc::raise(libc::SIGTSTP);
+                        // Stop the entire foreground job, not just this
+                        // process: `0` means "the calling process's group".
+                        libc::kill(0, libc::SIGTSTP);
                     }
                     // Re-enter the TUI terminal state after SIGCONT.
                     let _ = terminal::enable_raw_mode();
@@ -1201,6 +1255,25 @@ fn main() {
             last_loop_probe = Instant::now();
             if let Some(sid) = app.active().cloned() {
                 resync_external_loop(&rt, &port, &mut app, &sid);
+            }
+        }
+
+        // 4.7 Pump expand/collapse animations (docs/tui-tool-display-fancy.md).
+        if app.is_animating() {
+            app.pump_animations();
+        }
+
+        // 4.8 Focus mode: auto-expand the block nearest the viewport
+        // bottom (docs/tui-tool-display-fancy.md section 6). The "focus"
+        // is the last visible transcript line, in line space (the same
+        // space the block_spans indices use).
+        if app.tool_display().expand_mode == crate::tool_display::ExpandMode::Focus {
+            let focus_line = app
+                .transcript_visible_start()
+                .saturating_add(app.viewport_height().saturating_sub(1));
+            if let Some(nearest) = app.nearest_block_to_line(focus_line) {
+                let id = nearest.to_string();
+                app.set_focus_block(&id);
             }
         }
 
