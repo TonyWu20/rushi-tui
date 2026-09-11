@@ -2120,6 +2120,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ratatui-markdown"
+version = "0.3.6"
+source = "git+https://github.com/celestia-island/ratatui-markdown?rev=3a8bcbe605613dfad3f9c9714a749ab1d9666410#3a8bcbe605613dfad3f9c9714a749ab1d9666410"
+dependencies = [
+ "ratatui",
+ "unicode-width",
+]
+
+[[package]]
 name = "ratatui-termina"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3071,6 +3080,7 @@ dependencies = [
  "notify-debouncer-mini",
  "ratatui",
  "ratatui-image",
+ "ratatui-markdown",
  "regex",
  "rushi-common",
  "serde",

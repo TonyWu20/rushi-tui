@@ -2580,8 +2580,21 @@ fn spawn_gen(
                     let _ = libc::dup2(devnull, 2);
                     let _ = libc::close(devnull);
                 }
-                for fd in [in_pipe[0], in_pipe[1], out_pipe[0], out_pipe[1]] {
-                    let _ = libc::close(fd);
+                // Close every inherited fd >= 3. The fork copied the whole
+                // host fd table, which includes the pipe fds the host
+                // holds for previously-spawned extensions. Leaving those
+                // open keeps each sibling's stdin pipe (and stdout pipe)
+                // alive after the host dies, so no extension ever sees
+                // EOF on its stdin and none can self-terminate. Closing
+                // them here makes every extension self-terminate when its
+                // host exits (docs/ui-extension.md section 7). The loop
+                // is libc-only: no heap, no locks (a post-fork allocation
+                // could deadlock on a copied futex).
+                let max_fd = libc::sysconf(libc::_SC_OPEN_MAX);
+                if max_fd > 0 {
+                    for fd in 3..max_fd {
+                        let _ = libc::close(fd as libc::c_int);
+                    }
                 }
                 let _ = libc::chdir(cwd_c.as_ptr());
                 libc::setenv(c"CONFIG".as_ptr(), config_c.as_ptr(), 1);

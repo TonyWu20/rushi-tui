@@ -288,6 +288,10 @@ pub enum Role {
     /// The light background of a failed tool-result box. pi
     /// `toolErrorBg`.
     ToolBoxBgError,
+    /// The tool name of a tool-result panel header: a purple accent
+    /// so the tool identity reads distinctly against the panel
+    /// background.
+    ToolName,
     /// The browse-mode visual selection shading (docs/tui-
     /// conversation-browsing.md section 11.4): a background tone
     /// distinct from the search-highlight tone (section 7.3).
@@ -342,6 +346,7 @@ impl Role {
         Role::ToolBoxBg,
         Role::ToolBoxBgSuccess,
         Role::ToolBoxBgError,
+        Role::ToolName,
         Role::Selection,
         Role::CursorLine,
     ];
@@ -396,6 +401,8 @@ impl Role {
             ToolBoxBg => Color::Rgb(0x28, 0x28, 0x32),
             ToolBoxBgSuccess => Color::Rgb(0x28, 0x32, 0x28),
             ToolBoxBgError => Color::Rgb(0x3c, 0x28, 0x28),
+            // The tool name in the box header: a purple accent.
+            ToolName => Color::Rgb(0xc6, 0xa0, 0xf6),
             // The cursorline background: a dark shade so the cursor
             // row is visible without overpowering text.
             CursorLine => Color::Rgb(0x1e, 0x20, 0x30),
@@ -455,6 +462,7 @@ impl Role {
             ToolBoxBg => "tool_box_bg",
             ToolBoxBgSuccess => "tool_box_bg_success",
             ToolBoxBgError => "tool_box_bg_error",
+            ToolName => "tool_name",
             Selection => "selection",
             CursorLine => "cursor_line",
         }
@@ -511,7 +519,7 @@ pub const SCHEME_CATPPUCCIN_MACCHIATO: &str = "catppuccin macchiato";
 /// internal scheme.
 pub fn catppuccin_macchiato() -> std::collections::HashMap<Role, &'static str> {
     use Role::*;
-    let pairs: [(Role, &str); 42] = [
+    let pairs: [(Role, &str); 43] = [
         (PlainText, "#cad3f5"),
         (ToolOutput, "#cad3f5"),
         (ToolCommand, "#c6a0f6"),
@@ -552,6 +560,7 @@ pub fn catppuccin_macchiato() -> std::collections::HashMap<Role, &'static str> {
         (ToolBoxBg, "#363a4f"),
         (ToolBoxBgSuccess, "#363a4f"),
         (ToolBoxBgError, "#363a4f"),
+        (ToolName, "#c6a0f6"),
         (Selection, "#5b6078"),
         (CursorLine, "#1e2030"),
     ];

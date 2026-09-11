@@ -261,8 +261,26 @@ macchiato` as the first internal color scheme. Shipped in
       Tests: `stream_pacing_*`, `clear_stream_drops_the_pace_queue`.
       Note: both changes are binary-side; the running TUI must be restarted
       (rebuild `target/release/tui`) to pick them up.
-- [ ] Remove `assistant`, `user`, `tool:xxx` markers. Remove the indent of
-      messages. Wrap the user message with the same box used for tool results.
+- [x] Remove `assistant`, `tool:xxx` markers. Remove the indent of assistant and
+      user messages. Wrap the user message with the same color background of tool
+      results, and
+      a `Block::bordered().border_type(BorderType::Rounded).title("User")` block.
+      Shipped in the 2026-09-14 pass. The `user_message` body now renders in a
+      rounded bordered panel (`render.rs` `user_box_rows`). The panel is titled
+      `User` and sits on the tool-result panel background. It uses
+      `tool_display::box_bg`, the `ToolBoxBgSuccess` role. The panel spans
+      the transcript width. The border and title read in the accent tone.
+      The `user` marker and the 12-column content gutter are gone. The panel
+      interior and the assistant body start at the left edge. The
+      `assistant` marker is dropped too. The optional `(n tool calls)` count
+      still notes the actions that follow. The live stream block header drops
+      the `assistant` marker as well. The `tool:` prefix was already gone with
+      the 2026-09-14 tool-name pass. It now shows the bare purple
+      `tool_name` role.
+      Tests: `user_box_tests` (`user_box_has_title_and_background`,
+      `empty_user_box_is_three_rows`,
+      `assistant_message_has_no_marker_or_gutter`). The layout snapshots were
+      regenerated.
 - [ ] When in browse mode, updates from model response should not flush the
       screen to the latest position of the conversation.
 - [x] The `@` picker respects `.gitignore` by default, but sometimes the
@@ -289,7 +307,7 @@ macchiato` as the first internal color scheme. Shipped in
 
 - [ ] Bug: `tool:edit` results always show `diff +0 -0`. Evidence session:
       `sessions/goal-ux-impl`
-- [ ] `tool:edit` shows diff in vertica split when terminal is wide, horizontal
+- [ ] `tool:edit` shows diff in vertical split when terminal is wide, horizontal
       split when terminal is narrow.
 - [ ] Bug: the input box does not highlight the whole visual
       selection. In `VISUAL` / `V-LINE` the draft shows only the
@@ -301,3 +319,58 @@ macchiato` as the first internal color scheme. Shipped in
       (char-visual spans its chars across wrapped display rows;
       line-visual shades whole display rows), and add a test. Not
       shipped.
+
+## New requests (2026-09-14)
+
+- [x] Show the tool name of a tool-result panel in a purple, bold
+      font, and drop the white border lines around the panel; the
+      `tool:<name>` title prefix is omitted (the name stands alone).
+      Shipped in the 2026-09-14 pass: the panel is the lighter
+      background only (no `┌─┐│└─┘` border runs); its header row
+      names the tool in the new purple `tool_name` color role,
+      bold, followed by the result status. Detail:
+      `docs/tui-tool-display-port.md` (section 4, the box, and P1).
+- [x] Follow-up (2026-09-14): add one background-filled margin row
+      above the panel header and one below the last body row. The
+      result panel reads as a lighter band with breathing room. The
+      body height budget is `height-1`. The two freed border rows
+      become the top and bottom margins. Shipped: `box_rows` emits a
+      top margin row, the header row, the body rows, and a bottom
+      margin row.
+- [x] Follow-up (2026-09-14): no `tool:` prefix on external tool
+      calls. The raw `tool:<name> {json}` call line is replaced.
+      Shipped: the `tool_call` line shows the bare name in the
+      purple `tool_name` role. The goal tools get compact labels
+      (the `summary` or `reason` argument). They merge into the
+      result panel when the result follows. The raw JSON call line
+      no longer appears.
+- [x] Follow-up (2026-09-14): the tool-result panel spans the full
+      transcript width. Shipped: the transcript now uses the full
+      layout-cell width. The panel reaches the right edge. A stale
+      two-column reservation from the bordered-box era left a dead
+      column on the right. The position bar still owns its own
+      rightmost column when shown.
+- [x] Follow-up (2026-09-14): the tool-result panel header shows what
+      the tool acted on, after the tool name. The `read` result names
+      the file path it read. A goal result shows its summary or
+      reason. The redundant `ok` status word is dropped. The panel
+      background color already signals the outcome. Shipped: the
+      `ToolResult` pass passes the compact label to `box_rows` after
+      the name. `result_status` returns empty on success. A new
+      snapshot `snap_tool_result_read_shows_path_in_header` pins the
+      path in the header.
+- [x] Follow-up (2026-09-14): dropped the compact tool labels
+       outright. Hard-coding a tool's argument shape in the kernel is a
+       red flag, so `compact_tool_label` is removed: the `tool_call`
+       line shows the bare name plus the truncated raw args JSON
+       (still the yank source, no `tool:` prefix) and the tool-result
+       panel header is the bare tool name. The `goal_complete`/
+       `goal_blocked` labels (from `rushi-exts/goal-app`, not the
+       kernel) and the `list`/`find` arms are gone, and the orphaned
+       `search`/`list` display stack went with them (`SearchMode`,
+       `ToolDisplay.search_mode`, the `search` `[tui.tool_display]`
+       key; `list` was the only caller) along with the `list` arm in
+       the JSON-detection `known` match. The snapshot was renamed to
+       `snap_tool_result_read_bare_name_header` and regenerated; the
+       31 layout snapshots were regenerated against the new top-only
+       session frame.
