@@ -14,6 +14,7 @@
 
 use std::collections::HashSet;
 
+use base64::Engine;
 use regex::Regex;
 
 use crate::app::Key;
@@ -23,8 +24,9 @@ use crate::app::Key;
 pub const SCROLLOFF: usize = 3;
 /// The count cap of the key table (section 4.4).
 pub const COUNT_CAP: u32 = 99_999;
-/// The one-line status hint of the key table (section 4.4).
-pub const BROWSE_HINT: &str = "browse: gg top, G end, :N line, ss leave";
+/// The one-line status hint of the key table (section 4.4, the
+/// section 11.4 growth: the select-and-yank rows).
+pub const BROWSE_HINT: &str = "browse: v select, y yank, yy lines, yw word, b back, ss leave";
 
 /// One search direction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,6 +56,17 @@ pub enum Typing {
         /// jumps from here, not from the live cursor.
         origin: (usize, usize),
     },
+}
+
+/// The visual selection of browse mode (docs/tui-conversation-
+/// browsing.md section 11.4): the anchor pins at the entry or a
+/// swap (`o` / `O`); the active end is the cursor itself, and `y`
+/// yanks the span between the two.
+struct VisualSel {
+    anchor: (usize, usize),
+    /// A `V` entry (linewise visual): the span shades whole display
+    /// rows and yanks whole lines.
+    linewise: bool,
 }
 
 /// The outcome of one command-line key.
@@ -105,7 +118,7 @@ impl Default for Search {
 /// `line` is a zero-based transcript line index, `col` a zero-based
 /// character position within that line. Every move clamps `col` to
 /// the line length (section 4.1).
-#[derive(Default)]
+
 pub struct Browse {
     active: bool,
     /// Entry is pending a render pass: the cursor lands on the first
@@ -129,6 +142,58 @@ pub struct Browse {
     saved_view: Option<SavedView>,
     last_total: usize,
     last_h: usize,
+    /// The visual selection (section 11.4): `None` outside visual /
+    /// linewise visual.
+    visual: Option<VisualSel>,
+    /// The register target of the next yank (section 11.4): the
+    /// unnamed `"` by default; the `"` prefix retargets it.
+    yank_reg: char,
+    /// Awaiting the register char after the `"` key.
+    reg_prefix: bool,
+    /// The pending `y` operator of the normal state (section 11.4):
+    /// a motion or a text object follows.
+    yank_pending: bool,
+    /// The count captured when the `y` opened (`3y` opens with 3):
+    /// the doubled form multiplies it into the line count (the
+    /// editor's `pending_operator_count` rule).
+    yank_op_count: u32,
+    /// The pending text object prefix (`i` / `a` after `y`).
+    obj_prefix: Option<char>,
+    /// The OSC 52 host-clipboard write of the last yank that reached
+    /// the host clipboard (section 11.3): the full escape, drained
+    /// by the host before the next frame.
+    host_clipboard: Option<String>,
+    /// The `[tui] clipboard = "unnamed"` flag (section 11.3): a bare
+    /// unnamed yank also reaches the host clipboard.
+    clipboard_unnamed: bool,
+}
+
+impl Default for Browse {
+    fn default() -> Self {
+        Self {
+            active: false,
+            pending_entry: false,
+            line: 0,
+            col: 0,
+            pending: 0,
+            has_count: false,
+            pending_g: false,
+            typing: None,
+            search: Search::default(),
+            last_move: None,
+            saved_view: None,
+            last_total: 0,
+            last_h: 0,
+            visual: None,
+            yank_reg: '"',
+            reg_prefix: false,
+            yank_pending: false,
+            yank_op_count: 0,
+            obj_prefix: None,
+            host_clipboard: None,
+            clipboard_unnamed: false,
+        }
+    }
 }
 
 /// The view the browse handler moves: the rendered transcript, its
@@ -145,6 +210,12 @@ pub struct View<'a> {
     /// The rendered transcript line texts, oldest first. Search runs
     /// over these; the renderer builds them each frame.
     pub texts: &'a [String],
+    /// The per-line raw source text (section 11.3): `line_raw[i]` is
+    /// the shareable source for rendered line `i` (`None` on
+    /// separators, UI chrome, and wrapped continuations). A yank
+    /// collects the non-`None` entries in the range.
+    /// Empty when unavailable (synthetic test layouts).
+    pub line_raw: &'a [Option<String>],
 }
 
 impl Browse {
@@ -159,6 +230,31 @@ impl Browse {
     /// The cursor in transcript coordinates, `(line, col)`.
     pub fn line_col(&self) -> (usize, usize) {
         (self.line, self.col)
+    }
+
+    /// The active visual selection (section 11.4, the renderer's
+    /// input): `(anchor, active_end, linewise)`, transcript
+    /// coordinates. The active end is the cursor; `None` outside
+    /// visual / linewise visual.
+    pub fn visual_selection(&self) -> Option<((usize, usize), (usize, usize), bool)> {
+        self.visual
+            .as_ref()
+            .map(|s| (s.anchor, (self.line, self.col), s.linewise))
+    }
+
+    /// The `[tui] clipboard = "unnamed"` flag (section 11.3): set at
+    /// config load; a bare unnamed yank then also emits the OSC 52
+    /// host-clipboard write.
+    pub fn set_clipboard_unnamed(&mut self, on: bool) {
+        self.clipboard_unnamed = on;
+    }
+
+    /// The OSC 52 escape of the last yank that reached the host
+    /// clipboard (section 11.3), drained by the host before the next
+    /// frame. The yank itself always lands in the in-memory register
+    /// store; this is only the terminal side effect.
+    pub fn take_host_clipboard(&mut self) -> Option<String> {
+        self.host_clipboard.take()
     }
 
     /// The command-line prompt for the input box title
@@ -236,6 +332,12 @@ impl Browse {
         self.search.active_match = None;
         self.last_move = None;
         self.saved_view = None;
+        self.visual = None;
+        self.yank_reg = '"';
+        self.reg_prefix = false;
+        self.yank_pending = false;
+        self.yank_op_count = 0;
+        self.obj_prefix = None;
     }
 
     /// Leave browse mode: the view stays where browse put it
@@ -251,6 +353,15 @@ impl Browse {
         self.search.active_match = None;
         self.last_move = None;
         self.saved_view = None;
+        // The stage-3 state never survives leaving the mode (section
+        // 11.8): the selection and the pending yank operator clear;
+        // the register store lives on the host (section 11.3).
+        self.visual = None;
+        self.yank_reg = '"';
+        self.reg_prefix = false;
+        self.yank_pending = false;
+        self.yank_op_count = 0;
+        self.obj_prefix = None;
     }
 
     /// A session switch resets the browse state with the scroll
@@ -320,7 +431,14 @@ impl Browse {
     /// The host keys (`Ctrl+C` / `Ctrl+R` / the toggles / `Tab` /
     /// the quit gate) never reach here: the host routes them
     /// (`app.rs`), and the double-`s` exit arm is the host's too.
-    pub fn key(&mut self, key: Key, v: &mut View) -> Option<String> {
+    /// The `registers` store is the shared one from `App` (section
+    /// 11.3): a `y` here lands where the editor's `p` reads.
+    pub fn key(
+        &mut self,
+        key: Key,
+        v: &mut View,
+        registers: &mut std::collections::HashMap<char, crate::vim_editor::RegContent>,
+    ) -> Option<String> {
         if !self.active {
             return None;
         }
@@ -332,11 +450,11 @@ impl Browse {
                 // normal state, with the count cleared.
                 TypeKeyOutcome::Pass => {
                     self.pending = 0;
-                    return self.normal_key(key, v);
+                    return self.normal_key(key, v, registers);
                 }
             }
         }
-        self.normal_key(key, v)
+        self.normal_key(key, v, registers)
     }
 
     /// One key while the command line is open.
@@ -487,16 +605,185 @@ impl Browse {
         n
     }
 
+    // ── the select-and-yank plumbing (section 11) ─────────────────
+
+    /// Clear the pending yank operator state (the editor's
+    /// `resetOperatorState`, the yank subset).
+    fn cancel_yank(&mut self) {
+        self.yank_pending = false;
+        self.yank_op_count = 0;
+        self.obj_prefix = None;
+    }
+
+    /// The completed yank: the range text to the target register
+    /// (the editor's `yank_to_register` merge rule, section 11.3),
+    /// and the OSC 52 host-clipboard write when the target reaches
+    /// the host clipboard (the `+` / `*` register, or the unnamed
+    /// one under `[tui] clipboard = "unnamed"`). The operator state
+    /// clears either way.
+    fn complete_yank(
+        &mut self,
+        v: &View,
+        registers: &mut std::collections::HashMap<char, crate::vim_editor::RegContent>,
+        range: &crate::vim_editor::OpRange,
+    ) {
+        // The raw source text is preferred (section 11.3): it is the
+        // shareable markdown / command / output, not the rendered
+        // display lines. The line extent of the range maps to the
+        // events it covers; their raw texts are joined. When the view
+        // carries no raw mapping (a synthetic test layout) or the
+        // covered events have no shareable body, fall back to the
+        // rendered text.
+        let lo = range.start.0.min(range.end.0);
+        let hi = range.start.0.max(range.end.0);
+        let text = match Self::raw_yank_text(v, lo, hi) {
+            Some(raw) => raw,
+            None => crate::vim_editor::extract_text(v.texts, range),
+        };
+        let reg = self.yank_reg;
+        crate::vim_editor::yank_to_register(registers, reg, &text, range.linewise);
+        if reg == '+' || reg == '*' || (reg == '"' && self.clipboard_unnamed) {
+            self.host_clipboard = Some(host_clipboard_escape(&text));
+        }
+        self.cancel_yank();
+        self.yank_reg = '"';
+    }
+
+    /// The raw source text of the transcript line range `[lo, hi]`
+    /// (section 11.3): each rendered line carries its own shareable
+    /// source fragment (`line_raw`), so a word / line / partial-line
+    /// yank returns only the selected portion, never the whole event.
+    /// `None` when the view carries no raw mapping (synthetic test
+    /// layouts) or the covered lines have no shareable body.
+    fn raw_yank_text(v: &View, lo: usize, hi: usize) -> Option<String> {
+        if v.line_raw.is_empty() {
+            return None;
+        }
+        let hi = hi.min(v.line_raw.len().saturating_sub(1));
+        if lo > hi {
+            return None;
+        }
+        let raw: String = v.line_raw[lo..=hi]
+            .iter()
+            .filter_map(|o| o.as_deref())
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if raw.is_empty() {
+            None
+        } else {
+            Some(raw)
+        }
+    }
+
+    /// The yank motion keys (section 11.4): `y` + `j` / `k` / `h` /
+    /// `l` / `w` / `0` / `^` / `$` / `G`. The motions are the
+    /// editor's pi-vim primitives over the rendered lines
+    /// (section 11.5): `j` / `k` / `G` are the linewise forms, the
+    /// rest the char forms; `w` carries the `extend_w_eol`
+    /// extension; the operator count multiplies the motion count
+    /// (the editor `motion_count` rule).
+    fn yank_motion(
+        &mut self,
+        m: char,
+        v: &View,
+        registers: &mut std::collections::HashMap<char, crate::vim_editor::RegContent>,
+    ) {
+        let count_explicit = self.has_count;
+        let motion_count = self.yank_op_count.saturating_mul(self.motion_count());
+        if motion_count == 0 {
+            // A typed count of 0 is a no-op (section 4.4).
+            self.cancel_yank();
+            return;
+        }
+        let cursor = (self.line.min(v.total.saturating_sub(1)), self.col);
+        let range = browse_motion_range(v.texts, cursor, m, motion_count, count_explicit);
+        if let Some(range) = range {
+            self.complete_yank(v, registers, &range);
+            // The cursor is the motion target (the range end, ordered
+            // start <= end): `yw` lands at the word end, `y$` at the
+            // line end (section 11.4). A linewise yank parks at col 0.
+            self.line = range.end.0;
+            self.col = if range.linewise { 0 } else { range.end.1 };
+        }
+    }
+
+    /// The doubled operator (`yy` / `Y` / `<n>yy`): `n` whole lines
+    /// from the cursor line (the editor's `applyLinewiseOperator`).
+    fn yank_linewise(
+        &mut self,
+        v: &View,
+        registers: &mut std::collections::HashMap<char, crate::vim_editor::RegContent>,
+    ) {
+        let n = (self.yank_op_count.saturating_mul(self.motion_count())).max(1) as usize;
+        let last = v.total.saturating_sub(1);
+        let end_line = (self.line + n - 1).min(last);
+        let end_len = v.texts.get(end_line).map(|t| line_len(t)).unwrap_or(0);
+        let range = crate::vim_editor::OpRange {
+            start: (self.line, 0),
+            end: (end_line, end_len),
+            linewise: true,
+            inclusive: true,
+        };
+        self.complete_yank(v, registers, &range);
+        self.col = 0;
+    }
+
+    /// The visual yank range (section 11.4, the section 11.9 visual
+    /// yank row): a linewise selection — or a char selection that
+    /// spans lines — yanks whole lines (the linewise join); a
+    /// single-line char visual yanks the char span, inclusive.
+    fn visual_yank_range(
+        anchor: (usize, usize),
+        end: (usize, usize),
+        linewise: bool,
+    ) -> crate::vim_editor::OpRange {
+        let lo = anchor.0.min(end.0);
+        let hi = anchor.0.max(end.0);
+        if linewise || lo != hi {
+            crate::vim_editor::OpRange {
+                start: (lo, 0),
+                end: (hi, 0),
+                linewise: true,
+                inclusive: true,
+            }
+        } else {
+            let cs = anchor.1.min(end.1);
+            let ce = anchor.1.max(end.1);
+            crate::vim_editor::OpRange {
+                start: (lo, cs),
+                end: (hi, ce),
+                linewise: false,
+                inclusive: true,
+            }
+        }
+    }
+
     /// One key in the browse normal state (the command line closed).
-    fn normal_key(&mut self, key: Key, v: &mut View) -> Option<String> {
+    fn normal_key(
+        &mut self,
+        key: Key,
+        v: &mut View,
+        registers: &mut std::collections::HashMap<char, crate::vim_editor::RegContent>,
+    ) -> Option<String> {
         match key {
-            Key::Char(c) => self.char_key(c, v),
+            Key::Char(c) => self.char_key(c, v, registers),
             Key::Esc => {
-                // Cancel a pending count; clear the active search
-                // highlight; never leave browse mode (section 4.4).
+                // A visual cancel (section 11.4): no register write,
+                // the cursor returns to the anchor. Then the section
+                // 4.4 Esc role: cancel a pending count, clear the
+                // active search highlight; never leave browse mode.
+                if let Some(sel) = self.visual.take() {
+                    self.line = sel.anchor.0;
+                    self.col = sel.anchor.1;
+                }
                 self.pending = 0;
                 self.has_count = false;
                 self.pending_g = false;
+                self.yank_pending = false;
+                self.yank_op_count = 0;
+                self.obj_prefix = None;
+                self.reg_prefix = false;
                 self.search.active = false;
                 self.search.active_match = None;
                 None
@@ -523,8 +810,95 @@ impl Browse {
         }
     }
 
-    /// The character keys of the normal state.
-    fn char_key(&mut self, c: char, v: &mut View) -> Option<String> {
+    /// The character keys of the browse state: the section 4.4
+    /// motions, the section 11.4 select-and-yank rows, and the
+    /// operator-pending / visual sub-states.
+    fn char_key(
+        &mut self,
+        c: char,
+        v: &mut View,
+        registers: &mut std::collections::HashMap<char, crate::vim_editor::RegContent>,
+    ) -> Option<String> {
+        // The `"` register prefix (the editor rule, section 11.4):
+        // the next key retargets the yank; an invalid register char
+        // cancels and re-dispatches the key.
+        if self.reg_prefix {
+            self.reg_prefix = false;
+            if crate::vim_editor::is_valid_register(c) {
+                self.yank_reg = c;
+                return None;
+            }
+        }
+        // The pending text object key (after `i` / `a`): the object
+        // char completes the yank; an unmatched object is a no-op
+        // with the hint that names it (section 11.8); an unrelated
+        // key cancels the operator and re-dispatches (the vim rule:
+        // `yij` cancels the yank and moves the cursor).
+        if let Some(prefix) = self.obj_prefix.take() {
+            if let Some(obj) = crate::vim_editor::resolve_text_object(prefix, c) {
+                let cursor = (self.line, self.col);
+                match obj(v.texts, cursor) {
+                    Some(range) => {
+                        self.complete_yank(
+                            v,
+                            registers,
+                            &crate::vim_editor::text_object_to_range(&range),
+                        );
+                        return None;
+                    }
+                    None => {
+                        self.cancel_yank();
+                        return Some(format!("unmatched {prefix}{c} text object"));
+                    }
+                }
+            }
+            // Not an object char: cancel the pending yank and fall
+            // through to the key's normal browse role below.
+            self.cancel_yank();
+        }
+        // The pending `y` operator (section 11.4): the key is a
+        // motion, the doubled `y` / `Y`, a text-object prefix, the
+        // `"` register retarget, or the motion count digits (the
+        // vim `y3w` rule).
+        if self.yank_pending {
+            match c {
+                'y' | 'Y' => {
+                    self.yank_linewise(v, registers);
+                    return None;
+                }
+                c @ 'i' | c @ 'a' => {
+                    self.obj_prefix = Some(c);
+                    return None;
+                }
+                '"' => {
+                    // The register retarget mid-operator (the editor
+                    // rule): the next key names the register; the
+                    // operator stays pending.
+                    self.reg_prefix = true;
+                    return None;
+                }
+                // The motion count digits between the operator and
+                // the motion (the vim `y3w` rule): a `0` is a count
+                // digit only once a count has started; a bare `0`
+                // is the line-start motion below.
+                d @ '0'..='9' if d != '0' || self.has_count => {
+                    self.pending =
+                        (self.pending * 10 + (d as u32 - '0' as u32)).min(COUNT_CAP);
+                    self.has_count = true;
+                    return None;
+                }
+                m @ 'j' | m @ 'k' | m @ 'h' | m @ 'l' | m @ 'w' | m @ 'b'
+                | m @ '0' | m @ '^' | m @ '$' | m @ 'G' => {
+                    self.yank_motion(m, v, registers);
+                    return None;
+                }
+                _ => {
+                    // An unrelated key cancels the operator and keeps
+                    // its browse role below.
+                    self.cancel_yank();
+                }
+            }
+        }
         if c.is_ascii_digit() {
             // Counts prefix the motions, capped at 99999. A count of
             // 0 is a no-op motion (section 4.4).
@@ -538,6 +912,11 @@ impl Browse {
                 if n > 0 && v.total > 0 {
                     self.line = (self.line + n).min(v.total - 1);
                     self.clamp_to_line(v);
+                    // Linewise visual parks at col 0 of the new line
+                    // (the vim `V` movement).
+                    if matches!(self.visual, Some(VisualSel { linewise: true, .. })) {
+                        self.col = 0;
+                    }
                     *v.scroll = follow_view(v.total, v.h, self.line, *v.scroll);
                 }
                 None
@@ -547,6 +926,9 @@ impl Browse {
                 if n > 0 && v.total > 0 {
                     self.line = self.line.saturating_sub(n);
                     self.clamp_to_line(v);
+                    if matches!(self.visual, Some(VisualSel { linewise: true, .. })) {
+                        self.col = 0;
+                    }
                     *v.scroll = follow_view(v.total, v.h, self.line, *v.scroll);
                 }
                 None
@@ -566,6 +948,67 @@ impl Browse {
                     let len = v.texts.get(self.line).map(|t| line_len(t)).unwrap_or(0);
                     self.col = (self.col + n).min(len);
                 }
+                None
+            }
+            'w' => {
+                // The word motion (section 11.4): it extends the
+                // visual selection and the `y` operator; a bare `w`
+                // moves the cursor to the next word start.
+                let n = self.motion_count() as usize;
+                if n > 0 && !v.texts.is_empty() {
+                    let cursor = (self.line.min(v.total - 1), self.col);
+                    let res = crate::vim_editor::word_forward(v.texts, cursor, n.max(1) as u32);
+                    self.line = res.pos.0;
+                    self.col = res.pos.1;
+                    self.clamp_to_line(v);
+                    // Linewise visual parks at col 0 of the new line
+                    // (the vim `V` movement).
+                    if matches!(self.visual, Some(VisualSel { linewise: true, .. })) {
+                        self.col = 0;
+                    }
+                }
+                None
+            }
+            'b' => {
+                // The word-backward motion (the mirror of `w`): it
+                // extends the visual selection and the `y` operator;
+                // a bare `b` moves the cursor to the previous word
+                // start.
+                let n = self.motion_count() as usize;
+                if n > 0 && !v.texts.is_empty() {
+                    let cursor = (self.line.min(v.total - 1), self.col);
+                    let res = crate::vim_editor::word_backward(v.texts, cursor, n.max(1) as u32);
+                    self.line = res.pos.0;
+                    self.col = res.pos.1;
+                    self.clamp_to_line(v);
+                    // Linewise visual parks at col 0 of the new line.
+                    if matches!(self.visual, Some(VisualSel { linewise: true, .. })) {
+                        self.col = 0;
+                    }
+                }
+                None
+            }
+            '0' | '^' => {
+                // The line start / the first non-blank char (section
+                // 11.4): the cursor move that extends the visual
+                // selection and the `y` operator.
+                if v.total > 0 {
+                    if c == '0' {
+                        self.col = 0;
+                    } else {
+                        let res =
+                            crate::vim_editor::first_nonblank_motion(v.texts, (self.line, self.col), 1);
+                        let len = v.texts.get(self.line).map(|t| line_len(t)).unwrap_or(0);
+                        self.col = res.pos.1.min(len);
+                    }
+                }
+                None
+            }
+            '$' => {
+                // The line end (section 11.4): the inclusive col,
+                // one past the last char at most (section 4.1).
+                let len = v.texts.get(self.line).map(|t| line_len(t)).unwrap_or(0);
+                self.col = len;
                 None
             }
             'g' => {
@@ -642,6 +1085,85 @@ impl Browse {
             }
             '#' => {
                 self.search_word(v, Dir::Backward);
+                None
+            }
+            // ── the select-and-yank rows (section 11.4) ──
+            '"' => {
+                // The register prefix: the next key is the register
+                // the next yank targets (the editor rule).
+                self.reg_prefix = true;
+                None
+            }
+            'v' => {
+                // Char-visual entry; in visual or linewise visual it
+                // toggles back to normal (the vim `v` toggle).
+                if self.visual.is_some() {
+                    self.visual = None;
+                } else {
+                    self.visual = Some(VisualSel {
+                        anchor: (self.line, self.col),
+                        linewise: false,
+                    });
+                }
+                None
+            }
+            'V' => {
+                // Linewise visual entry; the anchor holds the
+                // cursor line; toggles out of visual the same way.
+                if self.visual.is_some() {
+                    self.visual = None;
+                } else {
+                    self.visual = Some(VisualSel {
+                        anchor: (self.line, 0),
+                        linewise: true,
+                    });
+                    self.col = 0;
+                }
+                None
+            }
+            'o' | 'O' => {
+                // The anchor/active-end swap: the selection inverts
+                // around the cursor (the vim `o` / `O`).
+                if let Some(sel) = self.visual.as_mut() {
+                    let (l, c) = std::mem::replace(
+                        &mut sel.anchor,
+                        (self.line, self.col),
+                    );
+                    self.line = l;
+                    self.col = c;
+                    if sel.linewise {
+                        self.col = 0;
+                    }
+                }
+                None
+            }
+            'y' => {
+                if let Some(sel) = self.visual.take() {
+                    // The visual yank (section 11.4): the selection
+                    // to the register; leave visual; the cursor is
+                    // the selection end (the active end).
+                    let end = (self.line, self.col);
+                    let range = Self::visual_yank_range(sel.anchor, end, sel.linewise);
+                    self.complete_yank(v, registers, &range);
+                    // The cursor is the selection end; a linewise or
+                    // multi-line span parks at col 0.
+                    self.col = if range.linewise { 0 } else { range.end.1 };
+                } else {
+                    // Open the yank operator (section 11.4): the
+                    // count typed before the `y` is the operator
+                    // count (`3y...`; a bare `y` is 1), and a
+                    // motion or a text object follows.
+                    self.yank_pending = true;
+                    self.yank_op_count = if self.has_count {
+                        self.pending.max(1)
+                    } else {
+                        1
+                    };
+                    // The operator takes the count slot: the motion
+                    // count starts fresh (the editor's `y` rule).
+                    self.pending = 0;
+                    self.has_count = false;
+                }
                 None
             }
             _ => Some(BROWSE_HINT.to_string()),
@@ -839,6 +1361,115 @@ impl Browse {
 /// cursor col is a character position (section 4.1).
 fn line_len(t: &str) -> usize {
     t.chars().count()
+}
+
+/// The yank range of one browse motion key (section 11.4, the
+/// section 11.5 reuse): the editor's pi-vim motion primitives over
+/// the rendered lines. `j` / `k` / `G` are the linewise forms
+/// (the editor's `dj` / `dk` / `dG` ranges); the rest are the char
+/// forms, `w` carrying the `extend_w_eol` operator extension.
+/// `count` is the multiplied operator-motion count. `None` when the
+/// view is empty (an empty transcript is a no-op, section 11.8).
+pub(crate) fn browse_motion_range(
+    texts: &[String],
+    cursor: (usize, usize),
+    m: char,
+    count: u32,
+    count_explicit: bool,
+) -> Option<crate::vim_editor::OpRange> {
+    use crate::vim_editor as ve;
+    if texts.is_empty() {
+        return None;
+    }
+    let cursor = (cursor.0.min(texts.len() - 1), cursor.1);
+    let range = match m {
+        // `j` / `k` with an operator are linewise (the editor rule).
+        'j' => {
+            let n = count.max(1) as usize;
+            let end_line = (cursor.0 + n).min(texts.len() - 1);
+            ve::OpRange {
+                start: (cursor.0, 0),
+                end: (end_line, line_len(&texts[end_line])),
+                linewise: true,
+                inclusive: true,
+            }
+        }
+        'k' => {
+            let n = count.max(1) as usize;
+            let start_line = cursor.0.saturating_sub(n);
+            ve::OpRange {
+                start: (start_line, 0),
+                end: (cursor.0, line_len(&texts[cursor.0])),
+                linewise: true,
+                inclusive: true,
+            }
+        }
+        // `G` without an explicit count goes to the last line; with
+        // one, to line n (the editor's `G` rule).
+        'G' => {
+            let n = if count_explicit { count.max(1) } else { texts.len() as u32 };
+            let res = ve::go_to_last_line(texts, cursor, n);
+            ve::motion_to_range(cursor, &res)
+        }
+        'w' => {
+            let res = ve::word_forward(texts, cursor, count.max(1));
+            // The operator `w` rule: the `extend_w_eol` extension
+            // (the final word reaches the line end).
+            let res = ve::extend_w_eol(texts, cursor, res);
+            ve::motion_to_range(cursor, &res)
+        }
+        'b' => {
+            let res = ve::word_backward(texts, cursor, count.max(1));
+            ve::motion_to_range(cursor, &res)
+        }
+        '$' => {
+            let res = ve::line_end(texts, cursor, count.max(1));
+            ve::motion_to_range(cursor, &res)
+        }
+        '0' => {
+            let res = ve::line_start(texts, cursor, 1);
+            ve::motion_to_range(cursor, &res)
+        }
+        '^' => {
+            let res = ve::first_nonblank_motion(texts, cursor, 1);
+            ve::motion_to_range(cursor, &res)
+        }
+        'h' => {
+            let res = ve::char_left(texts, cursor, count.max(1));
+            ve::motion_to_range(cursor, &res)
+        }
+        'l' => {
+            // The operator `l` rule: inclusive, capped at the last
+            // char (the editor's `dl` deletes the char under the
+            // cursor; a `y` of it yanks the span).
+            let len = line_len(&texts[cursor.0]);
+            let target = if len == 0 {
+                0
+            } else {
+                (cursor.1.min(len - 1) + count.max(1) as usize).min(len - 1)
+            };
+            let res = ve::MotionResult {
+                pos: (cursor.0, target),
+                linewise: false,
+                inclusive: true,
+            };
+            ve::motion_to_range(cursor, &res)
+        }
+        _ => return None,
+    };
+    Some(range)
+}
+
+/// The OSC 52 host-clipboard escape (section 11.3):
+/// `\x1b]52;c;<base64>\x07`. The payload is the yanked text
+/// base64-encoded with the `base64` crate (the `bin/tui` direct
+/// dep, already transitive). The sequence passes through tmux and
+/// ssh to the terminal, where the host's clipboard manager picks it
+/// up; a terminal without OSC 52 support ignores it, and the
+/// in-memory register still serves the editor's `p`.
+pub(crate) fn host_clipboard_escape(text: &str) -> String {
+    let b64 = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
+    format!("\u{1b}]52;c;{b64}\u{7}")
 }
 
 /// The scrolloff view follow (section 4.5): the smallest scroll
@@ -1073,7 +1704,33 @@ mod tests {
             scroll,
             half: h.saturating_sub(1) / 2,
             texts,
+            line_raw: &[],
         }
+    }
+
+    /// A view wired to the raw-source yank (section 11.3): `texts` are
+    /// the rendered lines, `line_raw` the per-line raw source map.
+    fn v_raw<'a>(
+        texts: &'a [String],
+        line_raw: &'a [Option<String>],
+        h: usize,
+        scroll: &'a mut usize,
+    ) -> View<'a> {
+        View {
+            total: texts.len(),
+            h,
+            scroll,
+            half: h.saturating_sub(1) / 2,
+            texts,
+            line_raw,
+        }
+    }
+
+    /// A fresh throwaway register store (the section 11.3 shared
+    /// store, owned by the host in production; tests carry their
+    /// own).
+    fn regs() -> std::collections::HashMap<char, crate::vim_editor::RegContent> {
+        std::collections::HashMap::new()
     }
 
     /// A browse session on `total` lines, entered with the cursor on
@@ -1092,10 +1749,10 @@ mod tests {
         let mut scroll = 0usize;
         let mut b = entered(&texts, 24, &mut scroll);
         let mut view = v(&texts, 24, &mut scroll);
-        assert!(b.key(Key::Char(':'), &mut view).is_none());
-        assert!(b.key(Key::Char('4'), &mut view).is_none());
-        assert!(b.key(Key::Char('2'), &mut view).is_none());
-        assert!(b.key(Key::Enter, &mut view).is_none());
+        assert!(b.key(Key::Char(':'), &mut view, &mut regs()).is_none());
+        assert!(b.key(Key::Char('4'), &mut view, &mut regs()).is_none());
+        assert!(b.key(Key::Char('2'), &mut view, &mut regs()).is_none());
+        assert!(b.key(Key::Enter, &mut view, &mut regs()).is_none());
         assert_eq!(b.line_col().0, 41, ":42 lands on line 42");
     }
 
@@ -1105,11 +1762,11 @@ mod tests {
         let mut scroll = 0usize;
         let mut b = entered(&texts, 24, &mut scroll);
         let mut view = v(&texts, 24, &mut scroll);
-        assert!(b.key(Key::Char(':'), &mut view).is_none());
+        assert!(b.key(Key::Char(':'), &mut view, &mut regs()).is_none());
         for c in ['9', '9', '9'] {
-            b.key(Key::Char(c), &mut view);
+            b.key(Key::Char(c), &mut view, &mut regs());
         }
-        assert!(b.key(Key::Enter, &mut view).is_none());
+        assert!(b.key(Key::Enter, &mut view, &mut regs()).is_none());
         assert_eq!(b.line_col().0, 99, ":999 clamps to line 100");
     }
 
@@ -1120,9 +1777,9 @@ mod tests {
         let mut b = entered(&texts, 24, &mut scroll);
         let mut view = v(&texts, 24, &mut scroll);
         for c in [':', '4', '2', 'j'] {
-            b.key(Key::Char(c), &mut view);
+            b.key(Key::Char(c), &mut view, &mut regs());
         }
-        assert!(b.key(Key::Enter, &mut view).is_none());
+        assert!(b.key(Key::Enter, &mut view, &mut regs()).is_none());
         assert_eq!(b.line_col().0, 41, ":42j ignores the suffix");
     }
 
@@ -1134,9 +1791,9 @@ mod tests {
         let line0 = b.line_col().0;
         let mut view = v(&texts, 24, &mut scroll);
         for c in [':', '0'] {
-            b.key(Key::Char(c), &mut view);
+            b.key(Key::Char(c), &mut view, &mut regs());
         }
-        let hint = b.key(Key::Enter, &mut view);
+        let hint = b.key(Key::Enter, &mut view, &mut regs());
         assert_eq!(hint.as_deref(), Some("line: 1..100"), ":0 hints the range");
         assert_eq!(b.line_col().0, line0, ":0 moves nothing");
     }
@@ -1148,8 +1805,8 @@ mod tests {
         let mut b = entered(&texts, 24, &mut scroll);
         let line0 = b.line_col().0;
         let mut view = v(&texts, 24, &mut scroll);
-        b.key(Key::Char(':'), &mut view);
-        let hint = b.key(Key::Char('a'), &mut view);
+        b.key(Key::Char(':'), &mut view, &mut regs());
+        let hint = b.key(Key::Char('a'), &mut view, &mut regs());
         assert_eq!(hint.as_deref(), Some("line: 1..100"));
         assert_eq!(b.line_col().0, line0, "a non-number moves nothing");
     }
@@ -1160,11 +1817,11 @@ mod tests {
         let mut scroll = 0usize;
         let mut b = entered(&texts, 24, &mut scroll);
         let mut view = v(&texts, 24, &mut scroll);
-        b.key(Key::Char(':'), &mut view);
+        b.key(Key::Char(':'), &mut view, &mut regs());
         for c in ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'] {
-            b.key(Key::Char(c), &mut view);
+            b.key(Key::Char(c), &mut view, &mut regs());
         }
-        assert!(b.key(Key::Enter, &mut view).is_none());
+        assert!(b.key(Key::Enter, &mut view, &mut regs()).is_none());
         assert_eq!(b.line_col().0, 99, "a huge :N clamps to the last line");
     }
 
@@ -1176,7 +1833,7 @@ mod tests {
         let mut b = entered(&texts, 24, &mut scroll);
         b.line = 0;
         let mut view = v(&texts, 24, &mut scroll);
-        assert!(b.key(Key::Char('k'), &mut view).is_none());
+        assert!(b.key(Key::Char('k'), &mut view, &mut regs()).is_none());
         assert_eq!(b.line_col().0, 0, "the floor holds");
     }
 
@@ -1187,8 +1844,8 @@ mod tests {
         let mut b = entered(&texts, 24, &mut scroll);
         b.line = 2;
         let mut view = v(&texts, 24, &mut scroll);
-        b.key(Key::Char('5'), &mut view);
-        assert!(b.key(Key::Char('j'), &mut view).is_none());
+        b.key(Key::Char('5'), &mut view, &mut regs());
+        assert!(b.key(Key::Char('j'), &mut view, &mut regs()).is_none());
         assert_eq!(b.line_col().0, 7, "5j from line 3 lands on line 8");
     }
 
@@ -1199,8 +1856,8 @@ mod tests {
         let mut b = entered(&texts, 24, &mut scroll);
         b.line = 5;
         let mut view = v(&texts, 24, &mut scroll);
-        b.key(Key::Char('0'), &mut view);
-        assert!(b.key(Key::Char('j'), &mut view).is_none());
+        b.key(Key::Char('0'), &mut view, &mut regs());
+        assert!(b.key(Key::Char('j'), &mut view, &mut regs()).is_none());
         assert_eq!(b.line_col().0, 5, "0j does not move");
     }
 
@@ -1212,8 +1869,8 @@ mod tests {
         let mut b = entered(&texts, 24, &mut scroll);
         b.line = 39;
         let mut view = v(&texts, 24, &mut scroll);
-        b.key(Key::Char('g'), &mut view);
-        assert!(b.key(Key::Char('g'), &mut view).is_none());
+        b.key(Key::Char('g'), &mut view, &mut regs());
+        assert!(b.key(Key::Char('g'), &mut view, &mut regs()).is_none());
         assert_eq!(b.line_col().0, 0, "gg lands on line 1");
         assert_eq!(scroll, 76, "the view is at the top (the scroll covers the log)");
     }
@@ -1225,9 +1882,9 @@ mod tests {
         let mut b = entered(&texts, 24, &mut scroll);
         b.line = 39;
         let mut view = v(&texts, 24, &mut scroll);
-        b.key(Key::Char('5'), &mut view);
-        b.key(Key::Char('g'), &mut view);
-        assert!(b.key(Key::Char('g'), &mut view).is_none());
+        b.key(Key::Char('5'), &mut view, &mut regs());
+        b.key(Key::Char('g'), &mut view, &mut regs());
+        assert!(b.key(Key::Char('g'), &mut view, &mut regs()).is_none());
         assert_eq!(b.line_col().0, 4, "5gg lands on line 5");
     }
 
@@ -1238,7 +1895,7 @@ mod tests {
         let mut b = entered(&texts, 24, &mut scroll);
         b.line = 39;
         let mut view = v(&texts, 24, &mut scroll);
-        assert!(b.key(Key::Char('G'), &mut view).is_none());
+        assert!(b.key(Key::Char('G'), &mut view, &mut regs()).is_none());
         assert_eq!(b.line_col().0, 99, "G lands on the last line");
         assert_eq!(scroll, 0, "the view is at the tail");
     }
@@ -1251,7 +1908,7 @@ mod tests {
         let mut b = entered(&texts, 24, &mut scroll);
         let start = b.line_col();
         let mut view = v(&texts, 24, &mut scroll);
-        let hint = b.key(Key::Char('x'), &mut view);
+        let hint = b.key(Key::Char('x'), &mut view, &mut regs());
         assert_eq!(hint.as_deref(), Some(BROWSE_HINT));
         assert_eq!(b.line_col(), start, "no state change");
     }
@@ -1266,7 +1923,7 @@ mod tests {
         let start = 100 - 50 - 24;
         b.line = start;
         let mut view = v(&texts, 24, &mut scroll);
-        assert!(b.key(Key::CtrlU, &mut view).is_none());
+        assert!(b.key(Key::CtrlU, &mut view, &mut regs()).is_none());
         assert_eq!(scroll, 50 + 11, "the view moves up half a page");
         let new_start = 100 - scroll - 24;
         assert_eq!(b.line_col().0, new_start, "the cursor lands on the new top line");
@@ -1280,7 +1937,7 @@ mod tests {
         // The cursor sits on the view top line (start = 26).
         b.line = 100 - 50 - 24;
         let mut view = v(&texts, 24, &mut scroll);
-        assert!(b.key(Key::CtrlD, &mut view).is_none());
+        assert!(b.key(Key::CtrlD, &mut view, &mut regs()).is_none());
         assert_eq!(scroll, 50 - 11, "the view moves down half a page");
         let new_start = 100usize.saturating_sub(scroll + 24);
         let new_bottom = new_start + 23;
@@ -1300,7 +1957,7 @@ mod tests {
         // the bottom (the bottom margin holds 1 line: violated).
         b.line = 100 - 50 - 24 + 21;
         let mut view = v(&texts, 24, &mut scroll);
-        assert!(b.key(Key::Char('j'), &mut view).is_none());
+        assert!(b.key(Key::Char('j'), &mut view, &mut regs()).is_none());
         assert_eq!(
             b.line_col().0,
             100 - 50 - 24 + 22,
@@ -1394,15 +2051,15 @@ mod tests {
         let mut scroll = 0usize;
         let mut b = entered(&texts, 24, &mut scroll);
         let mut view = v(&texts, 24, &mut scroll);
-        b.key(Key::Char('/'), &mut view);
+        b.key(Key::Char('/'), &mut view, &mut regs());
         // `incsearch`: the first `e` already lands on the match.
-        b.key(Key::Char('e'), &mut view);
+        b.key(Key::Char('e'), &mut view, &mut regs());
         assert_eq!(b.line_col().0, 1, "the live jump lands on the first match");
         for c in ['r', 'r', 'o'] {
-            b.key(Key::Char(c), &mut view);
+            b.key(Key::Char(c), &mut view, &mut regs());
         }
         assert_eq!(b.line_col().0, 1, "the pattern keeps matching");
-        assert!(b.key(Key::Enter, &mut view).is_none());
+        assert!(b.key(Key::Enter, &mut view, &mut regs()).is_none());
         let (hl, active) = b.highlight_lines(4, &texts);
         assert!(hl.contains(&1) && hl.contains(&3), "both match lines highlight");
         assert_eq!(active, Some((1, 0)), "the current match is the accent line");
@@ -1414,11 +2071,11 @@ mod tests {
         let mut scroll = 0usize;
         let mut b = entered(&texts, 24, &mut scroll);
         let mut view = v(&texts, 24, &mut scroll);
-        b.key(Key::Char('/'), &mut view);
+        b.key(Key::Char('/'), &mut view, &mut regs());
         for c in ['E', 'R', 'R'] {
-            b.key(Key::Char(c), &mut view);
+            b.key(Key::Char(c), &mut view, &mut regs());
         }
-        assert!(b.key(Key::Enter, &mut view).is_none());
+        assert!(b.key(Key::Enter, &mut view, &mut regs()).is_none());
         let (hl, _) = b.highlight_lines(3, &texts);
         assert_eq!(*hl, HashSet::from([1]), "only ERR matches");
     }
@@ -1429,11 +2086,11 @@ mod tests {
         let mut scroll = 0usize;
         let mut b = entered(&texts, 24, &mut scroll);
         let mut view = v(&texts, 24, &mut scroll);
-        b.key(Key::Char('/'), &mut view);
+        b.key(Key::Char('/'), &mut view, &mut regs());
         for c in ['e', 'r', 'r'] {
-            b.key(Key::Char(c), &mut view);
+            b.key(Key::Char(c), &mut view, &mut regs());
         }
-        assert!(b.key(Key::Enter, &mut view).is_none());
+        assert!(b.key(Key::Enter, &mut view, &mut regs()).is_none());
         let (hl, _) = b.highlight_lines(3, &texts);
         assert_eq!(*hl, HashSet::from([0, 1, 2]), "case-blind matches all");
     }
@@ -1447,13 +2104,13 @@ mod tests {
         let mut scroll = 0usize;
         let mut b = entered(&texts, 24, &mut scroll);
         let mut view = v(&texts, 24, &mut scroll);
-        b.key(Key::Char('/'), &mut view);
-        b.key(Key::Char('m'), &mut view);
-        assert!(b.key(Key::Enter, &mut view).is_none());
+        b.key(Key::Char('/'), &mut view, &mut regs());
+        b.key(Key::Char('m'), &mut view, &mut regs());
+        assert!(b.key(Key::Enter, &mut view, &mut regs()).is_none());
         // The forward commit lands on the first match after the origin.
         assert_eq!(b.line_col().0, 30, "the commit jumps forward to the match");
         // The next match, forward: the wrap.
-        assert!(b.key(Key::Char('n'), &mut view).is_none());
+        assert!(b.key(Key::Char('n'), &mut view, &mut regs()).is_none());
         assert_eq!(b.line_col().0, 10, "n wraps to the earlier match");
     }
 
@@ -1466,13 +2123,13 @@ mod tests {
         let mut scroll = 0usize;
         let mut b = entered(&texts, 24, &mut scroll);
         let mut view = v(&texts, 24, &mut scroll);
-        b.key(Key::Char('/'), &mut view);
-        b.key(Key::Char('m'), &mut view);
-        assert!(b.key(Key::Enter, &mut view).is_none());
+        b.key(Key::Char('/'), &mut view, &mut regs());
+        b.key(Key::Char('m'), &mut view, &mut regs());
+        assert!(b.key(Key::Enter, &mut view, &mut regs()).is_none());
         let view_after_commit = *view.scroll;
-        assert!(b.key(Key::Char('n'), &mut view).is_none());
+        assert!(b.key(Key::Char('n'), &mut view, &mut regs()).is_none());
         assert_ne!(*view.scroll, view_after_commit, "the forward jump moved the view");
-        assert!(b.key(Key::Char('N'), &mut view).is_none());
+        assert!(b.key(Key::Char('N'), &mut view, &mut regs()).is_none());
         assert_eq!(
             *view.scroll,
             view_after_commit,
@@ -1487,18 +2144,18 @@ mod tests {
         let mut scroll = 0usize;
         let mut b = entered(&texts, 24, &mut scroll);
         let mut view = v(&texts, 24, &mut scroll);
-        b.key(Key::Char('/'), &mut view);
+        b.key(Key::Char('/'), &mut view, &mut regs());
         for c in ['f', 'o', 'o'] {
-            b.key(Key::Char(c), &mut view);
+            b.key(Key::Char(c), &mut view, &mut regs());
         }
-        assert!(b.key(Key::Enter, &mut view).is_none());
+        assert!(b.key(Key::Enter, &mut view, &mut regs()).is_none());
         // A new, invalid pattern: the last valid pattern stays
         // active, and a repeat still runs it.
-        b.key(Key::Char('/'), &mut view);
-        b.key(Key::Char('('), &mut view);
-        assert!(b.key(Key::Esc, &mut view).is_none());
+        b.key(Key::Char('/'), &mut view, &mut regs());
+        b.key(Key::Char('('), &mut view, &mut regs());
+        assert!(b.key(Key::Esc, &mut view, &mut regs()).is_none());
         assert_eq!(b.last_pattern(), Some("foo"), "the last valid pattern stays");
-        assert!(b.key(Key::Char('n'), &mut view).is_none());
+        assert!(b.key(Key::Char('n'), &mut view, &mut regs()).is_none());
         assert!(b.active_match().is_some(), "the repeat re-activates the match");
     }
 
@@ -1515,7 +2172,7 @@ mod tests {
         b.line = 0;
         b.col = 4; // on the `f`
         let mut view = v(&texts, 24, &mut scroll);
-        assert!(b.key(Key::Char('*'), &mut view).is_none());
+        assert!(b.key(Key::Char('*'), &mut view, &mut regs()).is_none());
         assert_eq!(b.line_col().0, 2, "* searches the escaped word forward");
     }
 
@@ -1525,10 +2182,10 @@ mod tests {
         let mut scroll = 0usize;
         let mut b = entered(&texts, 24, &mut scroll);
         let mut view = v(&texts, 24, &mut scroll);
-        b.key(Key::Char('/'), &mut view);
-        b.key(Key::Char('e'), &mut view);
-        assert!(b.key(Key::Enter, &mut view).is_none());
-        assert!(b.key(Key::Esc, &mut view).is_none());
+        b.key(Key::Char('/'), &mut view, &mut regs());
+        b.key(Key::Char('e'), &mut view, &mut regs());
+        assert!(b.key(Key::Enter, &mut view, &mut regs()).is_none());
+        assert!(b.key(Key::Esc, &mut view, &mut regs()).is_none());
         assert!(b.active(), "Esc never leaves browse mode");
         assert!(b.active_match().is_none(), "Esc clears the active highlight");
         assert_eq!(b.last_pattern(), Some("e"), "the pattern stays for a repeat");
@@ -1561,12 +2218,12 @@ mod tests {
         b.line = 0;
         b.col = 0;
         let mut view = v(&texts, 24, &mut scroll);
-        assert!(b.key(Key::Char('h'), &mut view).is_none());
+        assert!(b.key(Key::Char('h'), &mut view, &mut regs()).is_none());
         assert_eq!(b.col, 0, "`h` at col 0 moves nothing");
-        assert!(b.key(Key::Char('l'), &mut view).is_none());
+        assert!(b.key(Key::Char('l'), &mut view, &mut regs()).is_none());
         assert_eq!(b.col, 1);
         for _ in 0..10 {
-            b.key(Key::Char('l'), &mut view);
+            b.key(Key::Char('l'), &mut view, &mut regs());
         }
         assert_eq!(b.col, 3, "`l` clamps one past the last character");
     }
@@ -1602,5 +2259,519 @@ mod tests {
         let view = v(&texts, 16, &mut scroll);
         b.sync(100, 16, view.scroll, false);
         assert_eq!(*view.scroll, 48, "the view re-centers on the cursor");
+    }
+
+    // ── Contract 3: select-and-yank (section 11.9) ─────────────
+
+    /// Drive a run of browse keys against a shared register store.
+    fn press_seq(
+        b: &mut Browse,
+        keys: &[char],
+        view: &mut View,
+        regs: &mut std::collections::HashMap<char, crate::vim_editor::RegContent>,
+    ) {
+        for k in keys {
+            b.key(Key::Char(*k), view, regs);
+        }
+    }
+
+    fn reg_text(
+        regs: &std::collections::HashMap<char, crate::vim_editor::RegContent>,
+        c: char,
+    ) -> Option<String> {
+        regs.get(&c).map(|r| r.text.clone())
+    }
+
+    fn reg_lw(
+        regs: &std::collections::HashMap<char, crate::vim_editor::RegContent>,
+        c: char,
+    ) -> bool {
+        regs.get(&c).map(|r| r.linewise).unwrap_or(false)
+    }
+
+    // "y w: cursor in a word | the word text lands in the `\"`
+    // register; the cursor moves to the word end".
+    #[test]
+    fn y_w_yanks_the_word() {
+        let texts = vec!["alpha beta".to_string()];
+        let mut scroll = 0usize;
+        let mut b = entered(&texts, 24, &mut scroll);
+        b.line = 0;
+        b.col = 0;
+        let mut regs = regs();
+        let mut view = v(&texts, 24, &mut scroll);
+        press_seq(&mut b, &['y', 'w'], &mut view, &mut regs);
+        assert_eq!(reg_text(&regs, '"'), Some("alpha ".to_string()), "the word (plus its space) lands in the unnamed register");
+        assert!(!reg_lw(&regs, '"'), "a char yank is not linewise");
+        assert_eq!(b.line_col(), (0, 6), "the cursor moves to the word end");
+        assert!(!b.visual_selection().is_some(), "leaves visual off");
+    }
+
+    // "b in visual: cursor at end of second word | selection extends
+    // to the start of the previous word, yank returns the span".
+    #[test]
+    fn b_in_visual_extends_selection_backward() {
+        let texts = vec!["alpha beta gamma".to_string()];
+        let mut scroll = 0usize;
+        let mut b = entered(&texts, 24, &mut scroll);
+        b.line = 0;
+        b.col = 0;
+        let mut regs = regs();
+        let mut view = v(&texts, 24, &mut scroll);
+        // Enter visual mode, move forward two words to "gamma"
+        press_seq(&mut b, &['v', 'w', 'w'], &mut view, &mut regs);
+        assert!(b.visual_selection().is_some(), "visual is active");
+        // Now press b to go back one word
+        press_seq(&mut b, &['b'], &mut view, &mut regs);
+        let sel = b.visual_selection().unwrap();
+        assert!(sel.0 .1 < sel.1 .1, "b should have moved the active end left");
+    }
+
+    // "b in normal mode: cursor in the middle of a word moves back to
+    // the start of the previous word".
+    #[test]
+    fn b_moves_cursor_back_a_word_in_normal_mode() {
+        let texts = vec!["alpha beta gamma".to_string()];
+        let mut scroll = 0usize;
+        let mut b = entered(&texts, 24, &mut scroll);
+        b.line = 0;
+        b.col = 13; // somewhere in "gamma"
+        let mut regs = regs();
+        let mut view = v(&texts, 24, &mut scroll);
+        press_seq(&mut b, &['b'], &mut view, &mut regs);
+        // "gamma" starts at col 11 (after "alpha beta "), so b should
+        // move to col 11 (start of "gamma")
+        assert_eq!(b.line_col(), (0, 11), "b moves to start of previous word");
+    }
+
+    // "y b: cursor in a word | yanks from cursor back to previous word
+    // start".
+    #[test]
+    fn y_b_yanks_word_backward() {
+        let texts = vec!["alpha beta gamma".to_string()];
+        let mut scroll = 0usize;
+        let mut b = entered(&texts, 24, &mut scroll);
+        b.line = 0;
+        b.col = 13; // in "gamma"
+        let mut regs = regs();
+        let mut view = v(&texts, 24, &mut scroll);
+        press_seq(&mut b, &['y', 'b'], &mut view, &mut regs);
+        assert!(reg_text(&regs, '"').is_some(), "yb yanks text");
+        assert!(!reg_lw(&regs, '"'), "yb is char-wise, not linewise");
+    }
+
+    // "y $: cursor at col 2 | text from col 2 to end of line,
+    // inclusive".
+    #[test]
+    fn y_dollar_yanks_to_line_end() {
+        let texts = vec!["abcdef".to_string()];
+        let mut scroll = 0usize;
+        let mut b = entered(&texts, 24, &mut scroll);
+        b.line = 0;
+        b.col = 2;
+        let mut regs = regs();
+        let mut view = v(&texts, 24, &mut scroll);
+        press_seq(&mut b, &['y', '$'], &mut view, &mut regs);
+        assert_eq!(reg_text(&regs, '"'), Some("cdef".to_string()), "col 2 to line end, inclusive");
+    }
+
+    // "y G: cursor on line 3 of 10 | lines 3..10 in the register,
+    // linewise".
+    #[test]
+    fn yank_to_last_line_linewise() {
+        let texts = lines(10);
+        let mut scroll = 0usize;
+        let mut b = entered(&texts, 24, &mut scroll);
+        b.line = 2;
+        b.col = 0;
+        let mut regs = regs();
+        let mut view = v(&texts, 24, &mut scroll);
+        press_seq(&mut b, &['y', 'G'], &mut view, &mut regs);
+        let expected = (2..10)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(reg_text(&regs, '"'), Some(expected), "lines 3..10 joined");
+        assert!(reg_lw(&regs, '"'), "linewise");
+    }
+
+    // "<n>yy / Y: cursor on line 2 of 10 | lines 2..4 in the
+    // register, linewise".
+    #[test]
+    fn counted_yy_yanks_n_lines() {
+        let texts = lines(10);
+        let mut scroll = 0usize;
+        let mut b = entered(&texts, 24, &mut scroll);
+        b.line = 1;
+        b.col = 0;
+        let mut regs = regs();
+        let mut view = v(&texts, 24, &mut scroll);
+        press_seq(&mut b, &['3', 'y', 'y'], &mut view, &mut regs);
+        let expected = (1..=3)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(reg_text(&regs, '"'), Some(expected), "lines 2..4 joined");
+        assert!(reg_lw(&regs, '"'), "linewise");
+    }
+
+    // "y i <object>: cursor in a quoted span | the inside, without
+    // the quotes".
+    #[test]
+    fn y_i_quote_yanks_inside() {
+        let texts = vec!["say \"hello world\" now".to_string()];
+        let mut scroll = 0usize;
+        let mut b = entered(&texts, 24, &mut scroll);
+        b.line = 0;
+        b.col = 6;
+        let mut regs = regs();
+        let mut view = v(&texts, 24, &mut scroll);
+        press_seq(&mut b, &['y', 'i', '"'], &mut view, &mut regs);
+        assert_eq!(reg_text(&regs, '"'), Some("hello world".to_string()), "inside, without the quotes");
+    }
+
+    // "y a <object>: cursor in a paren span | span plus the two
+    // parens".
+    #[test]
+    fn y_a_paren_yanks_around() {
+        let texts = vec!["f(x + y) is fine".to_string()];
+        let mut scroll = 0usize;
+        let mut b = entered(&texts, 24, &mut scroll);
+        b.line = 0;
+        b.col = 4;
+        let mut regs = regs();
+        let mut view = v(&texts, 24, &mut scroll);
+        press_seq(&mut b, &['y', 'a', '('], &mut view, &mut regs);
+        assert_eq!(
+            reg_text(&regs, '"'),
+            Some("(x + y)".to_string()),
+            "span plus the two parens"
+        );
+    }
+
+    // "visual yank | `v` `j` `j` `y` | the three lines in the
+    // register (the linewise join)".
+    #[test]
+    fn visual_yank_joins_lines() {
+        let texts = lines(5);
+        let mut scroll = 0usize;
+        let mut b = entered(&texts, 24, &mut scroll);
+        b.line = 0;
+        b.col = 0;
+        let mut regs = regs();
+        let mut view = v(&texts, 24, &mut scroll);
+        press_seq(&mut b, &['v', 'j', 'j', 'y'], &mut view, &mut regs);
+        let expected = (0..=2)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(reg_text(&regs, '"'), Some(expected), "the three lines joined");
+        assert!(reg_lw(&regs, '"'), "a multi-line visual yank is linewise");
+        assert!(b.visual_selection().is_none(), "left visual");
+    }
+
+    // "raw-source yank | yy over a user-message line with a raw map
+    // | the register holds only the raw source for that specific
+    // rendered line, not the entire event" (section 11.3).
+    #[test]
+    fn raw_yank_returns_source_not_rendered_text() {
+        let texts: Vec<String> = vec![
+            "    1  # Title".to_string(),
+            "    2  - a **bold** item".to_string(),
+            "    3  ".to_string(),
+            "    4  > out line 1".to_string(),
+            "    5  > out line 2".to_string(),
+        ];
+        let line_raw: Vec<Option<String>> = vec![
+            Some("# Title".to_string()),
+            Some("- a **bold** item".to_string()),
+            None, // separator
+            Some("out line 1\nout line 2".to_string()),
+            None, // continuation line of tool result
+        ];
+
+        // yy on line 0 (user message first line): only that line's raw
+        let mut scroll = 0usize;
+        let mut b = entered(&texts, 24, &mut scroll);
+        b.line = 0;
+        b.col = 0;
+        let mut regs1 = regs();
+        let mut view = v_raw(&texts, &line_raw, 24, &mut scroll);
+        press_seq(&mut b, &['y', 'y'], &mut view, &mut regs1);
+        assert_eq!(
+            reg_text(&regs1, '"'),
+            Some("# Title".to_string()),
+            "the yy of a user-message line returns only that line's raw source"
+        );
+
+        // A linewise range across the two events joins the raw sources
+        // in log order.
+        let mut scroll = 0usize;
+        let mut b = entered(&texts, 24, &mut scroll);
+        b.line = 0;
+        b.col = 0;
+        let mut regs2 = regs();
+        let mut view = v_raw(&texts, &line_raw, 24, &mut scroll);
+        press_seq(&mut b, &['5', 'y', 'y'], &mut view, &mut regs2);
+        assert_eq!(
+            reg_text(&regs2, '"'),
+            Some("# Title\n- a **bold** item\nout line 1\nout line 2".to_string()),
+            "a full-range yank joins the raw sources of the covered lines"
+        );
+    }
+
+    // "raw-source fallback | a view without a raw map | the yank
+    // falls back to the rendered text (the pre-11.3 behaviour, kept
+    // for synthetic layouts)".
+    #[test]
+    fn yank_without_raw_map_falls_back_to_rendered_text() {
+        let texts: Vec<String> = vec!["    1  # Title".to_string()];
+        let mut scroll = 0usize;
+        let mut b = entered(&texts, 24, &mut scroll);
+        b.line = 0;
+        b.col = 0;
+        let mut regs = regs();
+        let mut view = v(&texts, 24, &mut scroll);
+        press_seq(&mut b, &['y', 'y'], &mut view, &mut regs);
+        assert_eq!(
+            reg_text(&regs, '"'),
+            Some("    1  # Title".to_string()),
+            "no raw map: the rendered line text is used"
+        );
+    }
+
+    // "linewise visual | `V` `j` `j` `y` | the whole lines, the
+    // register marked linewise".
+    #[test]
+    fn linewise_visual_yank() {
+        let texts = lines(5);
+        let mut scroll = 0usize;
+        let mut b = entered(&texts, 24, &mut scroll);
+        b.line = 1;
+        b.col = 3;
+        let mut regs = regs();
+        let mut view = v(&texts, 24, &mut scroll);
+        press_seq(&mut b, &['V', 'j', 'j', 'y'], &mut view, &mut regs);
+        let expected = (1..=3)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(reg_text(&regs, '"'), Some(expected), "whole lines joined");
+        assert!(reg_lw(&regs, '"'), "the register is marked linewise");
+    }
+
+    // "visual cancel | `v` `j` `Esc` | no register write; the
+    // cursor is the anchor".
+    #[test]
+    fn visual_cancel_is_a_no_op() {
+        let texts = lines(5);
+        let mut scroll = 0usize;
+        let mut b = entered(&texts, 24, &mut scroll);
+        b.line = 0;
+        b.col = 0;
+        let mut regs = regs();
+        let mut view = v(&texts, 24, &mut scroll);
+        press_seq(&mut b, &['v', 'j'], &mut view, &mut regs);
+        b.key(Key::Esc, &mut view, &mut regs);
+        assert!(reg_text(&regs, '"').is_none(), "no register write on cancel");
+        assert_eq!(b.line_col(), (0, 0), "the cursor returns to the anchor");
+        assert!(b.visual_selection().is_none(), "visual is off");
+    }
+
+    // The `"` prefix retargets the next yank to a named register.
+    #[test]
+    fn named_register_yank() {
+        let texts = vec!["alpha beta".to_string()];
+        let mut scroll = 0usize;
+        let mut b = entered(&texts, 24, &mut scroll);
+        b.line = 0;
+        b.col = 0;
+        let mut regs = regs();
+        let mut view = v(&texts, 24, &mut scroll);
+        press_seq(&mut b, &['"', 'a', 'y', 'w'], &mut view, &mut regs);
+        assert_eq!(reg_text(&regs, 'a'), Some("alpha ".to_string()), "the named register gets the word");
+        // The named yank also updates the unnamed / zero registers
+        // (the editor's merge rule).
+        assert_eq!(reg_text(&regs, '"'), Some("alpha ".to_string()));
+        // The target resets to the unnamed after the yank.
+        assert!(!b.reg_prefix, "no dangling register prefix");
+    }
+
+    // "unmatched object | the yank is a no-op with a hint that
+    // names the object; the operator state clears".
+    #[test]
+    fn unmatched_object_is_a_no_op() {
+        let texts = vec![
+            "plain line".to_string(),
+            "second line".to_string(),
+        ];
+        let mut scroll = 0usize;
+        let mut b = entered(&texts, 24, &mut scroll);
+        b.line = 0;
+        b.col = 0;
+        let mut regs = regs();
+        let mut view = v(&texts, 24, &mut scroll);
+        // No `[` in the text, so `i[` is unmatched.
+        let hint = b.key(Key::Char('y'), &mut view, &mut regs);
+        assert!(hint.is_none());
+        b.key(Key::Char('i'), &mut view, &mut regs);
+        let hint = b.key(Key::Char('['), &mut view, &mut regs);
+        assert!(hint.is_some(), "the hint names the object");
+        assert!(reg_text(&regs, '"').is_none(), "no register write on an unmatched object");
+        // The operator state cleared: a plain motion works now.
+        b.key(Key::Char('j'), &mut view, &mut regs);
+        assert_eq!(b.line, 1, "the operator state cleared; `j` is a motion");
+    }
+
+    // The transcript is read-only: a yank never mutates the view
+    // texts or the scroll.
+    #[test]
+    fn yank_keeps_the_transcript_read_only() {
+        let texts = vec!["alpha beta".to_string(), "gamma delta".to_string()];
+        let mut scroll = 0usize;
+        let mut b = entered(&texts, 24, &mut scroll);
+        let mut regs = regs();
+        let mut view = v(&texts, 24, &mut scroll);
+        let snapshot = texts.clone();
+        let scroll_snapshot = *view.scroll;
+        press_seq(&mut b, &['y', 'w'], &mut view, &mut regs);
+        press_seq(&mut b, &['y', 'y'], &mut view, &mut regs);
+        assert_eq!(view.texts, &snapshot, "the texts are untouched");
+        assert_eq!(*view.scroll, scroll_snapshot, "the view did not move");
+    }
+
+    // Host-clipboard yank: `"+yw` lands the word in the `+`
+    // register AND emits the OSC 52 escape carrying its base64.
+    #[test]
+    fn host_clipboard_yank_emits_osc52() {
+        let texts = vec!["alpha beta".to_string()];
+        let mut scroll = 0usize;
+        let mut b = entered(&texts, 24, &mut scroll);
+        b.line = 0;
+        b.col = 0;
+        let mut regs = regs();
+        let mut view = v(&texts, 24, &mut scroll);
+        press_seq(&mut b, &['"', '+', 'y', 'w'], &mut view, &mut regs);
+        assert_eq!(reg_text(&regs, '+'), Some("alpha ".to_string()), "the `+` register gets the word");
+        let esc = b.take_host_clipboard().expect("the OSC 52 escape is queued");
+        // The escape is `\x1b]52;c;<base64>\x07`.
+        let b64 = esc
+            .strip_prefix("\u{1b}]52;c;")
+            .and_then(|s| s.strip_suffix('\u{7}'))
+            .expect("the OSC 52 framing");
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .expect("the payload is valid base64");
+        let decoded = String::from_utf8(decoded).expect("utf8");
+        assert_eq!(decoded, "alpha ", "the base64 decodes back to the word");
+        // Drained: a second take is empty.
+        assert!(b.take_host_clipboard().is_none());
+    }
+
+    // "visual yank across two events | `v` `k` `y` over lines that
+    // span a tool-result block | the register holds only the raw
+    // source lines covered by the visual range" (section 11.3).
+    #[test]
+    fn visual_yank_across_events_yields_their_raw_source() {
+        let texts: Vec<String> = vec![
+            "    1  # Title".to_string(),
+            "    2  - a **bold** item".to_string(),
+            "    3  ".to_string(),
+            "    4  > out line 1".to_string(),
+            "    5  > out line 2".to_string(),
+        ];
+        let line_raw: Vec<Option<String>> = vec![
+            Some("# Title".to_string()),
+            Some("- a **bold** item".to_string()),
+            None, // separator
+            Some("out line 1\nout line 2".to_string()),
+            None, // continuation of tool result
+        ];
+        let mut scroll = 0usize;
+        let mut b = entered(&texts, 24, &mut scroll);
+        b.line = 4;
+        b.col = 2;
+        let mut regs2 = regs();
+        let mut view = v_raw(&texts, &line_raw, 24, &mut scroll);
+        press_seq(&mut b, &['v'], &mut view, &mut regs2);
+        press_seq(&mut b, &['k'], &mut view, &mut regs2);
+        press_seq(&mut b, &['y'], &mut view, &mut regs2);
+        assert_eq!(
+            reg_text(&regs2, '"'),
+            Some("out line 1\nout line 2".to_string()),
+            "visual yank over lines 3..4 returns only the raw source of those lines"
+        );
+    }
+
+    // A plain unnamed yank does NOT reach the host clipboard by
+    // default (the vim default; only `+` / `*` do).
+    #[test]
+    fn unnamed_yank_stays_in_memory_by_default() {
+        let texts = vec!["alpha beta".to_string()];
+        let mut scroll = 0usize;
+        let mut b = entered(&texts, 24, &mut scroll);
+        b.line = 0;
+        b.col = 0;
+        let mut regs = regs();
+        let mut view = v(&texts, 24, &mut scroll);
+        press_seq(&mut b, &['y', 'w'], &mut view, &mut regs);
+        assert_eq!(reg_text(&regs, '"'), Some("alpha ".to_string()), "the unnamed register is set");
+        assert!(b.take_host_clipboard().is_none(), "no OSC 52 for a bare unnamed yank by default");
+    }
+
+    // The `[tui] clipboard = "unnamed"` flag routes a bare `y` to
+    // the host clipboard too.
+    #[test]
+    fn clipboard_unnamed_flag_routes_bare_yank() {
+        let texts = vec!["alpha beta".to_string()];
+        let mut scroll = 0usize;
+        let mut b = entered(&texts, 24, &mut scroll);
+        b.set_clipboard_unnamed(true);
+        b.line = 0;
+        b.col = 0;
+        let mut regs = regs();
+        let mut view = v(&texts, 24, &mut scroll);
+        press_seq(&mut b, &['y', 'w'], &mut view, &mut regs);
+        let esc = b.take_host_clipboard().expect("the bare yank reaches the host clipboard");
+        assert!(esc.starts_with("\u{1b}]52;c;"), "the OSC 52 framing");
+        assert!(esc.ends_with('\u{7}'));
+    }
+
+    // The visual `o` / `O` swaps the anchor and the active end.
+    #[test]
+    fn visual_o_swaps_anchor_and_end() {
+        let texts = lines(5);
+        let mut scroll = 0usize;
+        let mut b = entered(&texts, 24, &mut scroll);
+        b.line = 0;
+        b.col = 0;
+        let mut regs = regs();
+        let mut view = v(&texts, 24, &mut scroll);
+        press_seq(&mut b, &['v', 'j', 'j', 'o'], &mut view, &mut regs);
+        // After the swap the anchor is the far end (line 2) and the
+        // cursor is back at the original anchor, line 0.
+        assert_eq!(b.line, 0, "the cursor moves to the old anchor");
+        let sel = b.visual_selection().unwrap();
+        assert_eq!(sel.0, (2, 0), "the anchor is the original far end");
+        assert_eq!(sel.1, (0, 0), "the active end is the original anchor");
+        // The `v` toggle exits visual.
+        b.key(Key::Char('v'), &mut view, &mut regs);
+        assert!(b.visual_selection().is_none(), "the `v` toggle exits visual");
+    }
+
+    // A visual yank of a single-line char span is not linewise.
+    #[test]
+    fn single_line_visual_yank_is_char_wise() {
+        let texts = vec!["alpha beta gamma".to_string()];
+        let mut scroll = 0usize;
+        let mut b = entered(&texts, 24, &mut scroll);
+        b.line = 0;
+        b.col = 0;
+        let mut regs = regs();
+        let mut view = v(&texts, 24, &mut scroll);
+        // `v` then `l` twice, then `y`: a char span on one line.
+        press_seq(&mut b, &['v', 'l', 'l', 'y'], &mut view, &mut regs);
+        assert_eq!(reg_text(&regs, '"'), Some("alp".to_string()), "the char span, not the whole line");
+        assert!(!reg_lw(&regs, '"'), "a single-line visual yank is char-wise");
     }
 }

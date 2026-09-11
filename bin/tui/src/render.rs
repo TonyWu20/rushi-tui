@@ -146,6 +146,25 @@ fn guttered(lines: &[Line<'static>], gutter: &str) -> Vec<Line<'static>> {
         .collect()
 }
 
+/// Per-line raw source ownership for a message body. `prov[k]` is the
+/// hard source-line index that wrapped output line `k` came from
+/// (`None` for lines derived from ext-transformed blocks). A line owns
+/// its raw text only when it is the *first* output line of that source
+/// line — wrapped continuations contribute nothing, so a yank range
+/// collects each source line at most once (docs/tui-conversation-
+/// browsing.md section 11.3).
+fn owns_raw_line(k: usize, prov: &[Option<usize>], hard: &[String]) -> Option<String> {
+    let p = match prov.get(k) {
+        Some(&Some(p)) => p,
+        _ => return None,
+    };
+    if k == 0 || prov.get(k - 1) != Some(&Some(p)) {
+        hard.get(p).map(String::clone)
+    } else {
+        None
+    }
+}
+
 /// Human-readable status text for a tool_result value.
 fn result_status(value: Option<&serde_json::Value>, err: bool) -> String {
     let code = value
@@ -155,6 +174,57 @@ fn result_status(value: Option<&serde_json::Value>, err: bool) -> String {
         (Some(c), _) => format!("exit {c}{}", if err { " (error)" } else { "" }),
         (None, true) => "error".to_string(),
         (None, false) => "ok".to_string(),
+    }
+}
+
+/// A compact human-readable label for a tool call, replacing raw JSON
+/// with the key arguments a user cares about (file path, command).
+fn compact_tool_label(name: &str, args: Option<&serde_json::Value>) -> String {
+    let args = match args {
+        Some(a) if !a.is_null() => a,
+        _ => return String::new(),
+    };
+    match name {
+        "read" => {
+            let path = args
+                .get("file_path")
+                .or_else(|| args.get("path"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            let mut label = path.to_string();
+            let offset = args.get("offset").and_then(|v| v.as_u64());
+            let limit = args.get("limit").and_then(|v| v.as_u64());
+            if offset.is_some() || limit.is_some() {
+                let from = offset.unwrap_or(1);
+                if let Some(l) = limit {
+                    label.push_str(&format!(":{from}-{}", from + l - 1));
+                } else {
+                    label.push_str(&format!(":{from}"));
+                }
+            }
+            label
+        }
+        "edit" | "write" => {
+            args.get("file_path")
+                .or_else(|| args.get("path"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("?")
+                .to_string()
+        }
+        "list" | "find" => {
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+            if name == "find" {
+                let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
+                if pattern.is_empty() {
+                    path.to_string()
+                } else {
+                    format!("{path} ({pattern})")
+                }
+            } else {
+                path.to_string()
+            }
+        }
+        _ => String::new(),
     }
 }
 
@@ -191,6 +261,12 @@ pub struct RenderState<'a> {
     /// The thinking-block expand state (Ctrl+X): `false` shows the
     /// collapsed header row only.
     pub thinking_expanded: bool,
+    /// Per-block expand fractions for animation. Keys are tool-result
+    /// event IDs. A value in `[0.0, 1.0]` interpolates the body cap
+    /// between the collapsed and expanded caps. An empty map means
+    /// "no animation: use the `tool_expanded` bool as-is".
+    /// (docs/tui-tool-display-fancy.md section 6)
+    pub expand_fracs: &'a std::collections::HashMap<String, f64>,
 }
 
 #[builder]
@@ -205,7 +281,7 @@ fn event_lines<'a>(
     state: &'a RenderState<'a>,
     loop_running: bool,
     compaction_last_open: bool,
-) -> Vec<Line<'static>> {
+) -> (Vec<Line<'static>>, Vec<Option<String>>) {
     let gutter = " ".repeat(GUTTER);
     let wrap_w = width.saturating_sub(GUTTER).max(4);
     let label_style = |fg: Color| Style::default().fg(fg).add_modifier(Modifier::BOLD);
@@ -227,13 +303,26 @@ fn event_lines<'a>(
     let prose = palette.style(crate::color::Role::PlainText, Modifier::empty());
 
     let mut out: Vec<Line<'static>> = Vec::new();
+    // Per-line raw source ownership, parallel to `out` (section 11.3):
+    // `Some(s)` on a line means that line is the shareable source of
+    // the text `s`; `None` means the line is UI chrome or a wrapped
+    // continuation, and contributes nothing to a yank.
+    let mut owns: Vec<Option<String>> = Vec::new();
     match e.kind() {
         EventKind::UserMessage => {
             let content = e
                 .get_str("content")
                 .unwrap_or("[missing content]")
                 .to_string();
-            let wrapped = render_message_content(&content, event_id, ext, wrap_w, prose, palette);
+            let (wrapped, prov) =
+                render_message_content(&content, event_id, ext, wrap_w, prose, palette);
+            // Raw source lines the yank maps onto: the content split into
+            // hard lines, parallel to `wrap_markdown_p_provenance`'s split.
+            let hard: Vec<String> = content
+                .trim_end_matches('\n')
+                .split('\n')
+                .map(String::from)
+                .collect();
             let mut spans = vec![Span::styled(
                 format!("{LABEL}user"),
                 // The pi accent tone (the pi-tool-display user box
@@ -245,11 +334,15 @@ fn event_lines<'a>(
                 spans.extend(first.spans.iter().cloned());
             }
             out.push(Line::from(spans));
+            owns.push(owns_raw_line(0, &prov, &hard));
             // The content is displayed in full: no cap, no hint.
             // An empty `wrapped` has no body line; the header stands
             // alone (an empty-slice `wrapped[1..]` panics).
             if !wrapped.is_empty() {
                 out.extend(guttered(&wrapped[1..], &gutter));
+                for k in 1..prov.len() {
+                    owns.push(owns_raw_line(k, &prov, &hard));
+                }
             }
         }
         EventKind::AssistantMessage => {
@@ -276,8 +369,17 @@ fn event_lines<'a>(
                             thinking_style,
                         )];
                         out.push(Line::from(header));
-                        let wrapped = wrap_thinking(&text, wrap_w, palette, thinking_style);
+                        owns.push(None); // the thinking label: UI chrome, not shareable source
+                        let wrapped = wrap_thinking(
+                            &text,
+                            wrap_w,
+                            palette,
+                            thinking_style,
+                            state.tool_display.highlight_engine,
+                        );
+                        let n = wrapped.len();
                         out.extend(guttered(&wrapped, &gutter));
+                        owns.extend(std::iter::repeat_n(None, n));
                     } else {
                         // The collapsed row: a one-line pi-style label with
                         // the expand hint, not the full reasoning text.
@@ -285,6 +387,7 @@ fn event_lines<'a>(
                             format!("{LABEL}thinking \u{2026} (Ctrl+T to expand)"),
                             thinking_style,
                         )));
+                        owns.push(None);
                     }
                 }
             }
@@ -308,8 +411,13 @@ fn event_lines<'a>(
                     ));
                 }
             }
-            let wrapped = if content.is_empty() {
-                Vec::new()
+            let hard: Vec<String> = content
+                .trim_end_matches('\n')
+                .split('\n')
+                .map(String::from)
+                .collect();
+            let (wrapped, prov) = if content.is_empty() {
+                (Vec::new(), Vec::new())
             } else {
                 render_message_content(&content, event_id, ext, wrap_w, prose, palette)
             };
@@ -318,57 +426,86 @@ fn event_lines<'a>(
                 header.extend(first.spans.iter().cloned());
             }
             out.push(Line::from(header));
+            owns.push(owns_raw_line(0, &prov, &hard));
             // An empty content (a model output that carries only tool
             // calls) has no body line; the header stands alone.
             // FT-006: an unguarded `wrapped[1..]` panicked on the
             // first launch draw.
             if !wrapped.is_empty() {
                 out.extend(guttered(&wrapped[1..], &gutter));
+                for k in 1..prov.len() {
+                    owns.push(owns_raw_line(k, &prov, &hard));
+                }
             }
         }
         EventKind::ToolCall => {
             let name = e.get_str("name").unwrap_or("?");
             let id = e.get_str("id").unwrap_or("");
-            // A bash call whose result follows merges into the
-            // result box: the box body opens with the `$ <command>`
-            // line, so the separate call line would repeat the
-            // command. A call without a result yet keeps its line:
-            // the command is the only view of a running tool.
-            let merged = name == "bash" && result_ids.contains(id);
+            // Tools whose result box already shows the key info
+            // (command, path, diff). When the result follows, the
+            // separate call line would be redundant, so it merges
+            // into the box. A call without a result yet keeps its
+            // line: it is the only view of a running tool.
+            let compact_tools = ["bash", "read", "edit", "write", "list", "find"];
+            let merged = compact_tools.contains(&name) && result_ids.contains(id);
             if !merged {
-                let args = e
-                    .get("arguments")
+                let args_val = e.get("arguments");
+                let args = args_val
                     .map(|v| v.to_string())
                     .unwrap_or_else(|| "[missing arguments]".to_string());
+                // A compact human-readable label replaces the raw JSON
+                // for file tools (read/edit/write/list/find). The raw
+                // JSON is still the shareable source for yank.
+                let display = compact_tool_label(name, args_val);
+                let display_text = if display.is_empty() {
+                    trunc(&args, wrap_w.max(20))
+                } else {
+                    display
+                };
+                // Ownership of the shareable raw source (section 11.3):
+                // a bash call shows the command in a body line below, so
+                // the header owns nothing; other tools show a compact
+                // label or the args JSON in the header, so the header
+                // owns the full args.
+                let header_own = if name == "bash" {
+                    None
+                } else {
+                    Some(args.clone())
+                };
                 out.push(Line::from(vec![
-                    // The pi `toolTitle` tone for the tool name, the
-                    // muted tone for the arguments.
                     Span::styled(
                         format!("{LABEL}tool:{name}"),
                         label_style(palette.color(crate::color::Role::ToolCommand)),
                     ),
                     Span::styled(
-                        format!(" {}", trunc(&args, wrap_w.max(20))),
+                        format!(" {}", display_text),
                         dim,
                     ),
                 ]));
+                owns.push(header_own);
                 // The command of a bash call is the interesting part;
                 // show it as its own dim line instead of raw JSON
-                // noise.
+                // noise. The full command string is the shareable raw
+                // source, assigned to the first body line.
                 if name == "bash" {
-                    if let Some(cmd) = e
-                        .get("arguments")
+                    if let Some(cmd) = args_val
                         .and_then(|a| a.get("command"))
                         .and_then(|c| c.as_str())
                     {
-                        out.extend(body(
+                        let body_lines = body(
                             cmd,
                             command,
                             TOOL_CALL_BODY_LINES,
                             wrap_w,
                             &gutter,
                             dim,
-                        ));
+                        );
+                        let n = body_lines.len();
+                        out.extend(body_lines);
+                        owns.push(Some(cmd.to_string()));
+                        if n > 1 {
+                            owns.extend(std::iter::repeat_n(None, n - 1));
+                        }
                     }
                 }
             }
@@ -408,6 +545,16 @@ fn event_lines<'a>(
             // instead of leaving dead columns (the 2026-09-03 user
             // directive: truncate, never wrap).
             let body_w = width.saturating_sub(3);
+            // The per-block expand fraction (docs/tui-tool-display-
+            // fancy.md section 6): when the animation system has a
+            // value for this event ID, it interpolates the body cap
+            // between the collapsed and expanded caps. An empty map
+            // means "no animation: use the `tool_expanded` bool".
+            let expand_frac = state
+                .expand_fracs
+                .get(id)
+                .copied()
+                .unwrap_or(-1.0);
             let mut body = crate::tool_display::body_rows()
                 .tool(&name)
                 .value(value_ref)
@@ -417,6 +564,7 @@ fn event_lines<'a>(
                 .palette(palette)
                 .expanded(state.tool_expanded)
                 .width(body_w)
+                .expand_frac(expand_frac)
                 .call();
             // The JSON-document body (docs/tui-color-tones.md): a
             // read result whose content is a complete JSON document,
@@ -433,6 +581,7 @@ fn event_lines<'a>(
                         palette,
                         state.tool_expanded,
                         body_w,
+                        expand_frac,
                     );
                 }
             let title = format!("tool:{name}  {status}");
@@ -445,10 +594,20 @@ fn event_lines<'a>(
                 title_style.as_ref(),
                 err,
             );
-            for row in rows {
+            // The shareable raw source of a result is its raw output
+            // text (section 11.3); assign it to the box's first row so
+            // a yank of the box returns the full output, not the
+            // truncated/boxed display.
+            let raw_output = raw_event_text(e);
+            for (i, row) in rows.into_iter().enumerate() {
                 let spans: Vec<Span<'static>> =
                     row.into_iter().map(|(s, t)| Span::styled(t, s)).collect();
                 out.push(Line::from(spans));
+                owns.push(if i == 0 {
+                    Some(raw_output.clone())
+                } else {
+                    None
+                });
             }
         }
         EventKind::ApprovalRequest => {
@@ -464,6 +623,7 @@ fn event_lines<'a>(
                 line.push(Span::styled("  [y allow] [n deny] [e edit]", st));
             }
             out.push(Line::from(line));
+            owns.push(None); // UI chrome: the rendered text is the fallback
         }
         EventKind::Approval => {
             let id = e.get_str("id").unwrap_or("?");
@@ -479,6 +639,7 @@ fn event_lines<'a>(
                 spans.push(Span::styled(" (edited arguments)", dim));
             }
             out.push(Line::from(spans));
+            owns.push(None);
         }
         EventKind::Cancel => {
             let target = e.get_str("target").unwrap_or("?");
@@ -486,6 +647,7 @@ fn event_lines<'a>(
                 format!("{LABEL}[cancel] target={target}"),
                 dim,
             )));
+            owns.push(None);
         }
         EventKind::UserMessageRetract => {
             let target = e.get_str("target").unwrap_or("?");
@@ -495,6 +657,7 @@ fn event_lines<'a>(
                 format!("{LABEL}[retracted] target={target}{reason_part}"),
                 dim,
             )));
+            owns.push(None);
         }
         EventKind::ExtStatus => {
             // Shared UI state: the transcript shows no row for the
@@ -517,10 +680,12 @@ fn event_lines<'a>(
                 spans.extend(first.spans.iter().cloned());
             }
             out.push(Line::from(spans));
+            owns.push(None);
             // The message body follows under the gutter, like the
             // error event. An empty `wrapped` leaves the header alone.
             if !wrapped.is_empty() {
                 out.extend(guttered(&wrapped[1..], &gutter));
+                owns.extend(std::iter::repeat_n(None, wrapped.len() - 1));
             }
             // The seeded handoff session. The status row carries the
             // one-key hint; this line names the target.
@@ -529,6 +694,7 @@ fn event_lines<'a>(
                     Span::raw(gutter.clone()),
                     Span::styled(format!("handoff session: {ns}"), st),
                 ]));
+                owns.push(None);
             }
         }
         EventKind::Error => {
@@ -547,11 +713,13 @@ fn event_lines<'a>(
                 spans.extend(first.spans.iter().cloned());
             }
             out.push(Line::from(spans));
+            owns.push(None);
             // The whole message is displayed, multi-line included.
             // An empty `wrapped` has no body line; the header stands
             // alone (an empty-slice `wrapped[1..]` panics).
             if !wrapped.is_empty() {
                 out.extend(guttered(&wrapped[1..], &gutter));
+                owns.extend(std::iter::repeat_n(None, wrapped.len() - 1));
             }
         }
         // The in-session auto-compact markers (docs/auto-compact-plan.md
@@ -577,6 +745,7 @@ fn event_lines<'a>(
                 format!("{LABEL}compacting ({reason}): {} tokens", fmt_k(tokens))
             };
             out.push(Line::from(Span::styled(text, style)));
+            owns.push(None);
         }
         EventKind::CompactionSummary => {
             let reason = e.get_str("reason").unwrap_or("threshold").to_string();
@@ -595,12 +764,14 @@ fn event_lines<'a>(
                 st,
             )];
             out.push(Line::from(spans));
+            owns.push(None);
             // The summary body rides under the gutter, available in
             // the expand mechanism like the error body.
             if !summary.is_empty() {
                 let wrapped = wrap_styled(vec![(prose, summary)], wrap_w);
                 if !wrapped.is_empty() {
                     out.extend(guttered(&wrapped, &gutter));
+                    owns.extend(std::iter::repeat_n(None, wrapped.len()));
                 }
             }
         }
@@ -620,11 +791,14 @@ fn event_lines<'a>(
                     spans.extend(first.spans.iter().cloned());
                 }
                 out.push(Line::from(spans));
+                owns.push(None);
                 if !wrapped.is_empty() {
                     out.extend(guttered(&wrapped[1..], &gutter));
+                    owns.extend(std::iter::repeat_n(None, wrapped.len() - 1));
                 }
             } else {
                 out.push(Line::from(spans));
+                owns.push(None);
             }
         }
         EventKind::Rewind => {
@@ -639,6 +813,7 @@ fn event_lines<'a>(
                 format!("{LABEL}rewound to seq {target} ({mode})"),
                 dim,
             )));
+            owns.push(None);
         }
         EventKind::UnknownType => {
             let ty = e.type_name().unwrap_or("?").to_string();
@@ -646,11 +821,13 @@ fn event_lines<'a>(
                 format!("{LABEL}[unknown event type \"{ty}\" — raw JSON]"),
                 dim,
             )));
+            owns.push(None);
             for l in e.pretty_capped(RAW_FALLBACK_MAX_LINES).lines() {
                 out.push(Line::from(Span::styled(
                     format!("{gutter}{l}"),
                     dim,
                 )));
+                owns.push(None);
             }
         }
         EventKind::UnsupportedVersion => {
@@ -680,9 +857,10 @@ fn event_lines<'a>(
                 // The pi `error` accent, dimmed (not a hard-coded red).
                 palette.style(crate::color::Role::Error, Modifier::DIM),
             )));
+            owns.push(None);
         }
     }
-    out
+    (out, owns)
 }
 
 /// Push the accumulated spans as one visual line, clearing `cur`.
@@ -696,22 +874,74 @@ fn push_line(cur: &mut Vec<Span<'static>>, out: &mut Vec<Line<'static>>) {
 /// measured in characters; CJK and combining characters will drift a
 /// few columns on non-ASCII lines (phase-1 log content is ASCII).
 /// The expanded thinking block text (docs/tui-thinking-block.md
-/// section 4): the raw reasoning text in the thinking tone. One
-/// exception: a run of consecutive `|` table lines draws as the
-/// box-drawing grid, the same rule as `wrap_markdown_p` (the
-/// 2026-09-03 user report: tables inside a thinking block lost
-/// their fixed column widths).
+/// section 4): the raw reasoning text in the thinking tone. Two
+/// exceptions: a run of consecutive `|` table lines draws as the
+/// box-drawing grid (the 2026-09-03 user report: tables inside a
+/// thinking block lost their fixed column widths), and a fenced code
+/// block (` ``` ` / `~~~`) draws through the active highlight engine
+/// (`tree-sitter` by default, the 2026-09-11 request): the fence marker
+/// lines take the dimmed `Fence` tone, the language tag after the
+/// opening delimiter drives the highlight, and the unscoped runs fall
+/// back to the `Code` tone, fg-only, like the tool-result bodies.
 fn wrap_thinking(
     text: &str,
     wrap_w: usize,
     palette: &crate::color::Palette,
     style: Style,
+    engine: crate::tool_display::HighlightEngine,
 ) -> Vec<Line<'static>> {
     let hard_lines: Vec<&str> = text.split('\n').collect();
     let mut out: Vec<Line<'static>> = Vec::new();
     let border_style = palette.style(crate::color::Role::Hint, Modifier::DIM);
+    let code_style = palette.style(crate::color::Role::Code, Modifier::empty());
+    // One stateful highlighter for the whole thinking text: a block
+    // comment that spans code-fence lines stays open across them.
+    let mut hl = crate::tool_display::CodeHl::new(engine);
+    let mut in_fence = false;
+    let mut fence_lang: Option<String> = None;
     let mut i = 0usize;
     while i < hard_lines.len() {
+        let t = hard_lines[i].trim_start();
+        if highlight::is_fence_delim(t) {
+            i += 1;
+            // The fence marker line: the delimiter and the language
+            // tag, dimmed like the markdown fence pass.
+            let marker = highlight::fence_line_p(t, palette);
+            out.extend(wrap_flow(marker, wrap_w));
+            if in_fence {
+                in_fence = false;
+                fence_lang = None;
+            } else {
+                in_fence = true;
+                let rest = t
+                    .strip_prefix("```")
+                    .or_else(|| t.strip_prefix("~~~"))
+                    .unwrap_or("");
+                let tag = rest.trim();
+                fence_lang = if tag.is_empty() { None } else { Some(tag.to_string()) };
+            }
+            continue;
+        }
+        if in_fence {
+            let line = hard_lines[i];
+            i += 1;
+            // One hard code line through the active engine. The scoped
+            // tokens carry the engine's fg colors (no background, the
+            // 2026-09-11 color rule); the unscoped runs keep the code
+            // tone.
+            let segs: Vec<(Style, String)> = hl
+                .line(line, fence_lang.as_deref(), palette)
+                .into_iter()
+                .map(|(st, s)| (if st == Style::default() { code_style } else { st }, s))
+                .collect();
+            if line.is_empty() {
+                // An empty code line still occupies its row.
+                out.push(Line::default());
+            } else {
+                out.extend(wrap_flow(segs, wrap_w));
+            }
+            continue;
+        }
         if highlight::is_table_row(hard_lines[i]) {
             let mut block: Vec<String> = Vec::new();
             while i < hard_lines.len() && highlight::is_table_row(hard_lines[i]) {
@@ -722,11 +952,11 @@ fn wrap_thinking(
             for row in grid {
                 let spans: Vec<Span<'static>> = row
                     .into_iter()
-                    .map(|(s, t)| {
+                    .map(|(s, t2)| {
                         // The cell text takes the thinking tone; the
                         // border runs keep the hint style.
                         let s = if s == border_style { s } else { style };
-                        Span::styled(t, s)
+                        Span::styled(t2, s)
                     })
                     .collect();
                 out.push(Line::from(spans));
@@ -792,6 +1022,71 @@ fn wrap_styled(segs: Vec<(Style, String)>, width: usize) -> Vec<Line<'static>> {
     out
 }
 
+/// Like [`wrap_styled`] but treats every segment as one continuous
+/// text stream. All spans from a single ext line flow onto the same
+/// visual line (word-wrapping across span boundaries when the width
+/// is exceeded). This preserves multi-span layouts such as the
+/// side-by-side split-diff rows from `tool_result`.
+fn wrap_styled_continuous(segs: &[(Style, String)], width: usize) -> Vec<Line<'static>> {
+    let mut out: Vec<Line<'static>> = Vec::new();
+    let mut cur: Vec<Span<'static>> = Vec::new();
+    let mut cur_w = 0usize;
+
+    for (style, text) in segs {
+        let chunks: Vec<&str> = text.split('\n').collect();
+        for (i, hard) in chunks.iter().enumerate() {
+            // A '\n' inside the text is a hard break: flush the
+            // current line before starting the next hard line.
+            if i > 0 {
+                if !cur.is_empty() {
+                    out.push(Line::from(std::mem::take(&mut cur)));
+                }
+                cur_w = 0;
+            }
+
+            for word in hard.split_inclusive(' ') {
+                let w = word.chars().count();
+                if w == 0 {
+                    continue;
+                }
+                if cur_w + w > width && cur_w > 0 {
+                    out.push(Line::from(std::mem::take(&mut cur)));
+                    cur_w = 0;
+                }
+                if w > width {
+                    // Hard-break an overlong word into width-sized
+                    // pieces, each full piece its own line.
+                    if cur_w > 0 {
+                        out.push(Line::from(std::mem::take(&mut cur)));
+                        cur_w = 0;
+                    }
+                    let mut piece = String::new();
+                    for ch in word.chars() {
+                        piece.push(ch);
+                        if piece.chars().count() == width {
+                            out.push(Line::from(vec![Span::styled(
+                                std::mem::take(&mut piece),
+                                *style,
+                            )]));
+                        }
+                    }
+                    if !piece.is_empty() {
+                        cur.push(Span::styled(piece.clone(), *style));
+                        cur_w = piece.chars().count();
+                    }
+                    continue;
+                }
+                cur_w += w;
+                cur.push(Span::styled(word.to_string(), *style));
+            }
+        }
+    }
+    if !cur.is_empty() {
+        out.push(Line::from(cur));
+    }
+    out
+}
+
 /// The marker-free markdown render (docs/tui-markdown-render.md):
 /// the styles in, the markers out. The fence state spans the hard
 /// lines; consecutive table rows draw as a box-drawing grid
@@ -805,8 +1100,26 @@ fn wrap_markdown_p(
     palette: &crate::color::Palette,
     base: Style,
 ) -> Vec<Line<'static>> {
+    wrap_markdown_p_provenance(text, wrap_w, palette, base).0
+}
+
+/// Same as [`wrap_markdown_p`], plus a per-output-line provenance map:
+/// for each emitted line, the index of the hard source line it was
+/// derived from (0-based into `text.trim_end_matches('\n')` split on
+/// `\n`; consecutive wrapped fragments of one source line share the
+/// index, and a table block's grid rows all carry the block's first
+/// line). The browse yank uses it to map a selected line range back
+/// to the raw source lines it shows (docs/tui-conversation-browsing.
+/// md section 11.3).
+fn wrap_markdown_p_provenance(
+    text: &str,
+    wrap_w: usize,
+    palette: &crate::color::Palette,
+    base: Style,
+) -> (Vec<Line<'static>>, Vec<usize>) {
     let hard_lines: Vec<&str> = text.trim_end_matches('\n').split('\n').collect();
     let mut out: Vec<Line<'static>> = Vec::new();
+    let mut prov: Vec<usize> = Vec::new();
     let mut fence = false;
     let mut i = 0usize;
     while i < hard_lines.len() {
@@ -814,8 +1127,10 @@ fn wrap_markdown_p(
         // A table block: consecutive `|`-separated rows. The block
         // draws as one grid table, clamped to the pane width
         // (docs/tui-markdown-render.md section 3: the column width
-        // rule on a narrow pane).
+        // rule on a narrow pane). Every grid row traces back to the
+        // block's first hard line.
         if highlight::is_table_row(line) {
+            let table_src = i;
             let mut block: Vec<String> = Vec::new();
             while i < hard_lines.len() && highlight::is_table_row(hard_lines[i]) {
                 block.push(hard_lines[i].to_string());
@@ -826,18 +1141,26 @@ fn wrap_markdown_p(
                 let spans: Vec<Span<'static>> =
                     row.into_iter().map(|(s, t)| Span::styled(t, s)).collect();
                 out.push(Line::from(spans));
+                prov.push(table_src);
             }
             continue;
         }
+        let src = i;
         i += 1;
         if line.is_empty() {
             out.push(Line::default());
+            prov.push(src);
             continue;
         }
         let segs = with_plain_base(highlight::md_line(line, &mut fence, palette), base);
-        out.extend(wrap_flow(segs, wrap_w));
+        let wrapped = wrap_flow(segs, wrap_w);
+        let n = wrapped.len();
+        out.extend(wrapped);
+        for _ in 0..n {
+            prov.push(src);
+        }
     }
-    out
+    (out, prov)
 }
 
 /// The thinking text of one `assistant_message` reasoning array
@@ -1240,9 +1563,13 @@ fn render_message_content(
     wrap_w: usize,
     base: Style,
     palette: &crate::color::Palette,
-) -> Vec<Line<'static>> {
+) -> (Vec<Line<'static>>, Vec<Option<usize>>) {
     if ext.is_none() {
-        return wrap_markdown_p(content, wrap_w, palette, base);
+        let (lines, prov) = wrap_markdown_p_provenance(content, wrap_w, palette, base);
+        // Every wrapped line carries its hard-source-line index, so a
+        // browse yank can map a line range back to the raw source
+        // (docs/tui-conversation-browsing.md section 11.3).
+        return (lines, prov.into_iter().map(|p| Some(p)).collect());
     }
     let host = ext.expect("checked above");
     let blocks = message_blocks(content);
@@ -1352,7 +1679,14 @@ fn render_message_content(
             }
         }
     }
-    out
+    // The ext path transforms content (mermaid → diagram, latex →
+    // image), so the rendered lines do not map 1:1 to the source
+    // hard lines. Provenance is `None` for every line; the browse
+    // yank falls back to the rendered text for ext-transformed
+    // content (the ext case is rare; the plain path above carries
+    // full provenance).
+    let n = out.len();
+    (out, vec![None; n])
 }
 
 /// The static help row. The quit hint comes first: it is the safety
@@ -1572,7 +1906,13 @@ fn stream_block_lines(app: &App, width: usize, max_body_lines: usize) -> Vec<Lin
             .join("\n");
         if !thinking_text.is_empty() {
             shows_thinking_label = true;
-            thinking_tail = wrap_thinking(&thinking_text, wrap_w, palette, thinking_style);
+            thinking_tail = wrap_thinking(
+                &thinking_text,
+                wrap_w,
+                palette,
+                thinking_style,
+                app.tool_display().highlight_engine,
+            );
         }
     }
 
@@ -1807,11 +2147,14 @@ fn resolve_transcript_width(
     (text_w, gutter_w)
 }
 
-/// The browse-mode window lines (sections 4.3 and 7.3): the gutter
-/// prefix on every row, the cursorline highlight and the caret block
-/// on the cursor row, the search highlight on the match rows. The
-/// styles are owned values: the caller precomputes them so no
-/// palette borrow crosses the lines borrow.
+/// The browse-mode window lines (sections 4.3, 7.3, and 11.4): the
+/// gutter prefix on every row, the cursorline highlight and the
+/// caret block on the cursor row, the search highlight on the match
+/// rows, and the visual-selection shading on the selected span
+/// (docs/tui-conversation-browsing.md section 11.4: the
+/// `Role::Selection` background, distinct from the search-highlight
+/// tone). The styles are owned values: the caller precomputes them
+/// so no palette borrow crosses the lines borrow.
 #[allow(clippy::too_many_arguments)]
 fn browse_window_lines(
     lines: &[Line<'static>],
@@ -1826,6 +2169,8 @@ fn browse_window_lines(
     cursor_bg: Color,
     match_style: Style,
     active_style: Style,
+    selection: Option<((usize, usize), (usize, usize), bool)>,
+    sel_bg: Color,
 ) -> Vec<Line<'static>> {
     let (cl, cc) = cursor;
     lines
@@ -1850,10 +2195,38 @@ fn browse_window_lines(
             };
             let gutter_span =
                 Span::styled(format!("{num:>width$}", width = gutter_w), gutter_style);
+            // The selected span of this row (section 11.4): the
+            // char range, or the whole row for a linewise selection.
+            let sel = selection.and_then(|s| selection_row_range(&s, abs));
+            // The base text spans: the match rows flatten to the
+            // highlight tone (section 7.3); the cursor row keeps
+            // its spans under the caret block.
+            let base: Vec<Span<'static>> = if !is_cursor && (active_line || line_matched) {
+                let style = if active_line { active_style } else { match_style };
+                let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+                vec![Span::styled(text, style)]
+            } else {
+                l.spans.iter().cloned().collect()
+            };
+            // The visual-selection shading over the base spans: the
+            // `Role::Selection` background on the selected chars,
+            // distinct from the search-highlight tone. On the cursor
+            // row the unselected part keeps the low-contrast
+            // cursorline background; the selected span keeps the
+            // stronger selection tone so it stays visible on top of
+            // it (a cursorline bg would otherwise shadow the
+            // selection, docs section 11.4).
+            let rest_bg = if is_cursor { Some(cursor_bg) } else { None };
+            let shaded = match sel {
+                Some((s, e)) => shade_spans(&base, s, e, sel_bg, rest_bg),
+                None if rest_bg.is_some() => shade_spans(&base, 0, Some(0), sel_bg, rest_bg),
+                None => base,
+            };
             if is_cursor {
                 // The cursor row: the low-contrast background across
-                // the row (section 4.3), the caret block at the col.
-                // A matched cursor row keeps the accent tone.
+                // the row (section 4.3, applied by the shading above,
+                // not on the selected span), the caret block at the
+                // col. A matched cursor row keeps the accent tone.
                 let fg_override = if active_line {
                     Some(active_style)
                 } else if line_matched {
@@ -1862,35 +2235,115 @@ fn browse_window_lines(
                     None
                 };
                 let mut spans = vec![gutter_span];
-                spans.extend(caret_spans(l, cc, cursor_bg, fg_override));
+                spans.extend(caret_spans(&shaded, cc, fg_override));
                 Line::from(spans)
-            } else if active_line || line_matched {
-                // The match rows flatten to the highlight tone
-                // (section 7.3); the current match takes the accent
-                // tone.
-                let style = if active_line { active_style } else { match_style };
-                let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
-                Line::from(vec![gutter_span, Span::styled(text, style)])
             } else {
                 let mut spans = vec![gutter_span];
-                spans.extend(l.spans.iter().cloned());
+                spans.extend(shaded);
                 Line::from(spans)
             }
         })
         .collect()
 }
 
-/// The caret block at col `cc`: the split span keeps its styling, the
+/// The selected char range of row `abs` (section 11.4):
+/// `(start_char, end_char_inclusive)`; a `None` end runs to the row
+/// end. Linewise selections shade whole rows; char-visual shades the
+/// span between the anchor and the active end (the end rows from the
+/// edge to the col, the middle rows whole). `None` outside the
+/// selection.
+fn selection_row_range(
+    sel: &((usize, usize), (usize, usize), bool),
+    abs: usize,
+) -> Option<(usize, Option<usize>)> {
+    let ((al, ac), (el, ec), linewise) = *sel;
+    if linewise {
+        let (lo, hi) = if al <= el { (al, el) } else { (el, al) };
+        return (abs >= lo && abs <= hi).then_some((0, None));
+    }
+    if al == el {
+        if abs != al {
+            return None;
+        }
+        let (lo, hi) = if ac <= ec { (ac, ec) } else { (ec, ac) };
+        return Some((lo, Some(hi)));
+    }
+    let (first, second) = if al < el { (al, el) } else { (el, al) };
+    let (first_c, second_c) = if al < el { (ac, ec) } else { (ec, ac) };
+    match abs {
+        a if a == first => Some((first_c, None)),
+        a if a == second => Some((0, Some(second_c))),
+        a if a > first && a < second => Some((0, None)),
+        _ => None,
+    }
+}
+
+/// The selection background over the char range `[start, end]` of a
+/// row's spans (a `None` end runs to the row end, section 11.4):
+/// the selected span takes the `Role::Selection` background, the
+/// rest keeps its style (or the `rest_bg` background, the cursorline
+/// tone on the cursor row, so the selection stays visible on top of
+/// it); a span straddling an edge splits.
+fn shade_spans(
+    spans: &[Span<'static>],
+    start: usize,
+    end: Option<usize>,
+    bg: Color,
+    rest_bg: Option<Color>,
+) -> Vec<Span<'static>> {
+    let end = end.unwrap_or(usize::MAX);
+    let rest_style = |s: &Span| {
+        match rest_bg {
+            Some(c) => s.style.patch(Style::default().bg(c)),
+            None => s.style,
+        }
+    };
+    let mut out: Vec<Span<'static>> = Vec::new();
+    let mut off = 0usize;
+    for s in spans {
+        let n = s.content.chars().count();
+        let span_end = off + n;
+        let lo = off.max(start);
+        let hi = span_end.min(end);
+        if hi > lo {
+            // The span overlaps the range: split into the unshaded
+            // head, the shaded middle, and the unshaded tail.
+            let chars: Vec<char> = s.content.chars().collect();
+            let pre_end = lo - off;
+            let in_end = hi - off;
+            if pre_end > 0 {
+                let pre: String = chars[..pre_end].iter().collect();
+                out.push(Span::styled(pre, rest_style(s)));
+            }
+            if in_end > pre_end {
+                let mid: String = chars[pre_end..in_end].iter().collect();
+                let st = s.style.patch(Style::default().bg(bg));
+                out.push(Span::styled(mid, st));
+            }
+            if in_end < n {
+                let post: String = chars[in_end..].iter().collect();
+                out.push(Span::styled(post, rest_style(s)));
+            }
+        } else {
+            out.push(Span::styled(s.content.clone(), rest_style(s)));
+        }
+        off = span_end;
+    }
+    out
+}
+
+/// The caret block at col `cc` over the row's text spans: the split
+/// span keeps its styling (the background is set by the shading
+/// pass, which keeps the selection tone on the selected span), the
 /// cell inverts, the tail keeps its styling. A col past the rendered
 /// line draws the block on the line-end blank (section 4.1).
 fn caret_spans(
-    l: &Line<'static>,
+    l: &[Span<'static>],
     cc: usize,
-    bg: Color,
     fg_override: Option<Style>,
 ) -> Vec<Span<'static>> {
     let patch = |s: &Span| {
-        let mut st = s.style.patch(Style::default().bg(bg));
+        let mut st = s.style;
         if let Some(o) = fg_override {
             st = o.patch(st);
         }
@@ -1898,7 +2351,7 @@ fn caret_spans(
     };
     let mut out: Vec<Span<'static>> = Vec::new();
     let mut rest = cc;
-    for s in &l.spans {
+    for s in l {
         if rest == 0 {
             out.push(Span::styled(s.content.clone(), patch(s)));
             continue;
@@ -2001,11 +2454,77 @@ fn draw_position_bar(
 /// for the event, the extension's styled lines replace the built-in
 /// render. A missing, stale, or timed-out reply falls back to the
 /// built-in render (per-op G5 fallback).
-pub fn build_transcript_lines(
+pub struct TranscriptBuild {
+    /// The rendered transcript lines, oldest first.
+    pub lines: Vec<Line<'static>>,
+    /// The shareable raw source text that each rendered line maps to
+    /// (`None` on blank separators, UI-chrome lines, and wrapped
+    /// continuations), parallel to `lines` (docs/tui-conversation-
+    /// browsing.md section 11.3: the per-line raw map a browse yank
+    /// uses to reach the source text). A yank range joins the
+    /// non-`None` entries it covers.
+    pub line_raw: Vec<Option<String>>,
+    /// The screen-line spans of tool-result boxes: maps event ID to
+    /// `(start_line, end_line)` (exclusive end) in the transcript.
+    /// Used for mouse-click hit-testing
+    /// (docs/tui-tool-display-fancy.md section 6).
+    pub block_spans: std::collections::HashMap<String, (usize, usize)>,
+}
+
+/// The shareable source text of one event (docs/tui-conversation-
+/// browsing.md section 11.3): the original markdown / command /
+/// output, not the rendered display lines, so a browse yank can be
+/// dropped into a `.md` file or re-sent to the agent. Events with no
+/// shareable body yield the empty string.
+pub fn raw_event_text(e: &crate::event::Event) -> String {
+    match e.kind() {
+        EventKind::UserMessage | EventKind::AssistantMessage => {
+            e.get_str("content").unwrap_or("").to_string()
+        }
+        EventKind::ToolCall => {
+            // The bash command is the interesting part; any other
+            // tool carries its raw arguments JSON.
+            if e.get_str("name") == Some("bash") {
+                e.get("arguments")
+                    .and_then(|a| a.get("command"))
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("")
+                    .to_string()
+            } else {
+                e.get("arguments")
+                    .map(|v| v.to_string())
+                    .filter(|s| s != "null")
+                    .unwrap_or_default()
+            }
+        }
+        EventKind::ToolResult => {
+            let value = e.get("value");
+            match value {
+                Some(v) => {
+                    if let Some(t) = v.get("text") {
+                        t.as_str().map(String::from).unwrap_or_else(|| t.to_string())
+                    } else if let Some(s) = v.as_str() {
+                        s.to_string()
+                    } else {
+                        v.to_string()
+                    }
+                }
+                None => String::new(),
+            }
+        }
+        EventKind::ApprovalRequest => e.get_str("prompt").unwrap_or("").to_string(),
+        _ => String::new(),
+    }
+}
+
+/// Build the transcript: the rendered lines plus the line-to-event
+/// map a browse yank needs (docs/tui-conversation-browsing.md
+/// section 11.3).
+pub fn build_transcript(
     app: &App,
     width: usize,
     ext: Option<&crate::ext::ExtHost>,
-) -> Vec<Line<'static>> {
+) -> TranscriptBuild {
     let details = app.call_details();
     let pending = app.oldest_pending_approval().is_some();
     let events = app.events();
@@ -2027,6 +2546,7 @@ pub fn build_transcript_lines(
         tool_expanded: app.tool_expanded(),
         thinking_shown: app.thinking_shown(),
         thinking_expanded: app.thinking_expanded(),
+        expand_fracs: app.expand_fracs(),
     };
     // The loop supervision (docs/auto-compact-plan.md section 4.6):
     // the transcript session's loop process running bit.
@@ -2052,6 +2572,9 @@ pub fn build_transcript_lines(
         last_open[i] = true;
     }
     let mut all: Vec<Line<'static>> = Vec::new();
+    let mut line_raw: Vec<Option<String>> = Vec::new();
+    let mut block_spans: std::collections::HashMap<String, (usize, usize)> =
+        std::collections::HashMap::new();
     for (i, e) in events[start..].iter().enumerate() {
         // ext_status is shared UI state: suppressed from the transcript
         // by default. ext_status events add no rows, and add no blank
@@ -2062,68 +2585,150 @@ pub fn build_transcript_lines(
         }
         if !all.is_empty() {
             all.push(Line::from(""));
+            line_raw.push(None);
         }
         let event_id = (start + i) as u64;
-        let segs = if let Some(owner) = ext.and_then(|h| h.owner_for_kind(e.kind())) {
-            match ext.unwrap().lookup_lines(owner, event_id) {
-                Some(lines) => ext_lines_guttered(&lines, width),
-                // No valid reply for this event: the built-in render
-                // is the fallback.
-                None => {
-                    let builder = event_lines()
-                        .e(e)
-                        .pending(pending)
-                        .call_details(&details)
-                        .result_ids(&result_ids)
-                        .width(width.max(GUTTER + 8))
-                        .event_id(event_id)
-                        .state(&state)
-                        .loop_running(running)
-                        .compaction_last_open(
-                            last_open.get(i).copied().unwrap_or(false),
-                        );
-                    if let Some(h) = ext {
-                        builder.ext(h).call()
-                    } else {
-                        builder.call()
+        // Record the start of a tool-result block for click hit-testing.
+        let tr_start = if e.kind() == EventKind::ToolResult {
+            Some(all.len())
+        } else {
+            None
+        };
+        let (segs, raws): (Vec<Line<'static>>, Vec<Option<String>>) =
+            if let Some(owner) = ext.and_then(|h| h.owner_for_kind(e.kind())) {
+                match ext.unwrap().lookup_lines(owner, event_id) {
+                    Some(lines) => {
+                        let lines = ext_lines_guttered(&lines, width);
+                        let raws: Vec<Option<String>> = vec![None; lines.len()];
+                        (lines, raws)
+                    }
+                    // No valid reply for this event: the built-in render
+                    // is the fallback.
+                    None => {
+                        let builder = event_lines()
+                            .e(e)
+                            .pending(pending)
+                            .call_details(&details)
+                            .result_ids(&result_ids)
+                            .width(width.max(GUTTER + 8))
+                            .event_id(event_id)
+                            .state(&state)
+                            .loop_running(running)
+                            .compaction_last_open(
+                                last_open.get(i).copied().unwrap_or(false),
+                            );
+                        if let Some(h) = ext {
+                            builder.ext(h).call()
+                        } else {
+                            builder.call()
+                        }
                     }
                 }
-            }
-        } else {
-            let builder = event_lines()
-                .e(e)
-                .pending(pending)
-                .call_details(&details)
-                .result_ids(&result_ids)
-                .width(width.max(GUTTER + 8))
-                .event_id(event_id)
-                .state(&state)
-                .loop_running(running)
-                .compaction_last_open(last_open.get(i).copied().unwrap_or(false));
-            if let Some(h) = ext {
-                builder.ext(h).call()
             } else {
-                builder.call()
-            }
-        };
+                let builder = event_lines()
+                    .e(e)
+                    .pending(pending)
+                    .call_details(&details)
+                    .result_ids(&result_ids)
+                    .width(width.max(GUTTER + 8))
+                    .event_id(event_id)
+                    .state(&state)
+                    .loop_running(running)
+                    .compaction_last_open(last_open.get(i).copied().unwrap_or(false));
+                if let Some(h) = ext {
+                    builder.ext(h).call()
+                } else {
+                    builder.call()
+                }
+            };
         all.extend(segs);
+        line_raw.extend(raws);
+        // Record the end of the tool-result block span.
+        if let Some(s) = tr_start {
+            if let Some(id) = e.get_str("id") {
+                block_spans.insert(id.to_string(), (s, all.len()));
+            }
+        }
     }
-    all
+    TranscriptBuild {
+        lines: all,
+        line_raw,
+        block_spans,
+    }
+}
+
+/// The transcript lines, oldest first (the legacy signature: the map
+/// of [`build_transcript`] is dropped). Test convenience: production
+/// builds use [`build_transcript`].
+#[cfg(test)]
+pub fn build_transcript_lines(
+    app: &App,
+    width: usize,
+    ext: Option<&crate::ext::ExtHost>,
+) -> Vec<Line<'static>> {
+    build_transcript(app, width, ext).lines
 }
 
 /// Extension reply lines into the transcript: the extension returns
 /// width-independent styled lines; the host wraps them to the pane
 /// width with the same gutter as the built-in render (docs/ui-
 /// extension.md section 4).
+///
+/// Each ext line is wrapped independently to preserve line
+/// boundaries. This is essential for multi-span lines (such as
+/// split diff rows) that rely on their spans staying on the
+/// same terminal row.
 fn ext_lines_guttered(lines: &[crate::ext::ExtLine], width: usize) -> Vec<Line<'static>> {
     let gutter = " ".repeat(GUTTER);
     let wrap_w = width.saturating_sub(GUTTER).max(4);
-    let segs: Vec<(Style, String)> = lines
-        .iter()
-        .flat_map(|l| l.spans.iter().map(|s| (s.style, s.text.clone())))
-        .collect();
-    let wrapped = wrap_styled(segs, wrap_w);
-    guttered(&wrapped, &gutter)
+    let mut out: Vec<Line<'static>> = Vec::with_capacity(lines.len());
+    for line in lines {
+        if line.spans.len() > 1 {
+            // Multi-span line (e.g. split-diff row): the ext pre-formats
+            // the layout. Do not word-wrap; emit the spans as-is so the
+            // two-column structure stays intact. The terminal clips any
+            // overflow.
+            let mut spans = vec![Span::raw(gutter.clone())];
+            for s in &line.spans {
+                spans.push(Span::styled(s.text.clone(), s.style));
+            }
+            // Pad to full width so the card background fills the row.
+            let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+            if used < width {
+                let pad_style = line
+                    .spans
+                    .last()
+                    .map(|s| s.style)
+                    .unwrap_or_default();
+                spans.push(Span::styled(" ".repeat(width - used), pad_style));
+            }
+            out.push(Line::from(spans));
+        } else {
+            // Single-span line: word-wrap to the pane width.
+            let segs: Vec<(Style, String)> = line
+                .spans
+                .iter()
+                .map(|s| (s.style, s.text.clone()))
+                .collect();
+            let wrapped = wrap_styled_continuous(&segs, wrap_w);
+            for wl in &wrapped {
+                let mut spans = vec![Span::raw(gutter.clone())];
+                spans.extend(wl.spans.iter().cloned());
+                // Pad to full width so the card background fills the row.
+                let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+                if used < width {
+                    let pad_style = wl
+                        .spans
+                        .last()
+                        .map(|s| s.style)
+                        .unwrap_or_default();
+                    spans.push(Span::styled(" ".repeat(width - used), pad_style));
+                }
+                out.push(Line::from(spans));
+            }
+        }
+    }
+    out
 }
 
 /// The waiting-message cap of one pending block: the header row
@@ -2495,6 +3100,11 @@ pub fn draw(
     // live while the app mutates (the palette owned values above,
     // same pattern).
     let total = app.transcript_lines(text_w, Some(host)).len();
+    // Store block spans and transcript top row for mouse-click hit-testing
+    // (docs/tui-tool-display-fancy.md section 6).
+    let spans = app.transcript_block_spans(text_w, Some(host));
+    app.set_block_spans(spans);
+    app.set_transcript_top_row(t_area.y);
     let mut scroll = scroll0;
     if browse_active {
         let grew = app.take_events_grew();
@@ -2502,6 +3112,7 @@ pub fn draw(
         app.set_scroll(scroll);
     }
     let start = total.saturating_sub(scroll + h);
+    app.set_transcript_visible_start(start);
     // The cursor col clamps to the visible cursor line length
     // (section 4.1): a transient lines read, released before the
     // mutation.
@@ -2516,14 +3127,16 @@ pub fn draw(
         }
     }
     // The press-path layout: the line texts and the width the
-    // browse motions and the search read.
+    // browse motions and the search read, plus the raw source texts
+    // the browse yank prefers over the rendered lines (section 11.3).
     if browse_active {
         let texts: Vec<String> = app
             .transcript_lines(text_w, Some(host))
             .iter()
             .map(ToString::to_string)
             .collect();
-        app.set_browse_layout(total, h, text_w, texts);
+        let line_raw = app.transcript_raw(text_w, Some(host));
+        app.set_browse_layout(total, h, text_w, texts, line_raw);
     }
     // The owned browse draw inputs: the cursor, the match-line
     // cache, the highlight styles. The cache clone is one pass per
@@ -2541,12 +3154,21 @@ pub fn draw(
     let pl = app.palette();
     let dim_style = pl.style(crate::color::Role::Status, Modifier::empty());
     let accent_style = pl.style(crate::color::Role::Border4, Modifier::empty());
-    let cursor_bg = pl.color(crate::color::Role::Status);
+    let cursor_bg = pl.color(crate::color::Role::CursorLine);
     let match_style = pl.style(crate::color::Role::Hint, Modifier::BOLD);
     let active_style = pl.style(crate::color::Role::Border4, Modifier::BOLD);
     let track_c = pl.color(crate::color::Role::Status);
     let thumb_c = pl.color(crate::color::Role::PlainText);
     let mark_c = pl.color(crate::color::Role::Border4);
+    // The visual-selection shading (section 11.4): the selected span,
+    // read through the browse accessor, and the `Role::Selection`
+    // background tone.
+    let selection = if browse_active {
+        app.browse_ref().visual_selection()
+    } else {
+        None
+    };
+    let sel_bg = pl.color(crate::color::Role::Selection);
     let lines = app.transcript_lines(text_w, Some(host));
     let window = &lines[start..];
     if window.is_empty() {
@@ -2564,7 +3186,7 @@ pub fn draw(
         let p = Paragraph::new(vec![placeholder]);
         f.render_widget(p, t_area);
     } else {
-        let draw_lines = if browse_active {
+        let mut draw_lines = if browse_active {
             browse_window_lines(
                 lines,
                 start,
@@ -2578,10 +3200,35 @@ pub fn draw(
                 cursor_bg,
                 match_style,
                 active_style,
+                selection,
+                sel_bg,
             )
         } else {
             window.to_vec()
         };
+        // Apply fade-in dimming to tool-result blocks that are fading in
+        // (docs/tui-tool-display-fancy.md section 7). For each visible
+        // line, check if it falls within a block span whose fade alpha
+        // is below 1.0; if so, add `Modifier::DIM` to all spans.
+        {
+            let spans = app.block_spans();
+            let fading: std::collections::HashSet<&String> = spans
+                .keys()
+                .filter(|id| app.fade_alpha(id) < 0.999)
+                .collect();
+            if !fading.is_empty() {
+                for (offset, line) in draw_lines.iter_mut().enumerate() {
+                    let idx = start.saturating_add(offset);
+                    if spans.iter().any(|(id, &(s, e))| {
+                        fading.contains(id) && idx >= s && idx < e
+                    }) {
+                        for span in &mut line.spans {
+                            span.style = span.style.add_modifier(Modifier::DIM);
+                        }
+                    }
+                }
+            }
+        }
         let p = Paragraph::new(draw_lines);
         f.render_widget(p, t_area);
         // The position bar: one column at the right edge (section 3).
@@ -3035,10 +3682,11 @@ mod tests {
     fn command_line_editor() -> crate::vim_editor::Editor {
         let mut e = crate::vim_editor::Editor::new();
         e.set_text("alpha beta");
-        e.press(crate::app::Key::Esc);
-        e.press(crate::app::Key::Char('/'));
-        e.press(crate::app::Key::Char('a'));
-        e.press(crate::app::Key::Char('b'));
+        let mut regs = std::collections::HashMap::new();
+        e.press(crate::app::Key::Esc, &mut regs);
+        e.press(crate::app::Key::Char('/'), &mut regs);
+        e.press(crate::app::Key::Char('a'), &mut regs);
+        e.press(crate::app::Key::Char('b'), &mut regs);
         e
     }
 
@@ -3118,13 +3766,13 @@ mod tests {
         // last line after `G`).
         let mut app = long_session_app();
         app.set_viewport_height(24);
-        app.editor().press(crate::app::Key::Esc);
+        app.editor_press(crate::app::Key::Esc);
         app.press(crate::app::Key::Char('s'));
         app.press(crate::app::Key::Char('s'));
         assert!(app.browse_ref().active());
         // Prime the press-path layout, then drive `G`: the cursor
         // to the last line, the view to the tail.
-        app.set_browse_layout(200, 24, 60, vec!["line".to_string(); 200]);
+        app.set_browse_layout(200, 24, 60, vec!["line".to_string(); 200], Vec::new());
         let mut sc = app.scroll();
         app.browse().sync(200, 24, &mut sc, false);
         app.set_scroll(sc);
@@ -3160,7 +3808,7 @@ mod tests {
         // must follow the view, like the gutter and the bar.
         let mut app = long_session_app();
         app.set_viewport_height(24);
-        app.editor().press(crate::app::Key::Esc);
+        app.editor_press(crate::app::Key::Esc);
         app.press(crate::app::Key::Char('s'));
         app.press(crate::app::Key::Char('s'));
         assert!(app.browse_ref().active());
@@ -3195,7 +3843,7 @@ mod tests {
         // gutter.
         let mut app = long_session_app();
         app.set_viewport_height(24);
-        app.editor().press(crate::app::Key::Esc);
+        app.editor_press(crate::app::Key::Esc);
         // Outside browse: no gutter digits crowd the left edge.
         let plain = draw_frame(&mut app, 80, 30);
         app.press(crate::app::Key::Char('s'));
@@ -3253,6 +3901,193 @@ mod tests {
         );
     }
 
+    // ── Contract 3: the raw-source yank (section 11.3) ──────────
+
+    #[test]
+    fn build_transcript_line_raw_tracks_the_lines() {
+        let user = Event::parse_line(
+            r#"{"v":1,"type":"user_message","ts":"t","id":"u1","content":"line A\nline B\nline C"}"#,
+        )
+        .unwrap();
+        let asst = Event::parse_line(
+            r#"{"v":1,"type":"assistant_message","ts":"t","id":"a1","content":"hi"}"#,
+        )
+        .unwrap();
+        let app = app_with_session(vec![user, asst]);
+        let build = build_transcript(&app, 80, None);
+        assert_eq!(
+            build.lines.len(),
+            build.line_raw.len(),
+            "the raw map tracks the lines one-to-one"
+        );
+        // The user message "line A\nline B\nline C" renders as 3 lines,
+        // each carrying its source text.
+        let user_raws: Vec<&Option<String>> = build
+            .line_raw
+            .iter()
+            .take_while(|r| r.is_some())
+            .collect();
+        assert!(!user_raws.is_empty(), "user message should have raw lines");
+        assert_eq!(
+            user_raws[0].as_deref(),
+            Some("line A"),
+            "first user line carries its raw text"
+        );
+        // Collect all non-empty raw values from the user's lines.
+        let user_text: Vec<&str> = user_raws
+            .iter()
+            .filter_map(|o| o.as_deref())
+            .filter(|s| !s.is_empty())
+            .collect();
+        assert!(
+            user_text.contains(&"line A")
+                && user_text.contains(&"line B")
+                && user_text.contains(&"line C"),
+            "all source lines of the user message are present in line_raw"
+        );
+        // Verify the separator between events is None.
+        let user_count = user_raws.len();
+        if user_count < build.line_raw.len() {
+            assert!(
+                build.line_raw[user_count].is_none(),
+                "the line after the last user line should be a separator (None)"
+            );
+        }
+    }
+
+    #[test]
+    fn raw_event_text_returns_the_shareable_source() {
+        let user = Event::parse_line(
+            r##"{"v":1,"type":"user_message","ts":"t","id":"u1","content":"# Title\n\n- a **bold** item"}"##,
+        )
+        .unwrap();
+        assert_eq!(
+            raw_event_text(&user),
+            "# Title\n\n- a **bold** item",
+            "user messages yield the raw markdown, not the rendered lines"
+        );
+
+        let call = Event::parse_line(
+            r#"{"v":1,"type":"tool_call","ts":"t","id":"c1","name":"bash","arguments":{"command":"ls -la /tmp"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            raw_event_text(&call),
+            "ls -la /tmp",
+            "bash calls yield the command"
+        );
+
+        let tool = Event::parse_line(
+            r#"{"v":1,"type":"tool_call","ts":"t","id":"c2","name":"read_file","arguments":{"path":"/etc/hosts"}}"#,
+        )
+        .unwrap();
+        assert!(
+            raw_event_text(&tool)
+                .starts_with('{'),
+            "other tools carry their raw arguments JSON:\n{}",
+            raw_event_text(&tool)
+        );
+
+        let result = Event::parse_line(
+            r#"{"v":1,"type":"tool_result","ts":"t","id":"c1","value":{"text":"out line 1\nout line 2"},"is_error":false}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            raw_event_text(&result),
+            "out line 1\nout line 2",
+            "tool results yield the raw output text"
+        );
+
+        let noop = Event::parse_line(
+            r#"{"v":1,"type":"user_message_retracted","ts":"t","target":"u1"}"#,
+        )
+        .unwrap();
+        assert_eq!(raw_event_text(&noop), "", "no shareable source is the empty string");
+    }
+
+    #[test]
+    fn cursor_row_selection_stays_visible_over_the_cursorline_bg() {
+        // Section 11.4: on the cursor row the selected span must keep
+        // the stronger Selection tone; the cursorline background must
+        // not shadow it. The rest of the row keeps the cursorline tone.
+        let sel_bg = Color::Rgb(0x36, 0x45, 0x73);
+        let cursor_bg = Color::Rgb(0x58, 0x58, 0x72);
+        let base: Vec<Span<'static>> = vec![Span::styled("hello world", Style::default())];
+        let rows = browse_window_lines(
+            &[Line::from(base)],
+            0,
+            1,
+            4,
+            (0, 5),
+            &std::collections::HashSet::new(),
+            None,
+            Style::default(),
+            Style::default(),
+            cursor_bg,
+            Style::default(),
+            Style::default(),
+            Some(((0, 2), (0, 6), false)),
+            sel_bg,
+        );
+        assert_eq!(rows.len(), 1, "one row for the single-line window");
+        let spans: Vec<&Span<'static>> = rows[0].spans.iter().collect();
+        let sel = spans
+            .iter()
+            .find(|s| s.content == "llo")
+            .expect("the selected span 'llo'");
+        assert_eq!(
+            sel.style.bg,
+            Some(sel_bg),
+            "the selected span keeps the Selection tone on the cursor row"
+        );
+        let rest = spans
+            .iter()
+            .find(|s| s.content == "he")
+            .expect("the unselected span 'he'");
+        assert_eq!(
+            rest.style.bg,
+            Some(cursor_bg),
+            "the unselected part of the cursor row keeps the cursorline tone"
+        );
+    }
+
+    #[test]
+    fn cursor_row_without_selection_keeps_the_cursorline_bg() {
+        // The pre-11.4 behaviour on a plain cursor row: the whole row
+        // gets the low-contrast cursorline background (section 4.3).
+        let cursor_bg = Color::Rgb(0x58, 0x58, 0x72);
+        let base: Vec<Span<'static>> =
+            vec![Span::styled("hello world", Style::default())];
+        let rows = browse_window_lines(
+            &[Line::from(base)],
+            0,
+            1,
+            4,
+            (0, 5),
+            &std::collections::HashSet::new(),
+            None,
+            Style::default(),
+            Style::default(),
+            cursor_bg,
+            Style::default(),
+            Style::default(),
+            None,
+            Color::Rgb(0x36, 0x45, 0x73),
+        );
+        let spans: Vec<&Span<'static>> = rows[0].spans.iter().collect();
+        for text in ["hello", "world"] {
+            let s = spans
+                .iter()
+                .find(|s| s.content == text)
+                .unwrap_or_else(|| panic!("the '{text}' span is missing"));
+            assert_eq!(
+                s.style.bg,
+                Some(cursor_bg),
+                "cursor row without a selection: the row keeps the cursorline bg"
+            );
+        }
+    }
+
     #[test]
     fn input_box_title_prompt_wins_over_the_frame_label() {
         // The typed prompt must stay visible when a frame extension
@@ -3286,7 +4121,8 @@ mod tests {
         // built-in mode label, like before the prompt fix.
         let mut e = crate::vim_editor::Editor::new();
         e.set_text("abc");
-        e.press(crate::app::Key::Esc); // normal mode
+        let mut regs = std::collections::HashMap::new();
+        e.press(crate::app::Key::Esc, &mut regs); // normal mode
         let frame = frame_with_label("[COMMAND]");
         let title = input_box_title(&e, "[NORMAL]", &frame, Color::DarkGray, None);
         assert_eq!(title.to_string(), "[COMMAND]");
@@ -4081,12 +4917,13 @@ mod tests {
         )
         .unwrap();
         let cfg = TuiConfig {
+            clipboard_unnamed: false,
             sessions_root: root.join("sessions"),
             schemas_dir: None,
             loop_cmd: None,
             config_dir: root.clone(),
             config_path: root.join("config.toml"),
-            ext_dir: Some(root.join("ui_extensions")),
+            ext_dirs: vec![root.join("ui_extensions")],
             active_model: None,
             color: None,
             color_scheme: None,
@@ -4316,7 +5153,7 @@ mod tests {
         let content = "head $a+b$\n\n```mermaid\ngraph TD\n  A-->B\n```\n\n```bash\necho hi\n```";
         let base = Style::default();
         let palette = crate::color::Palette::builtin(crate::color::Level::Rgb);
-        let plain = render_message_content(content, 7, None, 60, base, &palette);
+        let (plain, _prov) = render_message_content(content, 7, None, 60, base, &palette);
         let builtin = wrap_markdown_p(content, 60, &palette, base);
         let show = |v: &Vec<Line>| v.iter().map(|l| l.to_string()).collect::<Vec<_>>();
         assert_eq!(
@@ -4335,12 +5172,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().to_path_buf();
         let cfg = crate::config::TuiConfig {
+            clipboard_unnamed: false,
             sessions_root: root.join("sessions"),
             schemas_dir: None,
             loop_cmd: None,
             config_dir: root.clone(),
             config_path: root.join("config.toml"),
-            ext_dir: None,
+            ext_dirs: Vec::new(),
             active_model: None,
             color: None,
             color_scheme: None,
@@ -4353,7 +5191,7 @@ mod tests {
         let host = crate::ext::ExtHost::new(&disc, &cfg);
         let palette = crate::color::Palette::builtin(crate::color::Level::Rgb);
         let content = "before\n| a | b |\n| - | - |\n| 1 | 2 |\nafter";
-        let lines =
+        let (lines, _prov) =
             render_message_content(content, 1, Some(&host), 60, Style::default(), &palette);
         let text: String = lines
             .iter()
@@ -4511,12 +5349,13 @@ mod tests {
     fn empty_host() -> (crate::ext::ExtHost, tempfile::TempDir) {
         let tmp = tempfile::TempDir::new().unwrap();
         let cfg = crate::config::TuiConfig {
+            clipboard_unnamed: false,
             sessions_root: tmp.path().join("sessions"),
             schemas_dir: None,
             loop_cmd: None,
             config_dir: tmp.path().to_path_buf(),
             config_path: tmp.path().join("config.toml"),
-            ext_dir: Some(tmp.path().join("ui_extensions")),
+            ext_dirs: vec![tmp.path().join("ui_extensions")],
             active_model: None,
             color: None,
             color_scheme: None,
@@ -5098,7 +5937,7 @@ mod cursor_span_tests {
     use super::cursor_line_spans;
     use super::thinking_text;
     use super::wrap_thinking;
-    use ratatui::style::Modifier;
+    use ratatui::style::{Modifier, Style};
     use ratatui::text::Span;
     use serde_json::json;
 
@@ -5178,7 +6017,8 @@ mod cursor_span_tests {
         let palette = crate::color::Palette::builtin(crate::color::Level::Rgb);
         let style = palette.style(crate::color::Role::Thinking, Modifier::empty());
         let text = "preamble\n| Level | Border |\n|---|---|\n| 0 | gray |\n| 1 | blue |\nafter";
-        let lines = wrap_thinking(text, 60, &palette, style);
+        let lines =
+            wrap_thinking(text, 60, &palette, style, crate::tool_display::HighlightEngine::TreeSitter);
         let text: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
         let joined = text.join("\n");
         assert!(joined.contains('┌'), "the grid border: {joined:?}");
@@ -5208,4 +6048,92 @@ mod cursor_span_tests {
         assert_eq!(cell.style, style, "the cell keeps the thinking tone");
     }
 
+    /// The 2026-09-11 request: fenced code blocks in thinking content
+    /// are highlighted by the active engine (tree-sitter by default).
+    /// Tokens carry the theme's foreground color and no background;
+    /// the fence markers dim in the `Fence` tone; the prose keeps the
+    /// thinking tone.
+    #[test]
+    fn thinking_fence_code_is_highlighted_by_the_engine() {
+        let palette = crate::color::Palette::builtin(crate::color::Level::Rgb);
+        let style = palette.style(crate::color::Role::Thinking, Modifier::empty());
+        let code = palette.style(crate::color::Role::Code, Modifier::empty());
+        let fence_style = palette.style(crate::color::Role::Fence, Modifier::DIM);
+        let text = "try the fix\n```rust\nfn main() { let x = 42; }\n```\ndone";
+        let lines = wrap_thinking(
+            text,
+            60,
+            &palette,
+            style,
+            crate::tool_display::HighlightEngine::TreeSitter,
+        );
+        let joined: String =
+            lines.iter().map(|l| l.to_string()).collect::<Vec<_>>().join("\n");
+        assert!(joined.contains("fn main"), "the code line survives: {joined:?}");
+        // The fence marker line is dimmed in the `Fence` tone.
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.iter().any(|s| s.content == "```" && s.style == fence_style)),
+            "the fence marker is dimmed: {joined:?}"
+        );
+        // The keyword `fn` carries a theme foreground distinct from
+        // both the thinking tone and the code tone; no segment carries
+        // a background (the 2026-09-11 fg-only rule).
+        let mut saw_kw = false;
+        for l in &lines {
+            for s in l.iter() {
+                assert!(s.style.bg.is_none(), "no bg on highlighted text: {s:?}");
+                if s.content == "fn" {
+                    saw_kw = s.style.fg.is_some()
+                        && s.style != style
+                        && s.style != code
+                        && s.style != Style::default();
+                }
+            }
+        }
+        assert!(saw_kw, "the `fn` keyword carries a theme fg: {joined:?}");
+        // The prose around the fence keeps the thinking tone.
+        let prose = lines
+            .iter()
+            .find(|l| l.to_string().contains("try the fix"))
+            .unwrap();
+        assert!(
+            prose.iter().any(|s| s.content.contains("try") && s.style == style),
+            "prose keeps the thinking tone: {joined:?}"
+        );
+    }
+
+    /// An unlabeled fence has no grammar: the code line keeps the
+    /// `Code` tone, fg-only, with no syntax colors.
+    #[test]
+    fn thinking_unlabeled_fence_falls_back_to_the_code_tone() {
+        let palette = crate::color::Palette::builtin(crate::color::Level::Rgb);
+        let style = palette.style(crate::color::Role::Thinking, Modifier::empty());
+        let code = palette.style(crate::color::Role::Code, Modifier::empty());
+        let text = "```\nlet x = 1\n```";
+        let lines =
+            wrap_thinking(text, 60, &palette, style, crate::tool_display::HighlightEngine::TreeSitter);
+        let code_line = lines.iter().find(|l| l.to_string().contains("let x = 1")).unwrap();
+        let spans: Vec<&Span<'static>> = code_line.iter().collect();
+        assert!(
+            spans.iter().all(|s| s.style == code),
+            "unlabeled fence code keeps the code tone: {code_line:?}"
+        );
+    }
+
+    /// A `|`-row inside a code fence is code, not a table: no grid
+    /// border, the pipes stay literal.
+    #[test]
+    fn thinking_table_rows_inside_a_fence_are_not_a_grid() {
+        let palette = crate::color::Palette::builtin(crate::color::Level::Rgb);
+        let style = palette.style(crate::color::Role::Thinking, Modifier::empty());
+        let text = "```csv\n| a | b |\n| 1 | 2 |\n```";
+        let lines =
+            wrap_thinking(text, 60, &palette, style, crate::tool_display::HighlightEngine::TreeSitter);
+        let joined: String =
+            lines.iter().map(|l| l.to_string()).collect::<Vec<_>>().join("\n");
+        assert!(!joined.contains('┌'), "no grid inside a code fence: {joined:?}");
+        assert!(joined.contains("| a | b |"), "the pipe line stays literal: {joined:?}");
+    }
 }

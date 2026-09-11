@@ -902,6 +902,7 @@ mod tests {
             .unwrap();
         }
         let cfg = TuiConfig {
+            clipboard_unnamed: false,
             sessions_root: root.join("sessions"),
             schemas_dir: if schemas {
                 Some(root.join("schemas").join("events").join("v1"))
@@ -916,7 +917,7 @@ mod tests {
             config_dir: root.clone(),
             config_path: root.join("config.toml"),
             active_model: None,
-            ext_dir: None,
+            ext_dirs: Vec::new(),
             color: None,
             color_scheme: None,
             custom_schemes: std::collections::HashMap::new(),

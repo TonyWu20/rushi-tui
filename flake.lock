@@ -320,14 +320,17 @@
         "nixpkgs": "nixpkgs_5"
       },
       "locked": {
-        "lastModified": 1788856535,
-        "narHash": "sha256-PPGWAc96wQqc9KXaWSJQJpDJbaljKgUJx7q74X10PFo=",
-        "path": "/home/tony/programming/rust-unix-harness",
-        "type": "path"
+        "lastModified": 1788965967,
+        "narHash": "sha256-3nYC6ptxgus4IHh6xlHs/GLEUGenGAsnYjwP3ui+jbM=",
+        "ref": "refs/heads/main",
+        "rev": "fdd7e09cde2f368534defabc6a3069a7f305640d",
+        "revCount": 179,
+        "type": "git",
+        "url": "file:/home/tony/programming/rust-unix-harness"
       },
       "original": {
-        "path": "/home/tony/programming/rust-unix-harness",
-        "type": "path"
+        "type": "git",
+        "url": "file:/home/tony/programming/rust-unix-harness"
       }
     },
     "rust-analyzer-src": {

@@ -1,0 +1,36 @@
+# `tui-highlight` — the tree-sitter syntax-highlight engine
+# (docs/NEW-refactor.md, must-do 1).
+#
+# This crate owns the tree-sitter runtime and every bundled grammar.
+# Nothing else in the workspace may depend on tree-sitter: a change to
+# the TUI never rebuilds the grammars, and a grammar update never
+# rebuilds the TUI.
+
+[package]
+name = "tui-highlight"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ratatui = { workspace = true }
+tree-sitter = "0.27"
+tree-sitter-language = "0.1"
+# One grammar crate per bundled language. All use the new
+# `tree-sitter-language` `LanguageFn` API (compatible with the 0.27
+# runtime). The older tree-sitter-markdown 0.7.x and the long-tail
+# grammars (lua, ruby, scala, perl, r, objc, make) still ship the old
+# `tree_sitter::Language` ABI and are left out; they fall back to
+# plain text until a new-API release lands.
+tree-sitter-rust = "0.24"
+tree-sitter-python = "0.25"
+tree-sitter-c = "0.24"
+tree-sitter-cpp = "0.23"
+tree-sitter-go = "0.25"
+tree-sitter-java = "0.23"
+tree-sitter-javascript = "0.25"
+tree-sitter-typescript = "0.23"
+tree-sitter-bash = "0.25"
+tree-sitter-json = "0.24"
+tree-sitter-html = "0.23"
+tree-sitter-css = "0.25"
+tree-sitter-yaml = "0.7"

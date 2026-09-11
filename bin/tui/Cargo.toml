@@ -21,6 +21,20 @@ libc = "0.2"
 bon = { workspace = true }
 frizbee = "0.13"
 uuid = { version = "1", features = ["v4"] }
+# The OSC 52 host-clipboard write of the browse `y` (docs/tui-
+# conversation-browsing.md section 11.3): the payload base64.
+# Already in the dependency tree transitively (termwiz); a direct
+# dep of `bin/tui` only, so no new transitive crate (section 11.6).
+base64 = "0.22"
+# Grammar-based syntax highlighting (docs/tui-tool-display-fancy.md
+# section 4). The tree-sitter engine lives in its own crate so TUI
+# source changes never trigger grammar rebuilds and vice versa.
+tui-highlight = { path = "../../crates/tui-highlight" }
+# Image rendering via the Kitty/Sixel graphics protocol
+# (docs/NEW-refactor.md must-do 3). The `image` crate decodes
+# base64 payloads the kernel sends in tool-result `details`.
+ratatui-image = { version = "11", default-features = false, features = ["crossterm", "image-defaults"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 # Bootstrap split (docs/tui-ext-repo-split.md section 4, item A1):
 # `rushi-common` was the kernel path dep `../../crates/rushi`; as the TUI
 # now lives in its own repo it points at the sibling kernel checkout.
@@ -28,6 +42,7 @@ uuid = { version = "1", features = ["v4"] }
 rushi-common = { path = "../../../rust-unix-harness/crates/rushi" }
 notify = "8.2.0"
 notify-debouncer-mini = "0.7"
+ansi-to-tui = "8.0.1"
 
 [dev-dependencies]
 tempfile = "3"

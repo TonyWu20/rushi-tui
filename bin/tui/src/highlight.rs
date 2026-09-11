@@ -21,7 +21,9 @@ pub type Seg = (Style, String);
 
 // ── markdown ───────────────────────────────────────────────────
 
-fn is_fence_delim(t: &str) -> bool {
+/// True when `t` (already left-trimmed) opens or closes a fenced
+/// code block: a leading ` ``` ` or `~~~` run.
+pub fn is_fence_delim(t: &str) -> bool {
     t.starts_with("```") || t.starts_with("~~~")
 }
 
@@ -185,7 +187,7 @@ pub fn md_line(line: &str, fence: &mut bool, palette: &Palette) -> Vec<Seg> {
 /// The fence marker line of the presentation pass: the delimiter
 /// and the language tag dimmed (the code content keeps the Code
 /// role, literal).
-fn fence_line_p(t: &str, palette: &Palette) -> Vec<Seg> {
+pub fn fence_line_p(t: &str, palette: &Palette) -> Vec<Seg> {
     let delim = if t.starts_with("```") { "```" } else { "~~~" };
     let style = palette.style(Role::Fence, Modifier::DIM);
     let mut out = vec![(style, delim.to_string())];

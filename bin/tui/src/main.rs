@@ -16,12 +16,12 @@ mod event;
 mod ext;
 mod float;
 mod highlight;
+mod image_render;
 mod palette;
 mod picker;
 mod port;
 mod port_file;
 mod render;
-mod syntect_highlight;
 mod tool_display;
 mod vim_editor;
 
