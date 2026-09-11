@@ -101,8 +101,8 @@ pub struct TuiConfig {
     pub clipboard_unnamed: bool,
     /// The tool-result display state (docs/tui-tool-display-port.md
     /// section 2, the config part): a preset plus the per-field
-    /// overrides. The `opencode` preset is the default: read and
-    /// search results stay collapsed.
+    /// overrides. The `opencode` preset is the default: read stays
+    /// collapsed.
     pub tool_display: crate::tool_display::ToolDisplay,
 }
 
@@ -215,16 +215,14 @@ struct RawTui {
 
 /// The `[tui.tool_display]` table: a preset name plus the per-field
 /// overrides (docs/tui-tool-display-port.md section 2, the config
-/// part). The presets are `opencode` (the default: read and search
-/// hidden, bash collapsed to 10 lines), `balanced` (summaries), and
-/// `verbose` (larger previews).
+/// part). The presets are `opencode` (the default: read hidden, bash
+/// collapsed to 10 lines), `balanced` (summaries), and `verbose`
+/// (larger previews).
 #[derive(Debug, Default, Deserialize)]
 struct RawToolDisplay {
     preset: Option<String>,
     /// The read output mode: `hidden`, `summary`, `preview`.
     read: Option<String>,
-    /// The search output mode: `hidden`, `count`, `preview`.
-    search: Option<String>,
     /// The bash output mode: `hidden`, `summary`, `preview`.
     bash: Option<String>,
     /// The preview line count of the read preview.
@@ -442,15 +440,6 @@ impl TuiConfig {
                         format!(
                             "config [tui.tool_display] read: unknown mode {m:?} \
                              (expected hidden, summary, or preview)"
-                        )
-                    })?;
-            }
-            if let Some(m) = t.search.as_deref() {
-                tool_display.search_mode =
-                    crate::tool_display::parse_search_mode(m).ok_or_else(|| {
-                        format!(
-                            "config [tui.tool_display] search: unknown mode {m:?} \
-                             (expected hidden, count, or preview)"
                         )
                     })?;
             }
@@ -927,7 +916,6 @@ preview_lines = 12
         assert_eq!(cfg.tool_display.read_mode, OutputMode::Preview);
         assert_eq!(cfg.tool_display.preview_lines, 12);
         // The untouched fields keep the preset values.
-        assert_eq!(cfg.tool_display.search_mode, SearchMode::Hidden);
         assert_eq!(cfg.tool_display.bash_mode, OutputMode::Preview);
     }
 

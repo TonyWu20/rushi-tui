@@ -2,7 +2,7 @@
 //!
 //! A window onto the session log and a supervisor for the opaque loop
 //! (docs/tui.md). Everything session-shaped goes through
-//! [`crate::port::SessionPort`]; this file is the composition root:
+//! [`crate::port::SessionPort`]. This file is the composition root:
 //! terminal, runtime, port, and the draw/input loop.
 
 #![deny(clippy::todo, clippy::unimplemented, clippy::unreachable)]
@@ -16,6 +16,7 @@ mod event;
 mod ext;
 mod float;
 mod highlight;
+mod markdown;
 mod image_render;
 mod palette;
 mod picker;
@@ -29,6 +30,7 @@ mod vim_editor;
 mod snapshot_tests;
 
 use std::io::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use std::time::Instant;
 
@@ -81,6 +83,29 @@ impl Drop for TermGuard {
         let _ = out.execute(cevent::DisableMouseCapture);
         crossterm::execute!(out, terminal::LeaveAlternateScreen, crossterm::cursor::Show).ok();
         let _ = out.flush();
+    }
+}
+
+/// A terminal-control signal sets this flag. The handler only
+/// stores a bool, so it is async-signal-safe. The main loop reads
+/// the flag and stops the extension groups before the process exits.
+/// A signalled TUI leaves no orphan extension behind
+/// (docs/ui-extension.md section 7).
+static SIGNAL_SHUTDOWN: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn on_shutdown_signal(_sig: libc::c_int) {
+    SIGNAL_SHUTDOWN.store(true, Ordering::SeqCst);
+}
+
+/// Install handlers for SIGTERM, SIGINT, and SIGHUP. Each handler
+/// just sets [`SIGNAL_SHUTDOWN`]. The stop work runs on the main
+/// thread at the next loop check.
+fn install_shutdown_handlers() {
+    let handler: libc::sighandler_t = on_shutdown_signal as *const () as _;
+    unsafe {
+        libc::signal(libc::SIGTERM, handler);
+        libc::signal(libc::SIGINT, handler);
+        libc::signal(libc::SIGHUP, handler);
     }
 }
 
@@ -139,13 +164,13 @@ fn key_input(k: &cevent::KeyEvent) -> Option<Key> {
 /// bucket, and `max`/`xhigh` share the highest (docs/tui.md 7.2).
 const THINKING_LEVEL_ORDER: &[&str] = &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 
-/// TUI process diagnostic log. One `pid ms msg` line appended to a
-/// log file, never to stderr: after `TermGuard::init` the TUI owns
-/// the terminal (alt-screen), and a raw stderr write bypasses the
-/// renderer and corrupts the frame (FT-016). The path is `TUI_LOG`
-/// when set, otherwise the XDG cache default `<cache>/tui/tui.log`
-/// under `$XDG_CACHE_HOME` or `$HOME/.cache`. Write failures are
-/// dropped (the log must not take the UI down).
+/// TUI process diagnostic log. Each line is `pid ms msg`.
+/// After `TermGuard::init` the TUI owns the terminal, so writes go
+/// to a log file, never to stderr. A raw stderr write would bypass
+/// the renderer and corrupt the frame (FT-016). The path is
+/// `TUI_LOG` when set. Otherwise the XDG cache default
+/// `<cache>/tui/tui.log` under `$XDG_CACHE_HOME` or `$HOME/.cache`.
+/// Write failures are dropped. The log must not take the UI down.
 fn tui_log(msg: &str) {
     let Some(path) = tui_log_path() else {
         return;
@@ -193,9 +218,8 @@ fn effort_level(effort: &str) -> u32 {
     }
 }
 
-/// The active model name for the effort write-back, matching the
-/// bin/model resolution: the `MODEL` env var wins, then the config's
-/// `[active] model`, then the default.
+/// The active model name for the effort write-back. The `MODEL`
+/// env var wins, then the config `[active] model`, then the default.
 fn resolve_active_model_name(cfg: &TuiConfig) -> String {
     std::env::var("MODEL")
         .ok()
@@ -204,10 +228,9 @@ fn resolve_active_model_name(cfg: &TuiConfig) -> String {
         .unwrap_or_else(|| "deepseek".to_string())
 }
 
-/// The resolved reasoning effort of one model name, matching the
-/// bin/model precedence: the per-model table wins over the global
-/// `[model]` table; a missing key defaults to `medium`; `off`
-/// normalizes to `none`.
+/// The resolved reasoning effort of one model name. The per-model
+/// table wins over the global `[model]` table. A missing key
+/// defaults to `medium`. `off` normalizes to `none`.
 fn resolve_reasoning_effort(text: &str, active: &str) -> String {
     let v: toml::Value = toml::from_str(text)
         .unwrap_or_else(|_| toml::Value::Table(toml::map::Map::new()));
@@ -310,8 +333,8 @@ fn main() {
             std::process::exit(1);
         }
     };
-    // Extension discovery fails loud before any terminal effect:
-    // a bad manifest or a broken command refuses the start and names
+    // Extension discovery fails loud before any terminal effect. A
+    // bad manifest or a broken command refuses the start and names
     // the file (docs/ui-extension-plan.md stage 1).
     let disc = match ext::discover(&cfg) {
         Ok(d) => d,
@@ -333,10 +356,10 @@ fn main() {
     let backend = CrosstermBackend::new(std::io::stdout());
     let mut term = Terminal::new(backend).expect("cannot create the terminal");
     let mut app = App::new();
-    // The [tui] color override forces the capability level; absent,
+    // The [tui] color override forces the capability level. Absent,
     // the environment detection stands (color.rs module docs). The
     // [tui] color scheme (docs/tui-color-scheme.md section 3) maps
-    // every color role to a hex value; the values lower to the level.
+    // every color role to a hex value. The values lower to the level.
     let level = cfg.color.unwrap_or_else(crate::color::Level::detect);
     let palette = match crate::color::palette_from_config(
         level,
@@ -388,7 +411,7 @@ fn main() {
         app.set_active(id.clone(), events.clone());
         app.set_watch_rx(port.watch(&id, TailCursor::end()));
         app.set_sessions(rt.block_on(port.list_sessions()).unwrap_or_default());
-        // Reattach a live loop from an earlier TUI (FT-003): the
+        // Reattach a live loop from an earlier TUI (FT-003). The
         // persistent probe marks the session running, so the status
         // bit shows the real state, not this process's memory.
         resync_external_loop(&rt, &port, &mut app, &id);
@@ -402,10 +425,10 @@ fn main() {
     }
 
     // Restore the persisted thinking level for the active model from
-    // the config file. This must happen after set_active because
-    // set_active rebuilds ext_status_values from the session log,
-    // which would overwrite the config value with a stale value from
-    // the previous loop run.
+    // the config file. This must happen after set_active. set_active
+    // rebuilds ext_status_values from the session log. That would
+    // overwrite the config value with a stale value from the previous
+    // loop run.
     if let Ok(cfg_text) = std::fs::read_to_string(&cfg.config_path) {
         let active_model = resolve_active_model_name(&cfg);
         let effort = resolve_reasoning_effort(&cfg_text, &active_model);
@@ -424,19 +447,31 @@ fn main() {
 
     let mut last_width: usize = 0;
     let mut last_loop_probe = Instant::now();
+    // Catch SIGTERM, SIGINT, and SIGHUP so a signalled quit still
+    // stops the extension groups (docs/ui-extension.md section 7).
+    install_shutdown_handlers();
     'ui: loop {
+        // A terminal-control signal (SIGTERM, SIGINT, or SIGHUP) set
+        // the flag. Stop the extension groups and exit, mirroring the
+        // quit path. No orphan outlives a signalled TUI
+        // (docs/ui-extension.md section 7).
+        if SIGNAL_SHUTDOWN.swap(false, Ordering::SeqCst) {
+            let _ = app.detach_all_handles();
+            host.stop();
+            return finish(&mut term);
+        }
         // 1. New log events for the active session.
         while let Some(item) = app.drain_watch() {
             let is_event = matches!(item, WatchItem::Event { .. });
             app.on_watch_item(item);
             if is_event {
                 // Forward the new event to the extensions whose kinds
-                // match; the event id is its index in the log
+                // match. The event id is its index in the log
                 // (docs/ui-extension.md section 4 history rule).
                 let evs = app.events();
                 let ev = evs.last().cloned().expect("a watch event was just pushed");
                 // A malformed line the transcript now shows is a
-                // TUI-side finding: leave it in the trace log so it
+                // TUI-side finding. Leave it in the trace log so it
                 // is readable without a human report (FT-001).
                 if ev.kind() == EventKind::BadLine {
                     let raw = ev
@@ -535,11 +570,10 @@ fn main() {
         for _ in app.drain_loop_lines() {}
 
         // 3. One input batch, or a short wait. A wheel notch queues
-        // many scroll events at once; drain the whole pending queue,
-        // then draw once. One event per frame (with a full redraw
-        // between) starved key input behind a mouse burst: the keys
-        // sat in the queue and the UI looked hung. Draining keeps
-        // keys responsive (docs/tui_feature_requests_from_human.md).
+        // many scroll events at once. Drain the whole pending queue,
+        // then draw once. One event per frame starved key input behind
+        // a mouse burst. Draining keeps keys responsive
+        // (docs/tui_feature_requests_from_human.md).
         let mut evs: Vec<cevent::Event> = Vec::new();
         // While a response is streaming or animations are in flight,
         // tick at 16 ms (~60 FPS). Otherwise 100 ms idle.
@@ -551,9 +585,9 @@ fn main() {
         match cevent::poll(poll_to) {
             Ok(true) => {
                 // Read pending events until the queue is empty.
-                // Use a 1 ms poll, not 0: with crossterm's
-                // `use-dev-tty` input source a zero poll timeout
-                // skips the parser check and always reports empty.
+                // Use a 1 ms poll, not 0. A zero poll timeout on
+                // crossterm's `use-dev-tty` input source skips the parser
+                // check and always reports empty.
                 while cevent::poll(Duration::from_millis(1)).unwrap_or(false) {
                     match cevent::read() {
                         Ok(e) => evs.push(e),
@@ -587,7 +621,7 @@ fn main() {
         for e in evs {
             match e {
                 cevent::Event::Key(k) => {
-                    // Only press/repeat matter; release events carry
+                    // Only press/repeat matter. Release events carry
                     // no information for this UI.
                     if matches!(
                         k.kind,
@@ -621,7 +655,7 @@ fn main() {
                             }
                             crate::tool_display::ExpandMode::Focus => {
                                 // In focus mode a click sets focus to the
-                                // nearest block; the draw loop will
+                                // nearest block. The draw loop will
                                 // animate it open.
                                 if let Some(id) = app.block_at_transcript_line(transcript_line).map(|s| s.to_string()) {
                                     app.set_focus_block(&id);
@@ -641,7 +675,7 @@ fn main() {
         // conversation-browsing.md section 11.3): the OSC 52 escapes
         // go to the terminal before the next frame, like the
         // extension notify OSCs. On a terminal without OSC 52
-        // support the escape is ignored; the in-memory register still
+        // support the escape is ignored. The in-memory register still
         // serves the editor's `p`.
         for esc in app.drain_host_clipboard() {
             let mut out = std::io::stdout();
@@ -659,7 +693,7 @@ fn main() {
                     let content = app.take_draft();
                     // The input queue toggle (docs/tui-pending-user-
                     // messages.md stage 2): the follow queue keeps the
-                    // message for a turn restart; the steer queue is
+                    // message for a turn restart. The steer queue is
                     // the default (the missing field).
                     let ev = if app.follow_queue() {
                         event::produce::user_message_follow(&content)
@@ -999,9 +1033,9 @@ fn main() {
                     }
                     host.clear_replies();
                     host.send_history(&events, last_width.saturating_sub(16).max(40));
-                    // Reattach the target's persistent loop state and
-                    // block a double start (FT-003): a live loop for
-                    // the target would get a second start here.
+                    // Reattach the target's persistent loop state.
+                    // Also block a double start (FT-003): a live loop
+                    // for the target would get a second start here.
                     resync_external_loop(&rt, &port, &mut app, &new_sid);
                     match port.external_loop_pid(&new_sid) {
                         Ok(Some(pid)) => {
@@ -1039,7 +1073,7 @@ fn main() {
                 | Action::ToggleThinking
                 | Action::ToggleThinkingExpand
                 | Action::ToggleFollowQueue => {
-                    // The state lives on the app; the next draw
+                    // The state lives on the app. The next draw
                     // repaints. No port work.
                 }
                 Action::CycleEffort => {
@@ -1047,7 +1081,7 @@ fn main() {
                     // block.md section 4): the next effort value in
                     // the order, written to the active model's
                     // config entry. The loop publishes the new level
-                    // on its next step; the input-area border moves
+                    // on its next step. The input-area border moves
                     // then (docs/tui.md 7.2).
                     let active = resolve_active_model_name(&cfg);
                     match cycle_reasoning_effort(&cfg.config_path, &active) {
@@ -1160,20 +1194,19 @@ fn main() {
                     // job, then re-init when the shell resumes it with
                     // SIGCONT (via `fg`).
                     //
-                    // The TUI is a child of the `rushi` launcher
-                    // (`rushi tui`, which blocks in a `wait` on us), so
-                    // the shell's job leader is the *parent*, not this
-                    // process. Stopping only ourselves (`raise`) would
-                    // leave the leader running and the shell would never
-                    // see its job stop, so it never regains the terminal
-                    // and `fg` is unreachable. We therefore send SIGTSTP
-                    // to the whole foreground process group (`kill(0, ..)`
-                    // — pgid 0 is "my process group"): that stops the
-                    // leader too, so the shell prints a prompt where
-                    // `fg` (SIGCONT to the group) resumes us. Loops and
-                    // extensions run in their own sessions (`setsid`),
-                    // so they are insulated and keep running through the
-                    // suspend.
+                    // The TUI is a child of the `rushi` launcher. The
+                    // launcher blocks in a `wait` on us. The shell's
+                    // job leader is the parent, not this process.
+                    // Stopping only ourselves (`raise`) would leave the
+                    // leader running. The shell would never see its job
+                    // stop, so it never regains the terminal and `fg`
+                    // is unreachable. We therefore send SIGTSTP to the
+                    // whole foreground process group. Pgid 0 is our own
+                    // group. That stops the leader too. The shell then
+                    // prints a prompt where `fg` (SIGCONT to the group)
+                    // resumes us. Loops and extensions run in their
+                    // own sessions (`setsid`), so they are insulated
+                    // and keep running through the suspend.
                     let _ = terminal::disable_raw_mode();
                     let mut out = std::io::stdout();
                     let _ = out.execute(cevent::DisableMouseCapture);
@@ -1199,13 +1232,13 @@ fn main() {
         }
 
         // 4.5 Extension ticks, transform timeouts, and resize
-        // re-requests. The tick cadence is per extension; the main
+        // re-requests. The tick cadence is per extension. The main
         // loop drives the host because it owns the width, session,
         // and loop state.
         if let Some(sid) = app.active().cloned() {
             // The live model stream channel (docs/tui-streaming-response.md
             // section 6.2): poll the loop-owned file only while the loop
-            // runs; a dead loop settles the live block (no stale block,
+            // runs. A dead loop settles the live block (no stale block,
             // P5).
             match port.model_stream_path(&sid) {
                 Ok(path) if app.loop_running(&sid) => app.refresh_stream(&path),
@@ -1219,10 +1252,9 @@ fn main() {
         app.pump_stream_pacing();
         let width = term.size().map(|s| s.width as usize).unwrap_or(80);
         if width != last_width {
-            // The re-request width is the transform budget: the
-            // terminal width minus the border (2), the transcript
-            // padding (2), and the content gutter (12), so the
-            // re-rendered art fits the pane like the first pass.
+            // The re-request width is the transform budget: terminal
+            // width minus border (2), transcript padding (2), and the
+            // content gutter (12). The re-rendered art fits the pane.
             host.on_resize(width.saturating_sub(16));
             last_width = width;
         }
@@ -1239,7 +1271,7 @@ fn main() {
         // reply stays live (border color tracks the thinking level).
         host.pump_frame(&tick, &app.editor_mode_label());
         // The row owner (the host-reserved row above the input box)
-        // gets the same cadence ping so its row_spec reply stays
+        // gets the same cadence ping. That keeps its row_spec reply
         // live (docs/ui-extension.md section 4, `row` capability).
         host.pump_row(&tick, &app.editor_mode_label());
         host.poll_transforms();
@@ -1251,8 +1283,8 @@ fn main() {
             let session = app.active().map(|s| s.as_str());
             host.request_commands(session, loop_running);
         }
-        // 4.6 The persistent loop probe, once a second (FT-003): it
-        // flips the running bit when an external loop finishes, and
+        // 4.6 The persistent loop probe, once a second (FT-003). It
+        // flips the running bit when an external loop finishes. It
         // marks it when another TUI started a loop for this session.
         if last_loop_probe.elapsed() >= Duration::from_secs(1) {
             last_loop_probe = Instant::now();
@@ -1387,7 +1419,7 @@ fn edit_in_terminal(
         let _ = terminal::enable_raw_mode();
     };
     let result = editor::run_editor(initial, suspend, resume);
-    // The editor drew on the alternate screen; clear before the next
+    // The editor drew on the alternate screen. Clear before the next
     // frame so its content does not bleed through.
     let _ = term.clear();
     match result {

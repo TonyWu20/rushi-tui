@@ -126,76 +126,89 @@ class Screen:
         # the raw buffer keeps them for assertions like "the turn
         # finished and the terminal bell rang".
         self.raw = bytearray()
+        # Tail bytes of the last read that do not yet form complete
+        # UTF-8; a multibyte character split across two reads (the
+        # Nerd Font footer glyphs are 3-byte sequences) decodes whole
+        # instead of turning into U+FFFD.
+        self.utf8_carry = b""
 
     def feed(self, data):
         self.raw += data
-        i = 0
-        n = len(data)
-        while i < n:
-            b = data[i]
-            if b == 0x1B:  # escape
-                if i + 1 < n and data[i + 1] == 0x5B:  # CSI: \x1b[
-                    j = i + 2
+        # Decode the largest complete-UTF-8 prefix of the carried +
+        # fresh bytes; a partial multibyte tail waits for the next
+        # read, so a Nerd Font glyph split across reads never decodes
+        # to U+FFFD.
+        full = self.utf8_carry + data
+        i = len(full)
+        while i > 0:
+            try:
+                text = full[:i].decode("utf-8")
+                break
+            except UnicodeDecodeError:
+                i -= 1
+        else:
+            text = ""
+        self.utf8_carry = full[i:]
+        n = len(text)
+        j = 0
+        while j < n:
+            ch = text[j]
+            if ch == "\x1b":  # escape
+                if j + 1 < n and text[j + 1] == "[":  # CSI: \x1b[
+                    k = j + 2
                     private = False
-                    params = b""
-                    while j < n:
-                        ch = data[j]
-                        if 0x30 <= ch <= 0x39 or ch == 0x3B:  # digit or ;
-                            params += bytes([ch])
-                            j += 1
-                        elif ch == 0x3F:  # ? (private mode)
+                    params = ""
+                    while k < n:
+                        c = text[k]
+                        if c.isdigit() or c == ";":
+                            params += c
+                            k += 1
+                        elif c == "?":  # ? (private mode)
                             private = True
-                            j += 1
+                            k += 1
                         else:
                             break
-                    fin = data[j:j + 1]
-                    if fin == b"H" or fin == b"F":
-                        p = params.decode().split(";")
+                    fin = text[k] if k < n else ""
+                    if fin in ("H", "F"):
+                        p = params.split(";")
                         self.r = int(p[0]) - 1 if p[0] else 0
                         self.c = int(p[1]) - 1 if len(p) > 1 and p[1] else 0
                         self.r = max(0, min(self.r, self.rows - 1))
                         self.c = max(0, min(self.c, self.cols - 1))
-                    elif fin == b"K":  # erase to end of line
-                        for k in range(self.c, self.cols):
-                            self.grid[self.r][k] = " "
-                    elif fin == b"J":  # clear display
+                    elif fin == "K":  # erase to end of line
+                        for col in range(self.c, self.cols):
+                            self.grid[self.r][col] = " "
+                    elif fin == "J":  # clear display
                         self.grid = [[" "] * self.cols for _ in range(self.rows)]
-                    elif fin == b"d":  # vertical position
+                    elif fin == "d":  # vertical position
                         if params and not private:
-                            self.r = int(params.decode()) - 1
+                            self.r = int(params) - 1
                             self.r = max(0, min(self.r, self.rows - 1))
                         self.c = 0
-                    elif fin == b"n":  # DSR query: the answer flows
+                    elif fin == "n":  # DSR query: the answer flows
                         # back to us on the pty master; ignore it.
                         pass
                     # m and unknowns: nothing to apply
-                    i = j + 1
+                    j = k + 1
                     continue
-                i += 1
+                j += 1
                 continue
-            if b == 0x0A:  # LF
+            if ch == "\n":  # LF
                 self.c = 0
                 self.r = min(self.r + 1, self.rows - 1)
-                i += 1
+                j += 1
                 continue
-            if b == 0x0D:  # CR
+            if ch == "\r":  # CR
                 self.c = 0
-                i += 1
+                j += 1
                 continue
-            if b >= 0x20:
-                if b >= 0x80:  # start of a UTF-8 sequence
-                    need = 2 if b < 0xE0 else 3 if b < 0xF0 else 4
-                    chunk = data[i:i + need].decode("utf-8", errors="replace")
-                    if self.r < self.rows and self.c < self.cols:
-                        self.grid[self.r][self.c] = chunk[0]
-                    i += need
-                else:
-                    if self.r < self.rows and self.c < self.cols:
-                        self.grid[self.r][self.c] = chr(b)
-                    i += 1
+            if ord(ch) >= 0x20:
+                if self.r < self.rows and self.c < self.cols:
+                    self.grid[self.r][self.c] = ch
                 self.c = min(self.c + 1, self.cols - 1)
+                j += 1
                 continue
-            i += 1
+            j += 1
 
     def text(self):
         return "\n".join("".join(row).rstrip() for row in self.grid)
@@ -1003,11 +1016,20 @@ def repo_config_with_ext_dir(src_cfg, ext_dir, name=".ext-pty-smoke-cfg.toml"):
                 tui_end = j
                 break
         replaced = False
-        for j in range(tui_start + 1, tui_end):
+        j = tui_start + 1
+        while j < tui_end:
             if re.match(r"^\s*ext_dirs\s*=", lines[j]):
-                lines[j] = ext_line
+                # Replace the whole value span: a single-line array or a
+                # multi-line array up to its closing bracket.
+                depth = lines[j].count("[") - lines[j].count("]")
+                k = j
+                while depth > 0:
+                    k += 1
+                    depth += lines[k].count("[") - lines[k].count("]")
+                lines[j : k + 1] = [ext_line]
                 replaced = True
                 break
+            j += 1
         if not replaced:
             lines.insert(tui_end, ext_line)
     else:
@@ -1451,14 +1473,14 @@ def ext_rus():
         deadline = time.time() + 15.0
         seen, _ = wait_markers(
             master, pid, screen,
-            ["git:none", "smoke-model", stats_marker],
+            ["\ue725 none", "smoke-model", stats_marker],
             deadline,
         )
         if not alive(pid):
             print("FAIL ext-rus: process died during startup")
             cleanup_layer(pid, EXTS_ROOT + "/ext-rs")
             return False
-        missing = [m for m in ["git:none", "smoke-model", stats_marker] if m not in seen]
+        missing = [m for m in ["\ue725 none", "smoke-model", stats_marker] if m not in seen]
         if missing:
             print(f"FAIL ext-rus: markers not seen: {missing}")
             print("screen was:\n" + screen.text())
@@ -1507,6 +1529,67 @@ def ext_rus():
         try:
             os.close(master)
         except OSError:
+            pass
+
+
+def ext_signal_orphan():
+    """A SIGTERM to the TUI leaves no orphaned extension processes.
+
+    Start the real ext-rs layer, wait for the statusline extension,
+    then send SIGTERM to the TUI process. The TUI exits through its
+    shutdown handler and `host.stop()` must stop the extension groups
+    before exit (docs/ui-extension.md section 7). Extensions run in
+    their own sessions, so only the host's stop sequence can reap
+    them."""
+    tmp = tempfile.mkdtemp(prefix="tui-ext-sig-")
+    cfg, sessions = layer_config(tmp, EXTS_ROOT + "/ext-rs", active_model="smoke-model")
+    seed_session(sessions, EXT_SESSION, seed_events())
+    master, pid = spawn(EXT_SESSION, cfg)
+    screen = Screen(24, 80)
+    try:
+        deadline = time.time() + 15.0
+        while time.time() < deadline:
+            pump(master, 0.2, screen)
+            if not alive(pid):
+                print("FAIL ext-signal-orphan: process died during startup")
+                cleanup_layer(pid, EXTS_ROOT + "/ext-rs")
+                return False
+            if "in:" in screen.text():
+                break
+        if "in:" not in screen.text():
+            print("FAIL ext-signal-orphan: statusline marker never appeared")
+            cleanup_layer(pid, EXTS_ROOT + "/ext-rs")
+            return False
+        os.kill(pid, signal.SIGTERM)
+        deadline = time.time() + 10.0
+        while time.time() < deadline and alive(pid):
+            pump(master, 0.2, screen)
+        if alive(pid):
+            print("FAIL ext-signal-orphan: TUI still running 10 s after SIGTERM")
+            os.kill(pid, signal.SIGKILL)
+            reap(pid)
+            cleanup_layer(pid, EXTS_ROOT + "/ext-rs")
+            return False
+        reap(pid)
+        orphans = settled_orphans(EXTS_ROOT + "/ext-rs", seconds=10.0)
+        if orphans:
+            print(f"FAIL ext-signal-orphan: orphans after SIGTERM: {orphans}")
+            for p in orphans:
+                try:
+                    os.kill(p, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            return False
+        print("OK ext-signal-orphan: SIGTERM quit left no orphan extensions")
+        return True
+    finally:
+        try:
+            os.close(master)
+        except OSError:
+            pass
+        try:
+            shutil.rmtree(tmp, ignore_errors=True)
+        except Exception:
             pass
 
 
@@ -1718,6 +1801,7 @@ def main():
     ok &= ext_tool_result_kill()
     ok &= ext_mermaid()
     ok &= ext_rus()
+    ok &= ext_signal_orphan()
     ok &= ext_goal_row_installed()
     ok &= ext_goal_row_bare()
     if not ok:

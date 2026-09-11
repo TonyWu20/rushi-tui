@@ -481,7 +481,6 @@ value. An unknown role name is a hard error at load.
 preset = "opencode"  # opencode | balanced | verbose
 # per-tool overrides, any of:
 # read = "preview"              # hidden | summary | preview
-# search = "preview"            # hidden | count | preview
 # bash = "preview"              # hidden | summary | preview
 # preview_lines = 8
 # bash_collapsed_lines = 10
@@ -537,7 +536,7 @@ from_human.md) ships in this pass:
 - **Tool result display** (docs/tui-tool-display-port.md): the
   built-in tool result render ports the `pi-tool-display` style.
   A rounded box with the tool box background, the command header,
-  the per-tool output modes, the preview caps (read and search
+  the per-tool output modes, the preview cap (read
   `preview_lines`, bash `bash_collapsed_lines`, diff
   `diff_collapsed_lines`), the fold hint with the `Ctrl+O`
   expand, the `expanded_max_lines` cap, the unified/split diff

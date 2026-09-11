@@ -27,6 +27,7 @@ use crate::port::SessionId;
 use crate::render::draw;
 use crate::tool_display::Preset;
 use crate::tool_display::ToolDisplay;
+use serde_json;
 
 // ── shared harness ──────────────────────────────────────────────────
 
@@ -113,19 +114,10 @@ fn snap_running_loop_indicator() {
     app.attach_external_loop(sid);
     let (host, _tmp) = empty_host();
     let out = render(&mut app, &host, 80, 24);
-    // The spinner frame is time-dependent; mask it so the snapshot is
-    // deterministic.
-    let out = out
-        .replace('\u{280b}', "[SPINNER]")
-        .replace('\u{2819}', "[SPINNER]")
-        .replace('\u{2839}', "[SPINNER]")
-        .replace('\u{2838}', "[SPINNER]")
-        .replace('\u{283c}', "[SPINNER]")
-        .replace('\u{28b4}', "[SPINNER]")
-        .replace('\u{2826}', "[SPINNER]")
-        .replace('\u{2827}', "[SPINNER]")
-        .replace('\u{2807}', "[SPINNER]")
-        .replace('\u{28cf}', "[SPINNER]");
+    // The spinner frame is time-dependent. Mask the whole braille
+    // block so the snapshot is deterministic (render.rs frames).
+    let spinner_re = regex::Regex::new(r"[\u{2800}-\u{28ff}]+").unwrap();
+    let out = spinner_re.replace_all(&out, "[SPINNER]").into_owned();
     insta::assert_snapshot!(out);
 }
 
@@ -186,6 +178,49 @@ fn snap_tool_result_expanded() {
     ];
     let mut app = app_with_session(events);
     app.toggle_block_expand("c1");
+    let (host, _tmp) = empty_host();
+    let out = render(&mut app, &host, 80, 24);
+    insta::assert_snapshot!(out);
+}
+
+#[test]
+fn snap_tool_result_read_shows_path_in_header() {
+    // The `read` result panel header shows the tool name and the
+    // file it read (the dim label after the name, the call's
+    // `file_path` argument). The success background already signals
+    // the outcome, so no `ok` word.
+    let events = vec![
+        ev(
+            r#"{"v":1,"type":"tool_call","ts":"t","id":"r1","name":"read","arguments":{"file_path":"bin/tui/src/main.rs"}}"#,
+        ),
+        ev(
+            r#"{"v":1,"type":"tool_result","ts":"t","id":"r1","value":{"text":"fn main() {}\n","lines":["fn main() {}"],"total_lines":1},"is_error":false}"#,
+        ),
+    ];
+    let mut app = app_with_session(events);
+    let (host, _tmp) = empty_host();
+    let out = render(&mut app, &host, 80, 24);
+    insta::assert_snapshot!(out);
+}
+
+#[test]
+fn snap_tool_result_edit() {
+    // The `edit` result panel: the adaptive diff
+    // (docs/tui-tool-result-truncation.md). The value carries `before`
+    // (the old content) and `after` (the new content); the panel shows
+    // a diff stat row, the file path, and the diff body (split layout
+    // at this 80-column pane, unified below `DIFF_SPLIT_MIN_WIDTH*2`).
+    // Snapshot so the user can edit the terminal grid to describe the
+    // desired `tool:edit` display.
+    let events = vec![
+        ev(
+            r#"{"v":1,"type":"tool_call","ts":"t","id":"e1","name":"edit","arguments":{"file_path":"bin/tui/src/main.rs"}}"#,
+        ),
+        ev(
+            r#"{"v":1,"type":"tool_result","ts":"t","id":"e1","value":{"text":"The file bin/tui/src/main.rs has been updated.","path":"bin/tui/src/main.rs","before":"fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n\nfn main() {\n    let total = add(1, 2);\n    let unused = add(0, 0);\n}","after":"fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n\nfn main() {\n    let total = add(1, 2);\n    let doubled = add(total, total);\n}","replace_all":false},"is_error":false}"#,
+        ),
+    ];
+    let mut app = app_with_session(events);
     let (host, _tmp) = empty_host();
     let out = render(&mut app, &host, 80, 24);
     insta::assert_snapshot!(out);
@@ -425,6 +460,88 @@ fn snap_tool_display_verbose() {
 fn snap_pending_name_input() {
     let mut app = App::new();
     app.start_naming();
+    let (host, _tmp) = empty_host();
+    let out = render(&mut app, &host, 80, 24);
+    insta::assert_snapshot!(out);
+}
+
+// ── markdown rendering (ratatui-markdown) ─────────────────────────
+
+#[test]
+fn snap_markdown_headings_and_lists() {
+    let md = "## Overview\n\n- First item\n- Second item\n\n1. Numbered\n2. Second";
+    let events = vec![
+        ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u1","content":"show the plan"}"#),
+        ev(&format!(
+            r#"{{"v":1,"type":"assistant_message","ts":"t","id":"a1","content":{},"tool_calls":[],"stop_reason":"stop","usage":{{"input_tokens":10,"output_tokens":5}},"reasoning":{{}}}}"#,
+            serde_json::to_string(md).unwrap()
+        )),
+    ];
+    let mut app = app_with_session(events);
+    let (host, _tmp) = empty_host();
+    let out = render(&mut app, &host, 80, 24);
+    insta::assert_snapshot!(out);
+}
+
+#[test]
+fn snap_markdown_code_block() {
+    let md = "Here is some code:\n\n```rust\nfn main() {\n    println!(\"hello\");\n}\n```\n\nDone.";
+    let events = vec![
+        ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u1","content":"show code"}"#),
+        ev(&format!(
+            r#"{{"v":1,"type":"assistant_message","ts":"t","id":"a1","content":{},"tool_calls":[],"stop_reason":"stop","usage":{{"input_tokens":10,"output_tokens":5}},"reasoning":{{}}}}"#,
+            serde_json::to_string(md).unwrap()
+        )),
+    ];
+    let mut app = app_with_session(events);
+    let (host, _tmp) = empty_host();
+    let out = render(&mut app, &host, 80, 24);
+    insta::assert_snapshot!(out);
+}
+
+#[test]
+fn snap_markdown_table() {
+    let md = "Some results:\n\n| Name  | Value |\n|-------|-------|\n| alpha | 1     |\n| beta  | 2     |\n| gamma | 3     |";
+    let events = vec![
+        ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u1","content":"show table"}"#),
+        ev(&format!(
+            r#"{{"v":1,"type":"assistant_message","ts":"t","id":"a1","content":{},"tool_calls":[],"stop_reason":"stop","usage":{{"input_tokens":10,"output_tokens":5}},"reasoning":{{}}}}"#,
+            serde_json::to_string(md).unwrap()
+        )),
+    ];
+    let mut app = app_with_session(events);
+    let (host, _tmp) = empty_host();
+    let out = render(&mut app, &host, 80, 24);
+    insta::assert_snapshot!(out);
+}
+
+#[test]
+fn snap_markdown_inline() {
+    let md = "Use **bold text** and *italic text* and `inline code` and [a link](https://example.com).";
+    let events = vec![
+        ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u1","content":"show formatting"}"#),
+        ev(&format!(
+            r#"{{"v":1,"type":"assistant_message","ts":"t","id":"a1","content":{},"tool_calls":[],"stop_reason":"stop","usage":{{"input_tokens":10,"output_tokens":5}},"reasoning":{{}}}}"#,
+            serde_json::to_string(md).unwrap()
+        )),
+    ];
+    let mut app = app_with_session(events);
+    let (host, _tmp) = empty_host();
+    let out = render(&mut app, &host, 80, 24);
+    insta::assert_snapshot!(out);
+}
+
+#[test]
+fn snap_markdown_blockquote() {
+    let md = "A note:\n\n> This is a quoted block\n> spanning two lines.\n\nAfter the quote.";
+    let events = vec![
+        ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u1","content":"show quote"}"#),
+        ev(&format!(
+            r#"{{"v":1,"type":"assistant_message","ts":"t","id":"a1","content":{},"tool_calls":[],"stop_reason":"stop","usage":{{"input_tokens":10,"output_tokens":5}},"reasoning":{{}}}}"#,
+            serde_json::to_string(md).unwrap()
+        )),
+    ];
+    let mut app = app_with_session(events);
     let (host, _tmp) = empty_host();
     let out = render(&mut app, &host, 80, 24);
     insta::assert_snapshot!(out);

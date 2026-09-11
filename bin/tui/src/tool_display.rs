@@ -3,11 +3,14 @@
 //! docs/tui-tool-result-truncation.md.
 //!
 //! The request in one line: wrap every tool result in a lighter
-//! box, fold long output to a preview, and one global key expands
-//! every collapsed block. The content layer owns what shows and how
-//! many lines: `Read` and `Write` results truncate to a preview,
-//! `Edit` results render as a diff, and `bash` output folds to a
-//! collapsed line count.
+//! panel (no border lines: the lighter background only, the
+//! 2026-09-14 user pass), fold long output to a preview, and one
+//! global key expands every collapsed block. The content layer owns
+//! what shows and how many lines: `Read` and `Write` results
+//! truncate to a preview, `Edit` results render as a diff, and
+//! `bash` output folds to a collapsed line count. The panel header
+//! row names the tool in the purple `tool_name` accent, bold, with
+//! the result status.
 //!
 //! Reference: `pi-tool-display` (github.com/MasuRii/pi-tool-display,
 //! v0.5.0, pinned rev `91cef758`), the config shape and the presets
@@ -16,7 +19,7 @@
 //! - Per-tool limits: `previewLines` 8 for read,
 //!   `bashCollapsedLines` 10, `diffCollapsedLines` 24.
 //! - Output modes: `hidden` / `summary` / `preview` for read and
-//!   bash, `hidden` / `count` / `preview` for search.
+//!   bash.
 //! - Presets: `opencode` (default), `balanced`, `verbose`.
 //! - Fold: the preview shows the first lines only; a muted hint
 //!   states the remainder and the expand key, like
@@ -40,18 +43,15 @@ use ansi_to_tui::IntoText as _;
 /// The tool-result presets of the port
 /// (docs/tui-tool-display-port.md section 2). The `opencode` preset
 /// is the default: read content shows a syntax-highlighted preview,
-/// search stays hidden, bash collapses to the first 10 lines.
+/// bash collapses to the first 10 lines.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Preset {
     /// The default preset: read shows a syntax-highlighted
-    /// preview, search hidden, bash collapsed to the first 10
-    /// lines.
+    /// preview, bash collapsed to the first 10 lines.
     OpenCode,
-    /// Compact summaries: read line count, search match total, bash
-    /// line count.
+    /// Compact summaries: read line count, bash line count.
     Balanced,
-    /// Larger previews: read and search show 12 preview lines, bash
-    /// 20.
+    /// Larger previews: read shows 12 preview lines, bash 20.
     Verbose,
 }
 
@@ -80,25 +80,6 @@ pub fn parse_output_mode(s: &str) -> Option<OutputMode> {
         "hidden" => OutputMode::Hidden,
         "summary" => OutputMode::Summary,
         "preview" => OutputMode::Preview,
-        _ => return None,
-    })
-}
-
-/// The search output mode of the port. `Count` shows the match
-/// total instead of a line summary; `Hidden` and `Preview` behave as
-/// in [`OutputMode`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SearchMode {
-    Hidden,
-    Count,
-    Preview,
-}
-
-pub fn parse_search_mode(s: &str) -> Option<SearchMode> {
-    Some(match s.trim().to_ascii_lowercase().as_str() {
-        "hidden" => SearchMode::Hidden,
-        "count" => SearchMode::Count,
-        "preview" => SearchMode::Preview,
         _ => return None,
     })
 }
@@ -218,7 +199,6 @@ impl CodeHl {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ToolDisplay {
     pub read_mode: OutputMode,
-    pub search_mode: SearchMode,
     pub bash_mode: OutputMode,
     /// The preview line count of read results (`previewLines`, 8).
     pub preview_lines: usize,
@@ -256,7 +236,6 @@ impl ToolDisplay {
         match p {
             Preset::OpenCode => Self {
                 read_mode: OutputMode::Preview,
-                search_mode: SearchMode::Hidden,
                 bash_mode: OutputMode::Preview,
                 preview_lines: 8,
                 bash_collapsed_lines: 10,
@@ -269,7 +248,6 @@ impl ToolDisplay {
             },
             Preset::Balanced => Self {
                 read_mode: OutputMode::Summary,
-                search_mode: SearchMode::Count,
                 bash_mode: OutputMode::Summary,
                 preview_lines: 8,
                 bash_collapsed_lines: 10,
@@ -282,7 +260,6 @@ impl ToolDisplay {
             },
             Preset::Verbose => Self {
                 read_mode: OutputMode::Preview,
-                search_mode: SearchMode::Preview,
                 bash_mode: OutputMode::Preview,
                 preview_lines: 12,
                 bash_collapsed_lines: 20,
@@ -424,7 +401,6 @@ pub fn body_rows(
             .width(width)
             .expand_frac(expand_frac)
             .call(),
-        "list" => search_body(value, cfg, &out, &hint, expanded, width, expand_frac),
         _ => generic_body(value, cfg, &out, &hint, expanded, width, expand_frac),
     }
 }
@@ -456,20 +432,6 @@ fn body_plan(mode: OutputMode, expanded: bool) -> BodyPlan {
     }
 }
 
-/// The body plan of one search mode at the fold state: the search
-/// `count` mode maps to the summary line, `hidden` to no body,
-/// `preview` to the lines. The global expand overrides, like
-/// [`body_plan`].
-fn search_body_plan(mode: SearchMode, expanded: bool) -> BodyPlan {
-    if expanded {
-        return BodyPlan::Lines;
-    }
-    match mode {
-        SearchMode::Hidden => BodyPlan::NoBody,
-        SearchMode::Count => BodyPlan::SummaryLine,
-        SearchMode::Preview => BodyPlan::Lines,
-    }
-}
 /// The folded-preview hint row: `... (N more lines • Ctrl+O to expand)`.
 /// `N` is the hidden line count. When the global expand is on, the
 /// key hint drops (the block is already expanded). The hint
@@ -1220,60 +1182,6 @@ fn bash_body(
     rows
 }
 
-/// The body of a `list` (search) result. The value is
-/// `{text, path, type: "directory", count}`. The modes: `hidden`
-/// shows no body, `count` the entry total, `preview` the first
-/// lines of the listing.
-fn search_body(
-    value: &serde_json::Value,
-    cfg: &ToolDisplay,
-    out: &Style,
-    hint: &Style,
-    expanded: bool,
-    width: usize,
-    expand_frac: f64,
-) -> Vec<BodyRow> {
-    let text = value.get("text").and_then(|t| t.as_str()).unwrap_or("");
-    let count = value
-        .get("count")
-        .and_then(|c| c.as_u64())
-        .map(|n| n as usize)
-        .unwrap_or_else(|| text.lines().count());
-    let lines: Vec<&str> = text.lines().collect();
-    let mut rows: Vec<BodyRow> = Vec::new();
-    let eff_expanded = if expand_frac >= 0.0 { expand_frac > 0.0 } else { expanded };
-    match search_body_plan(cfg.search_mode, eff_expanded) {
-        BodyPlan::NoBody => {
-            rows.push(vec![(*hint, format!("↳ {count} entries hidden"))]);
-        }
-        BodyPlan::SummaryLine => {
-            let n = if count == 1 { "1 entry" } else { "entries" };
-            rows.push(vec![(*hint, format!("↳ {count} {n}"))]);
-        }
-        BodyPlan::Lines => {
-            let frac = if expand_frac >= 0.0 {
-                expand_frac.clamp(0.0, 1.0)
-            } else {
-                if expanded { 1.0 } else { 0.0 }
-            };
-            let collapsed = cfg.preview_lines;
-            let cap = collapsed
-                + ((cfg.expanded_preview_max_lines.saturating_sub(collapsed)) as f64 * frac)
-                    .round() as usize;
-            let remaining = lines.len().saturating_sub(cap);
-            for l in lines.iter().take(cap) {
-                // The listing lines are plain text, the pi
-                // `toolOutput` tone, not code.
-                rows.push(vec![(*out, l.to_string())]);
-            }
-            if let Some(h) = fold_hint(remaining, eff_expanded, hint, width) {
-                rows.push(vec![h]);
-            }
-        }
-    }
-    rows
-}
-
 /// The body of a tool outside the known set: the compact generic
 /// output. Collapsed shows the first lines (the `preview` cap of
 /// the reference `generic` rendering); expanded, the body up to the
@@ -1549,10 +1457,11 @@ fn wrap_hard_line(line: &str, width: usize) -> Vec<String> {
 
 // ── the box (docs/tui-tool-display-port.md section 2: the box) ──
 
-/// The background of a tool-result box, per the pi box-state role
+/// The background of a tool-result panel, per the pi box-state role
 /// (docs/tui-color-pi-alignment.md): the `toolBoxBgSuccess` /
 /// `toolBoxBgError` palette role, lowered to the active capability
-/// level. One cell of padding, the rounded corners.
+/// level. One cell of left padding; no border lines (the 2026-09-14
+/// user pass: the panel is the lighter background only).
 pub fn box_bg(palette: &crate::color::Palette, err: bool) -> Color {
     if err {
         palette.color(crate::color::Role::ToolBoxBgError)
@@ -1561,80 +1470,134 @@ pub fn box_bg(palette: &crate::color::Palette, err: bool) -> Color {
     }
 }
 
-/// The rows of the rounded tool-result box: the top border with the
-/// title text, the body rows (one cell of left padding, the border
-/// cells of the row), and the bottom border. Every segment carries
-/// the box-state background (`err` picks the pi `toolErrorBg` role,
-/// otherwise the `toolSuccessBg` role) so the box reads as one
-/// lighter panel on the transcript. `width` is the box width in
-/// columns.
+/// The rows of the tool-result panel: a top margin row, the header
+/// row with the tool name and the result status, the body rows, and
+/// a bottom margin row. No border lines (the 2026-09-14 user pass):
+/// the panel is the lighter background only, so there are no white
+/// border runs around it. The two freed border rows are kept as one
+/// cell of top and bottom margin, so the content sits inside the
+/// lighter band with breathing room. The tool name reads in the
+/// `tool_name` role (the purple accent), bold; the status reads in
+/// the error accent on a failure, the muted hint on a success.
+/// `width` is the panel width in columns.
 ///
-/// `title_style` restyles the title run of the top border (the
-/// result status accent, like the red bold of an error status);
-/// `None` keeps the border style.
+/// Every segment carries the panel background (`err` picks the pi
+/// `toolErrorBg` role, otherwise the `toolSuccessBg` role) so the
+/// panel reads as one lighter band on the transcript. The margin
+/// rows are background-filled too, so the band extends one row above
+/// the header and one row below the last body row.
 ///
-/// One box row is one terminal line: the top border row is three
-/// segments (the left border cell, the title, the close run); a
-/// body row is one or three segments (the left border cell, the
-/// body segments, the right border cell), or a pad when the body
-/// row is empty.
+/// One panel row is one terminal line: the margin rows are the
+/// background pad to the full width; the header row is the name
+/// segment, the optional dim label segment, the status segment, and
+/// the background pad; a body row is one or more segments plus the
+/// background pad.
 pub fn box_rows(
-    title: &str,
+    name: &str,
+    label: &str,
+    status: &str,
     body: &[BodyRow],
     width: usize,
     palette: &crate::color::Palette,
-    title_style: Option<&Style>,
     err: bool,
 ) -> Vec<BodyRow> {
     let bg = box_bg(palette, err);
-    let border = Style::default()
-        .fg(palette.color(crate::color::Role::Hint))
+    // The tool name in the purple accent, bold (the user pass of
+    // 2026-09-14: the name stood in the top border before, now it is
+    // the header row of the borderless panel).
+    let name_style = Style::default()
+        .fg(palette.color(crate::color::Role::ToolName))
+        .add_modifier(Modifier::BOLD)
         .bg(bg);
-    let inner_w = width.saturating_sub(2).max(1);
-    // The title row: `┌` + one-space padding + the title + the
-    // `─` run to the close. The title clamps to the inner width
-    // and keeps its own style (the error accent) when given.
-    let title_chars: Vec<char> = title.chars().take(inner_w.saturating_sub(1)).collect();
-    let title_text: String = title_chars.iter().collect();
-    let pad_run = inner_w.saturating_sub(title_text.chars().count() + 1);
-    let title_style = title_style
-        .cloned()
-        .map(|s| s.bg(bg))
-        .unwrap_or(border);
-    let top: Vec<(Style, String)> = vec![
-        (border, "┌ ".to_string()),
-        (title_style, title_text.clone()),
-        (
-            border,
-            std::iter::repeat_n('─', pad_run)
-                .chain(std::iter::once('┐'))
-                .collect(),
-        ),
-    ];
+    // The status tone: the pi `error` accent (not a hard-coded red)
+    // on a failed result; the muted hint on a success.
+    let status_style = if err {
+        palette.style(crate::color::Role::Error, Modifier::BOLD).bg(bg)
+    } else {
+        Style::default()
+            .fg(palette.color(crate::color::Role::Hint))
+            .add_modifier(Modifier::DIM)
+            .bg(bg)
+    };
+    // One cell of left padding: the panel content starts one column
+    // in, the panel spans the full `width`.
+    let inner_w = width.saturating_sub(1).max(1);
     let mut out: Vec<BodyRow> = Vec::new();
-    out.push(top);
-    // The body rows: `│` + one-space padding + the row, padded to
-    // the inner width. A body row may hold several segments (the
-    // split diff panes). Each segment keeps its own clamped width:
-    // the segments share the inner width left to right, and the
-    // last segment pads to the right border. A segment that still
-    // overflows is truncated with a trailing ellipsis, never pushed
-    // past the border, and never wrapped to the next line (the
-    // 2026-09-03 user directive).
+    // One row of top margin: a background-filled empty row so the
+    // content sits inside the lighter band with breathing room above
+    // it (the 2026-09-14 user pass: the two freed border rows become
+    // one top and one bottom margin).
+    out.push(vec![(Style::default().bg(bg), " ".repeat(width))]);
+    // The header row: one cell of padding + the tool name + two
+    // spaces + the status + the background pad to the panel width.
+    // The old `tool:<name>` title prefix is gone: the name stands
+    // alone in the purple accent.
+    {
+        let mut cells: Vec<(Style, String)> = Vec::new();
+        let mut used = 0usize;
+        let mut name_cell = format!(" {name}");
+        let avail = inner_w.saturating_sub(used);
+        if name_cell.chars().count() > avail {
+            let keep = avail.saturating_sub(1);
+            let cut: String = name_cell.chars().take(keep).collect();
+            name_cell = format!("{cut}…");
+        }
+        used = used.saturating_add(name_cell.chars().count());
+        cells.push((name_style, name_cell.clone()));
+        // The optional dim label (for a read result, the file it
+        // read) sits between the name and the status.
+        if !label.is_empty() {
+            let label_style = Style::default()
+                .fg(palette.color(crate::color::Role::Hint))
+                .add_modifier(Modifier::DIM)
+                .bg(bg);
+            let mut label_cell = format!(" {label}");
+            let avail = inner_w.saturating_sub(used);
+            if label_cell.chars().count() > avail {
+                let keep = avail.saturating_sub(1);
+                let cut: String = label_cell.chars().take(keep).collect();
+                label_cell = format!("{cut}…");
+            }
+            used = used.saturating_add(label_cell.chars().count());
+            cells.push((label_style, label_cell));
+        }
+        let mut st_cell = format!("  {status}");
+        let avail = inner_w.saturating_sub(used);
+        if st_cell.chars().count() > avail {
+            let keep = avail.saturating_sub(1);
+            let cut: String = st_cell.chars().take(keep).collect();
+            st_cell = format!("{cut}…");
+        }
+        used = used.saturating_add(st_cell.chars().count());
+        cells.push((status_style, st_cell));
+        // The background pad to the panel width: every panel row is
+        // exactly `width` columns so the band fills the transcript
+        // row edge to edge.
+        let pad = width.saturating_sub(used);
+        cells.push((Style::default().bg(bg), " ".repeat(pad)));
+        out.push(cells);
+    }
+    // The body rows: one cell of left padding (the leading space of
+    // the first segment) and no border cells. A body row may hold
+    // several segments (the split diff panes). Each segment keeps its
+    // own clamped width: the segments share the row width left to
+    // right, and the last segment pads the background to the panel
+    // edge. A segment that still overflows is truncated with a
+    // trailing ellipsis, never pushed past the panel edge, and never
+    // wrapped to the next line (the 2026-09-03 user directive).
     for row in body {
         let mut cells: Vec<(Style, String)> = Vec::new();
-        cells.push((border, "│".to_string()));
         let mut used = 0usize;
         let n = row.len();
         for (idx, (st, text)) in row.iter().enumerate() {
             // Preserve an explicit per-segment bg (the diff-line shade)
-            // over the box panel bg; segments without a bg get the
-            // box background as before.
+            // over the panel bg; segments without a bg get the
+            // panel background.
             let st = if st.bg.is_some() { *st } else { (*st).bg(bg) };
             let is_last = idx + 1 == n;
             // One leading space plus the segment text, clamped to
-            // the inner columns still free.
-            let avail = inner_w.saturating_sub(used);
+            // the columns still free on the row.
+            let avail = width.saturating_sub(used);
             let mut cell = format!(" {text}");
             let want = cell.chars().count();
             if want > avail {
@@ -1651,24 +1614,169 @@ pub fn box_rows(
             }
             used = used.saturating_add(cell.chars().count());
             if is_last {
-                // The last segment owns the padding to the right
-                // border: the box rows stay one terminal line.
-                cell.push_str(&" ".repeat(inner_w.saturating_sub(used)));
+                // The last segment owns the background padding to the
+                // panel edge: the panel rows stay one terminal line.
+                cell.push_str(&" ".repeat(width.saturating_sub(used)));
             }
             cells.push((st, cell));
         }
-        // An empty body row still fills the panel: pad to the
-        // inner width so the borders stay one cell apart.
+        // An empty body row still fills the panel: pad the full row
+        // with the panel background.
         if row.is_empty() {
-            cells.push((Style::default().bg(bg), " ".repeat(inner_w)));
+            cells.push((Style::default().bg(bg), " ".repeat(width)));
         }
-        cells.push((border, "│".to_string()));
         out.push(cells);
     }
-    let bottom: String = std::iter::once('└')
-        .chain(std::iter::repeat_n('─', inner_w))
-        .chain(std::iter::once('┘'))
-        .collect();
-    out.push(vec![(border, bottom)]);
+    // One row of bottom margin: a background-filled empty row so the
+    // content sits inside the lighter band with breathing room below
+    // it (matching the top margin).
+    out.push(vec![(Style::default().bg(bg), " ".repeat(width))]);
     out
+}
+
+// ── the borderless panel (2026-09-14 user pass) ──────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::color::{Level, Palette};
+
+    fn pal() -> Palette {
+        Palette::builtin(Level::Rgb)
+    }
+
+    #[test]
+    fn panel_has_no_border_lines() {
+        // The 2026-09-14 user pass: the box's white border lines
+        // (`┌─┐`, `│`, `└─┘`) are gone. No box-drawing char may
+        // appear anywhere in the panel rows.
+        let body: Vec<BodyRow> = vec![
+            vec![(Style::default(), "line1".to_string())],
+            vec![
+                (Style::default().bg(Color::Red), "left".to_string()),
+                (Style::default(), "right".to_string()),
+            ],
+        ];
+        let rows = box_rows("bash", "", "exit 0", &body, 40, &pal(), false);
+        assert_eq!(
+            rows.len(),
+            2 + 1 + body.len(),
+            "top margin + header + one row per body row + bottom margin"
+        );
+        for row in &rows {
+            for (_, text) in row {
+                for ch in text.chars() {
+                    assert!(
+                        !matches!(ch, '┌' | '┐' | '└' | '┘' | '│' | '─'),
+                        "a box border char {ch:?} survived in the panel"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn header_names_the_tool_in_purple_bold() {
+        let rows = box_rows("bash", "", "exit 0", &[], 40, &pal(), false);
+        // rows: [top margin, header, bottom margin]; the header is row 1.
+        let name_cell = &rows[1][0];
+        // The name stands alone: no `tool:` prefix, one cell of
+        // left padding.
+        assert_eq!(name_cell.1, " bash");
+        assert!(!name_cell.1.contains("tool:"));
+        // Purple, through the `tool_name` role, and bold.
+        assert_eq!(
+            name_cell.0.fg,
+            Some(Color::Rgb(0xc6, 0xa0, 0xf6)),
+            "the tool name must carry the `tool_name` purple role"
+        );
+        assert!(
+            name_cell.0.add_modifier.contains(Modifier::BOLD),
+            "the tool name must be bold"
+        );
+        assert_eq!(
+            name_cell.0.bg,
+            Some(pal().color(crate::color::Role::ToolBoxBgSuccess)),
+            "the name sits on the panel background"
+        );
+    }
+
+    #[test]
+    fn header_status_is_muted_on_success_and_error_bold_on_failure() {
+        let ok = box_rows("bash", "", "exit 0", &[], 40, &pal(), false);
+        // rows: [top margin, header, bottom margin]; the header is row 1.
+        let st = &ok[1][1];
+        assert_eq!(st.1, "  exit 0");
+        assert_eq!(
+            st.0.fg,
+            Some(pal().color(crate::color::Role::Hint)),
+            "a success status keeps the muted hint tone"
+        );
+        assert!(st.0.add_modifier.contains(Modifier::DIM));
+        assert!(
+            !st.0.add_modifier.contains(Modifier::BOLD),
+            "a success status is not bold"
+        );
+
+        let err = box_rows("bash", "", "error", &[], 40, &pal(), true);
+        let st = &err[1][1];
+        assert_eq!(st.0.fg, Some(pal().color(crate::color::Role::Error)));
+        assert!(
+            st.0.add_modifier.contains(Modifier::BOLD),
+            "a failed result keeps the bold error accent"
+        );
+        assert_eq!(
+            st.0.bg,
+            Some(pal().color(crate::color::Role::ToolBoxBgError)),
+            "the status sits on the error panel background"
+        );
+    }
+
+    #[test]
+    fn panel_rows_span_the_full_width_and_keep_their_bg() {
+        let body: Vec<BodyRow> = vec![
+            vec![(Style::default(), "line".to_string())],
+            vec![],
+        ];
+        let rows = box_rows("bash", "", "exit 0", &body, 40, &pal(), false);
+        let bg = pal().color(crate::color::Role::ToolBoxBgSuccess);
+        for row in &rows {
+            let w: usize = row.iter().map(|(_, t)| t.chars().count()).sum();
+            assert_eq!(w, 40, "every panel row is exactly `width` columns");
+            for (st, _) in row {
+                assert_eq!(
+                    st.bg,
+                    Some(bg),
+                    "every panel cell carries the panel background"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn panel_has_a_top_and_bottom_margin_row() {
+        // The 2026-09-14 user pass: one background-filled margin row
+        // on the top and bottom of the panel, so the content sits
+        // inside the lighter band with breathing room.
+        let body: Vec<BodyRow> = vec![vec![(Style::default(), "line".to_string())]];
+        let rows = box_rows("bash", "", "exit 0", &body, 40, &pal(), false);
+        let bg = pal().color(crate::color::Role::ToolBoxBgSuccess);
+        // top margin + header + 1 body + bottom margin = 4 rows.
+        assert_eq!(rows.len(), 4, "top margin, header, body, bottom margin");
+        // The top and bottom rows are background-filled and empty
+        // (no visible content).
+        for margin in [&rows[0], &rows[rows.len() - 1]] {
+            let text: String = margin.iter().map(|(_, t)| t.as_str()).collect();
+            assert!(
+                text.chars().all(|c| c == ' '),
+                "the margin row is empty: {text:?}"
+            );
+            for (st, _) in margin {
+                assert_eq!(st.bg, Some(bg), "the margin row fills the panel bg");
+            }
+        }
+        // The header is now the second row.
+        let name_cell = &rows[1][0];
+        assert_eq!(name_cell.1, " bash");
+    }
 }

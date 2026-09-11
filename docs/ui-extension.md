@@ -227,6 +227,14 @@ where the core decides the sequence and an entry never claims a slot
   the wait is a new group, and the kill covers it. No detached
   reaper: a detached thread dies with the process, and a group that
   ignores SIGTERM would orphan
+- Signalled exit: the TUI installs handlers for SIGTERM, SIGINT, and
+  SIGHUP. Each handler sets a flag. The main loop then runs the same
+  stop sequence as a `q` `q` quit, so a signalled quit leaves no
+  orphan extensions
+- Abnormal exit backstop: the child closes every inherited pipe fd
+  before `execvp`. So when the host dies without the stop sequence
+  (for example `SIGKILL`), the extension's stdin gets EOF and the
+  extension exits on its own
 - Restart budget: 3 attempts with 1 s / 2 s / 4 s backoff, then dead.
   The owned row shows a hint
 - A slow `transform` times out at 2 s. Fallback is the raw block
