@@ -217,8 +217,13 @@ mod tests {
         let items = test_items();
         let m = PickerMatcher::new(items);
         m.query("main");
-        // Wait a bit for the background thread to publish.
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        for _ in 0..200 {
+            let snap = m.snapshot();
+            if snap.settled && snap.query == "main" {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         let snap = m.snapshot();
         assert!(!snap.items.is_empty(), "expected matches for 'main'");
         assert!(
@@ -232,7 +237,13 @@ mod tests {
         let items = test_items();
         let m = PickerMatcher::new(items);
         m.query("vim");
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        for _ in 0..200 {
+            let snap = m.snapshot();
+            if snap.settled && snap.query == "vim" {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         let snap = m.snapshot();
         assert!(
             snap.items.iter().any(|i| i.label == "src/vim_editor.rs"),
@@ -245,7 +256,13 @@ mod tests {
         let items = test_items();
         let m = PickerMatcher::new(items);
         m.query("zzzzz");
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        for _ in 0..200 {
+            let snap = m.snapshot();
+            if snap.settled && snap.query == "zzzzz" {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         let snap = m.snapshot();
         assert!(snap.items.is_empty(), "no item matches 'zzzzz'");
     }
@@ -259,7 +276,13 @@ mod tests {
             payload: "/z/zeta.txt".into(),
         }]);
         m.query("zeta");
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        for _ in 0..200 {
+            let snap = m.snapshot();
+            if snap.settled && snap.query == "zeta" {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         let snap = m.snapshot();
         assert_eq!(snap.items.len(), 1);
         assert_eq!(snap.items[0].label, "zeta.txt");
@@ -269,7 +292,13 @@ mod tests {
     fn query_ranked_records_full_query_for_display() {
         let m = PickerMatcher::new(test_items());
         m.query_ranked("/etc/passwd", "passwd");
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        for _ in 0..200 {
+            let snap = m.snapshot();
+            if snap.settled && snap.query == "/etc/passwd" {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         let snap = m.snapshot();
         assert_eq!(snap.query, "/etc/passwd");
     }

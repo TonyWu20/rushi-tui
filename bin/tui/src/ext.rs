@@ -3889,11 +3889,11 @@ exec sleep 30
         let manifest = "[ext]\ncommand = \"bash\"\nargs = [\"stale.sh\"]\ncaps = [\"status\"]\ntick_ms = 100\nprotocol_v = 1\n";
         let host = host_with(&tmp, "stale", manifest, script);
         host.start();
-        // Drive the ticks: the script answers the first one, then
-        // stays silent. Two 100 ms ticks: the reply lands, and the
-        // staleness clock (3 x tick_ms = 300 ms) is not yet past.
+        // Drive ticks until the first reply lands (poll with a 5 s
+        // deadline so the test is resilient to slow process startup).
         let empty = std::collections::HashMap::new();
-        for _ in 0..2 {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
             let p = crate::ext::TickPayload {
                 width: 80,
                 session: Some("s"),
@@ -3903,14 +3903,15 @@ exec sleep 30
                 statuses: &empty,
             };
             host.pump_ticks(&p);
-            std::thread::sleep(Duration::from_millis(100));
+            std::thread::sleep(Duration::from_millis(50));
+            host.poll_status();
+            if matches!(host.status_row(), StatusRow::Lines(_)) {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!("first reply never arrived within 5 s");
+            }
         }
-        host.poll_status();
-        assert!(
-            matches!(host.status_row(), StatusRow::Lines(_)),
-            "the first reply shows: {:?}",
-            host.status_row()
-        );
         // Four more missed ticks cross the 300 ms bound: the row
         // drops to the stale hint.
         for _ in 0..4 {

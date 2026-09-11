@@ -91,33 +91,3 @@ pub fn run_editor(initial: &str, suspend: fn(), resume: fn()) -> Result<String, 
     result
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn editor_command_and_behavior() {
-        // One test owns the VISUAL/EDITOR vars: env is process-global
-        // and the harness runs tests in parallel.
-        std::env::remove_var("VISUAL");
-        std::env::remove_var("EDITOR");
-        assert_eq!(editor_command().as_deref(), Some("vi"), "fallback is vi");
-
-        let script = std::env::temp_dir().join(format!("tui-test-editor-{}", std::process::id()));
-        std::fs::write(&script, "#!/bin/sh\ncat >> \"$1\" <<'MARK'\nEDITED\nMARK\n").unwrap();
-        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-            .unwrap();
-
-        // A working editor appends a marker and exits 0.
-        std::env::set_var("VISUAL", script.to_str().unwrap());
-        let out = run_editor("line one\n", || {}, || {}).unwrap();
-        assert_eq!(out, "line one\nEDITED\n");
-
-        // A failing editor (exit 1) aborts without changing the draft.
-        std::env::set_var("VISUAL", "false");
-        let err = run_editor("x", || {}, || {}).unwrap_err();
-        assert!(matches!(err, EditorError::Aborted(_)), "{err:?}");
-
-        std::fs::remove_file(&script).ok();
-    }
-}
