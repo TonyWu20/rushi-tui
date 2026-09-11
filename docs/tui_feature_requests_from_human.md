@@ -375,3 +375,10 @@ macchiato` as the first internal color scheme. Shipped in
        path in the header; the `snap_pending_approval_banner` call line
        is now the bare `bash` name; the 31 layout snapshots were
        regenerated against the new top-only session frame.
+- [ ] Simplify the live stream: stream the model response into the
+      main content area instead of a pinned block that grows and
+      collapses. `Ctrl+T` should collapse and expand all thinking
+      blocks, including the live-streaming one. Open: the pinned
+      block cannot be scrolled and its grow/collapse drifts the
+      cursorline position. Not work for that session. Detail:
+      `docs/tui-streaming-simplify.md`.
