@@ -410,19 +410,20 @@ fn event_lines<'a>(
                         let header = vec![Span::styled(format!("{LABEL}thinking"), thinking_style)];
                         out.push(Line::from(header));
                         owns.push(None); // the thinking label: UI chrome, not shareable source
-                        // The reasoning body has no content gutter. It
-                        // wraps to the full available width, not the
-                        // gutter-reserved `wrap_w`. The one-column left and
-                        // right margin is the area inset in `draw`.
+                        // The reasoning body aligns with the tool-result
+                        // text. One cell of left pad, then the text wraps
+                        // to the remaining width. This matches the `read`
+                        // and `bash` panel left pad. No content gutter.
+                        let content_w = width.saturating_sub(1);
                         let wrapped = wrap_thinking(
                             &text,
-                            width,
+                            content_w,
                             palette,
                             thinking_style,
                             state.tool_display.highlight_engine,
                         );
                         let n = wrapped.len();
-                        out.extend(wrapped);
+                        out.extend(guttered(&wrapped, " "));
                         owns.extend(std::iter::repeat_n(None, n));
                     } else {
                         // The collapsed row: a one-line pi-style label with
@@ -459,10 +460,14 @@ fn event_lines<'a>(
                 .split('\n')
                 .map(String::from)
                 .collect();
+            // One cell of left pad aligns the assistant body with the
+            // tool-result text (the `read`/`bash` panel left pad). The
+            // body wraps to the remaining width.
+            let content_w = width.saturating_sub(1);
             let (wrapped, prov) = if content.is_empty() {
                 (Vec::new(), Vec::new())
             } else {
-                render_message_content(&content, event_id, ext, wrap_w, prose, palette)
+                render_message_content(&content, event_id, ext, content_w, prose, palette)
             };
             if let Some(first) = wrapped.first() {
                 if !header.is_empty() {
@@ -470,15 +475,17 @@ fn event_lines<'a>(
                 }
                 header.extend(first.spans.iter().cloned());
             }
-            out.push(Line::from(header));
+            // The one-cell left pad: a plain space before the body text.
+            let mut body_header = vec![Span::raw(" ")];
+            body_header.extend(header);
+            out.push(Line::from(body_header));
             owns.push(owns_raw_line(0, &prov, &hard));
             // An empty content (a model output that carries only tool
             // calls) has no body line; the header stands alone.
             // FT-006: an unguarded `wrapped[1..]` panicked on the
-            // first launch draw. No content gutter on the body lines
-            // (2026-09-06 request): they start at the left edge.
+            // first launch draw. The body lines carry the one-cell pad.
             if !wrapped.is_empty() {
-                out.extend(wrapped[1..].iter().cloned());
+                out.extend(guttered(&wrapped[1..], " "));
                 for k in 1..prov.len() {
                     owns.push(owns_raw_line(k, &prov, &hard));
                 }
@@ -4042,11 +4049,11 @@ mod user_box_tests {
         assert!(l2.trim_start().starts_with("line two"), "{l2:?}");
     }
 
-    /// The expanded thinking body has no content gutter: the reasoning
-    /// lines start at the left edge like the message body (the 12-space
-    /// indent was the last remnant of the content gutter).
+    /// The expanded thinking body carries a one-cell left pad, aligning
+    /// it with the tool-result text (the `read`/`bash` panel left pad).
+    /// The old 12-space content gutter is gone.
     #[test]
-    fn thinking_body_has_no_gutter() {
+    fn thinking_body_one_cell_pad() {
         use super::{event_lines, RenderState};
         use crate::event::Event;
         use std::collections::{HashMap, HashSet};
@@ -4083,7 +4090,8 @@ mod user_box_tests {
             .call();
         let joined = lines.iter().map(|l| l.to_string()).collect::<Vec<_>>().join("\n");
         assert!(joined.contains("thinking"), "the thinking label: {joined:?}");
-        // Each reasoning line starts at the left edge: no gutter.
+        // Each reasoning line carries exactly one cell of left pad, not
+        // the old 12-space gutter and not the bare left edge.
         for text in ["step one", "step two"] {
             let l = lines
                 .iter()
@@ -4091,13 +4099,14 @@ mod user_box_tests {
                 .unwrap_or_else(|| panic!("missing {text:?}: {joined:?}"))
                 .to_string();
             assert!(
-                !l.starts_with("            "),
-                "no 12-space gutter on the thinking body: {l:?}"
+                l.starts_with(' ') && !l.starts_with("  "),
+                "one-cell left pad: {l:?}"
             );
             assert!(
-                !l.starts_with(' '),
-                "the body starts at the left edge: {l:?}"
+                !l.starts_with("            "),
+                "no 12-space gutter: {l:?}"
             );
+            assert!(l.trim_start().starts_with(text), "{l:?}");
         }
     }
 }
