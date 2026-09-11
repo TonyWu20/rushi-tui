@@ -739,10 +739,10 @@ fn edit_body(
     // The diff stats row with a proportional green/red bar
     // (docs/tui-tool-display-fancy.md section 5.2): the counts come
     // from the positional diff (how many lines are added / removed,
-    // not the file sizes). The `[▂▂]` bar shows the ratio with a thin
-    // line of `▂` (a little thicker than the `─` rule, not a solid
-    // `█` brick): green runs are added lines, red runs removed lines,
-    // each proportional to its share of the total.
+    // not the file sizes). The `[━━]` bar shows the ratio with a thin
+    // line of `━` (a heavy horizontal, a bit thicker than the `─`
+    // rule, not a solid `█` brick): green runs are added lines, red
+    // runs removed lines, each proportional to its share of the total.
     {
         use crate::color::Role;
         let max_n = before.len().max(after.len());
@@ -778,13 +778,13 @@ fn edit_body(
             if green_w > 0 {
                 stats.push((
                     Style::default().fg(palette.color(Role::DiffAdded)),
-                    "▂".repeat(green_w),
+                    "━".repeat(green_w),
                 ));
             }
             if red_w > 0 {
                 stats.push((
                     Style::default().fg(palette.color(Role::DiffRemoved)),
-                    "▂".repeat(red_w),
+                    "━".repeat(red_w),
                 ));
             }
             stats.push((*hint, "]".to_string()));

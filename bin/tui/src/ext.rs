@@ -1943,10 +1943,13 @@ impl ExtHost {
 
     /// The host-reserved row content above the input box. It stacks
     /// the live owners' last valid `row_spec` replies in sequence
-    /// order (docs/ui-extension.md section 4). A dead, skipped, or
-    /// silent owner contributes nothing. `None` when every owner is
-    /// empty. An empty `lines` array is a live "no row" from that
-    /// owner.
+    /// order (docs/ui-extension.md section 4). Each live owner
+    /// reserves its slot. Owners with content show that content.
+    /// Owners with no content pin one blank row in their slot.
+    /// Siblings never shift position. An owner that hides and later
+    /// reappears returns to its own slot. A dead or skipped owner
+    /// holds no slot for this session. `None` when no owner is
+    /// live.
     pub fn row_spec(&self) -> Option<Vec<ExtLine>> {
         let mut stacked: Vec<ExtLine> = Vec::new();
         for &i in &self.disc.row_owners {
@@ -1957,7 +1960,13 @@ impl ExtHost {
             ) {
                 continue;
             }
-            if let Some(lines) = s.last_row.lock().unwrap().clone() {
+            let lines = s.last_row.lock().unwrap().clone().unwrap_or_default();
+            if lines.is_empty() {
+                // Reserve this owner's slot with one blank row. Its
+                // position stays pinned and siblings never shift
+                // into it.
+                stacked.push(ExtLine::plain(""));
+            } else {
                 stacked.extend(lines);
             }
         }
@@ -3205,6 +3214,59 @@ protocol_v = 1
     }
 
     #[test]
+    fn row_owner_reserves_its_slot_when_hidden() {
+        // Two row owners: `ra` emits a content row on the row tick,
+        // `rb` never replies (hidden by design). Both stay live, so
+        // each reserves a slot: `ra` shows its line, `rb` a blank
+        // row, in sequence order. A hidden owner never yields its
+        // slot to a sibling (docs/ui-extension.md section 4).
+        let tmp = TempDir::new().unwrap();
+        let host = host_with_two(
+            &tmp,
+            "ra",
+            "[ext]\ncommand = \"bash\"\nargs = [\"ra.sh\"]\ncaps = [\"row\"]\ntick_ms = 100\nprotocol_v = 1\n",
+            r#"while IFS= read -r line; do
+  case "$line" in
+    *'"op":"row"'*)
+      printf '{"v":1,"op":"row_spec","lines":[["goal line",{"bold":true}]]}\n'
+      ;;
+  esac
+done
+"#,
+            "rb",
+            "[ext]\ncommand = \"bash\"\nargs = [\"rb.sh\"]\ncaps = [\"row\"]\ntick_ms = 100\nprotocol_v = 1\n",
+            "#!/usr/bin/env bash\nwhile IFS= read -r _; do :; done\n",
+        );
+        host.start();
+        let statuses = HashMap::new();
+        let deadline = Instant::now() + Duration::from_secs(6);
+        loop {
+            let p = TickPayload {
+                width: 80,
+                session: Some("s1"),
+                model: Some("m"),
+                thinking: 0,
+                loop_running: false,
+                statuses: &statuses,
+            };
+            host.pump_row(&p, "compose");
+            if let Some(lines) = host.row_spec() {
+                if lines.len() == 2 && !lines[0].text.is_empty() {
+                    break;
+                }
+            }
+            if Instant::now() >= deadline {
+                panic!("row_spec never filled both slots: {:?}", host.row_spec());
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let lines = host.row_spec().unwrap();
+        assert_eq!(lines.len(), 2, "both live owners keep a slot");
+        assert_eq!(lines[0].text, "goal line", "owner ra's content is first");
+        assert_eq!(lines[1].text, "", "owner rb reserves a blank slot");
+    }
+
+    #[test]
     fn row_caps_are_valid_manifest_caps() {
         // `row` is a known capability: a manifest listing it does
         // not refuse the start (docs/ui-extension.md section 3).
@@ -3451,6 +3513,38 @@ done
         )
         .unwrap();
         std::fs::write(entry.join("ext.toml"), manifest).unwrap();
+        let mut cfg = cfg_for(&root);
+        cfg.ext_dirs = vec![global];
+        let disc = discover(&cfg).unwrap();
+        ExtHost::new(&disc, &cfg)
+    }
+
+    /// Like [`host_with`] but with two extension entries in the same
+    /// global layer, for tests that exercise multi-owner behavior.
+    fn host_with_two(
+        tmp: &TempDir,
+        a_name: &str,
+        a_manifest: &str,
+        a_script: &str,
+        b_name: &str,
+        b_manifest: &str,
+        b_script: &str,
+    ) -> ExtHost {
+        let root = tmp.path().to_path_buf();
+        let global = root.join("ui_extensions");
+        for (name, manifest, script) in [
+            (a_name, a_manifest, a_script),
+            (b_name, b_manifest, b_script),
+        ] {
+            let entry = global.join(name);
+            std::fs::create_dir_all(&entry).unwrap();
+            std::fs::write(
+                entry.join(format!("{name}.sh")),
+                format!("#!/usr/bin/env bash\n{script}\n"),
+            )
+            .unwrap();
+            std::fs::write(entry.join("ext.toml"), manifest).unwrap();
+        }
         let mut cfg = cfg_for(&root);
         cfg.ext_dirs = vec![global];
         let disc = discover(&cfg).unwrap();
