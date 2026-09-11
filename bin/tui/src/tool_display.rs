@@ -736,11 +736,12 @@ fn edit_body(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     let mut rows: Vec<BodyRow> = Vec::new();
-    // The diff stats row with a proportional green/red progress bar
+    // The diff stats row with a proportional green/red bar
     // (docs/tui-tool-display-fancy.md section 5.2): the counts come
     // from the positional diff (how many lines are added / removed,
-    // not the file sizes), and the `[████]` bar shows the ratio:
-    // green `█` runs are added lines, red `█` runs are removed lines,
+    // not the file sizes). The `[▂▂]` bar shows the ratio with a thin
+    // line of `▂` (a little thicker than the `─` rule, not a solid
+    // `█` brick): green runs are added lines, red runs removed lines,
     // each proportional to its share of the total.
     {
         use crate::color::Role;
@@ -777,13 +778,13 @@ fn edit_body(
             if green_w > 0 {
                 stats.push((
                     Style::default().fg(palette.color(Role::DiffAdded)),
-                    "█".repeat(green_w),
+                    "▂".repeat(green_w),
                 ));
             }
             if red_w > 0 {
                 stats.push((
                     Style::default().fg(palette.color(Role::DiffRemoved)),
-                    "█".repeat(red_w),
+                    "▂".repeat(red_w),
                 ));
             }
             stats.push((*hint, "]".to_string()));
@@ -831,25 +832,39 @@ fn edit_body(
             // ` │ ` divider, and the right pane. Changed panes carry a
             // whole-line background shade and a `▌` gutter marker.
             let pane = width.saturating_sub(8) / 2;
+            let gutter_w = num_w + 4; // marker(1) + num(num_w) + " │ "(3)
+            let content_w = pane.saturating_sub(gutter_w).max(1);
+            // The rule side spans gutter + content + one leading space:
+            // the body side renders to `gutter_w + 1` (gutter) plus
+            // `content_w + 1` (content) columns under `box_rows` (one
+            // leading space per segment), so the rule's `│` divider
+            // lands in the body's divider column.
+            let rule_w = gutter_w + content_w + 1;
 
-            // Header: labels the two areas so the user sees which
-            // side is the old content and which is the new. The label
-            // spans the marker + number columns (width `num_w + 1`,
-            // matching the body gutter) so the `│` dividers line up
-            // with the body's gutter separators on every row.
-            let hdr_l = format!("{:<w$} │ ", "old", w = num_w + 1);
-            let hdr_r = format!("{:<w$} │ ", "new", w = num_w + 1);
+            // Top rule: a continuous `─` line across both sides, the
+            // `│` centred on the body's divider column (the 2026-09-14
+            // user pass: align the `│` gutter of the heading row to
+            // the gutter of the actual diff area).
+            let rule = "─".repeat(rule_w);
             rows.push(vec![
-                (*hint, pad_cell(hdr_l, pane)),
+                (*hint, pad_cell(rule.clone(), rule_w)),
                 (*hint, " │ ".to_string()),
-                (*hint, pad_cell(hdr_r, pane)),
+                (*hint, pad_cell(rule, rule_w)),
             ]);
-            // Divider line under the header.
-            let sep = "─".repeat(pane.min(width / 2));
+            // Column labels: `old` / `new` in the marker + number
+            // columns (width `num_w + 1`, matching the body gutter),
+            // moved below the rule and dimmer than the body (the
+            // 2026-09-14 user pass). Built to the body's exact
+            // 5-segment geometry so the `│` gutters line up with the
+            // body rows.
+            let lab_l = format!("{:<w$} │ ", "old", w = num_w + 1);
+            let lab_r = format!("{:<w$} │ ", "new", w = num_w + 1);
             rows.push(vec![
-                (*hint, pad_cell(sep.clone(), pane)),
+                (*hint, pad_cell(lab_l, gutter_w)),
+                (*hint, " ".repeat(content_w)),
                 (*hint, " │ ".to_string()),
-                (*hint, pad_cell(sep, pane)),
+                (*hint, pad_cell(lab_r, gutter_w)),
+                (*hint, " ".repeat(content_w)),
             ]);
 
             let mut i = 0usize;
@@ -877,12 +892,10 @@ fn edit_body(
                     && (i >= before.len() || after[i] != before[i]);
                 // Each pane is two segments: the gutter (marker + number
                 // + separator, in the lighter diff accent so the line
-                // number reads as a highlighted bar) and the content
-                // (neutral tone, with a dark whole-line shade on changed
-                // lines). The gutter owns a fixed width so the `│` stays
-                // in the same column on every row.
-                let gutter_w = num_w + 4; // marker(1) + num(num_w) + " │ "(3)
-                let content_w = pane.saturating_sub(gutter_w).max(1);
+                // number reads as a highlighted bar) and the
+                // syntax-highlighted content. The gutter owns a fixed
+                // width so the `│` stays in the same column on every
+                // row.
                 let lgutter =
                     format!("{}{} │ ", if left_changed { "▌" } else { " " }, b_num);
                 let rgutter =
@@ -902,24 +915,29 @@ fn edit_body(
                 } else {
                     *out
                 };
-                // Content: neutral tone; the background shade (not a solid
-                // red/green foreground) marks the line as added/removed.
-                let lc_style = if left_changed {
-                    (*out).bg(palette.color(Role::DiffRemovedBg))
+                // The diff-line background shade of each pane's
+                // content (the shade, not a solid red/green
+                // foreground, marks the line as added/removed).
+                let lc_shade = if left_changed {
+                    Some(palette.color(Role::DiffRemovedBg))
                 } else {
-                    *out
+                    None
                 };
-                let rc_style = if right_changed {
-                    (*out).bg(palette.color(Role::DiffAddedBg))
+                let rc_shade = if right_changed {
+                    Some(palette.color(Role::DiffAddedBg))
                 } else {
-                    *out
+                    None
                 };
                 let mut row: BodyRow = Vec::new();
                 row.push((lg_style, pad_cell(lgutter, gutter_w)));
-                row.push((lc_style, pad_cell(b.to_string(), content_w)));
+                row.extend(highlighted_pane(
+                    b, lang, cfg, palette, code, lc_shade, content_w,
+                ));
                 row.push((out.clone(), " │ ".to_string()));
                 row.push((rg_style, pad_cell(rgutter, gutter_w)));
-                row.push((rc_style, pad_cell(a.to_string(), content_w)));
+                row.extend(highlighted_pane(
+                    a, lang, cfg, palette, code, rc_shade, content_w,
+                ));
                 rows.push(row);
                 shown += 1;
                 i += 1;
@@ -1030,6 +1048,73 @@ fn highlight_diff_line(
                 .collect()
         }
     }
+}
+
+/// The syntax-highlighted content of one split-diff pane, padded so
+/// the `│` divider stays in the same column on every row (the 2026-09-14
+/// user pass: the diff content gets the same tree-sitter highlight
+/// pass as the read tool and the unified diff). The line runs through
+/// the active engine; plain runs take the code tone, and every segment
+/// is shaded to the diff-line background. `box_rows` adds one leading
+/// space per segment and pads only the row's last segment, so this
+/// pane's last segment carries the trailing spaces (or the
+/// truncation ellipsis) that fill the pane to `content_w + 1`
+/// columns — the width of the plain padded pane this replaces.
+fn highlighted_pane(
+    line: &str,
+    lang: Option<&str>,
+    cfg: &ToolDisplay,
+    palette: &crate::color::Palette,
+    code: &Style,
+    shade_bg: Option<Color>,
+    content_w: usize,
+) -> Vec<(Style, String)> {
+    let mut segs: Vec<(Style, String)> = highlight_diff_line(line, lang, cfg, palette)
+        .into_iter()
+        .map(|(st, t)| {
+            let st = if st == Style::default() { *code } else { st };
+            let st = shade_bg.map(|bg| st.bg(bg)).unwrap_or(st);
+            (st, t)
+        })
+        .collect();
+    if segs.is_empty() {
+        let st = shade_bg.map(|bg| code.bg(bg)).unwrap_or(*code);
+        return vec![(st, " ".repeat(content_w))];
+    }
+    // The pane group renders to `content_w + 1` columns under
+    // `box_rows`: `segs.len()` leading spaces + the text + the
+    // trailing pad owned by the last segment.
+    let target = content_w + 1;
+    let base: usize = segs.iter().map(|(_, t)| t.chars().count()).sum();
+    let need = base + segs.len();
+    if need <= target {
+        let last = segs.len() - 1;
+        segs[last].1.push_str(&" ".repeat(target - need));
+    } else {
+        // Overflow: trim `need - target + 1` text columns from the
+        // segments, right to left (the last segment is usually too
+        // short to absorb it alone), and mark the cut point — the
+        // rightmost trimmed segment — with the ellipsis (one column).
+        let mut to_trim = need - target + 1;
+        let mut cut_marked = false;
+        for k in (0..segs.len()).rev() {
+            if to_trim == 0 {
+                break;
+            }
+            let w = segs[k].1.chars().count();
+            let take = to_trim.min(w);
+            let chars: Vec<char> = segs[k].1.chars().collect();
+            let keep = w - take;
+            let mut text: String = chars[..keep].iter().collect();
+            if !cut_marked {
+                text.push('…');
+                cut_marked = true;
+            }
+            segs[k].1 = text;
+            to_trim -= take;
+        }
+    }
+    segs
 }
 
 /// Apply an optional background shade to a style. A `None` shade keeps

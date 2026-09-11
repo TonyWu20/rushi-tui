@@ -861,8 +861,8 @@ custom_schemes."catppuccin-macchiato"."CursorLine" = "#111111"
 
     // ── tool display (docs/tui-tool-display-port.md section 2) ──
 
-    /// The default table is the `opencode` preset: read and search
-    /// hidden, bash collapsed to the first 10 lines.
+    /// The default table is the `opencode` preset: read shows a
+    /// preview, bash collapses to the first 10 lines.
     #[test]
     fn tool_display_defaults_to_the_opencode_preset() {
         let dir = tempfile::tempdir().unwrap();

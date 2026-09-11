@@ -34,7 +34,7 @@ Seven capabilities:
 | `append` | Writes whitelisted event types to the log |
 | `notify` | Terminal effects (bell, OSC), applied by the host |
 | `frame` | Owns the input-area chrome: border style, the label, and the interior height. The host renders the draft content and the cursor; the extension owns the frame, never the input state |
-| `row` | Owns the host-reserved row above the input box (between the working row and the input area): one or more styled lines, or none. The host owns the slot and its position; the extension supplies the content |
+| `row` | Contributes lines to the host-reserved row above the input box (between the working row and the input area). One or more styled lines, or none. Several owners may claim the slot. Their live lines stack in sequence order, one layout cell per line. The host owns the slot position. Each extension supplies the content |
 
 Out of scope:
 
@@ -183,9 +183,10 @@ Layout:
 
 - the statusline row reserves one line when a `status` extension exists
 - without one, the TUI shows its built-in help/status row
-- the row extension's lines reserve layout cells between the working
-  row and the input box, one cell per line; with no `row` owner, or
-  an empty spec, the slot collapses to zero rows
+- the row owners' lines reserve layout cells between the working row
+  and the input box, one cell per line, stacked in sequence order
+- with no `row` owner, or when every owner's spec is empty, the slot
+  collapses to zero rows
 - transformed text renders in place in the transcript
 
 Load order is host-owned. This follows the deepseek-harness loader,
@@ -201,6 +202,9 @@ where the core decides the sequence and an entry never claims a slot
   lists the kind owns it
 - `status` allows one owner across the whole sequence. Two claimants:
   the host refuses to start and names both
+- `row` allows several owners across the whole sequence. Their live
+  lines stack in sequence order between the working row and the
+  input box
 - an extension declares what it needs. It never claims when it runs.
   There is no `priority`, `before`, or `after` field, and none will be
   added
@@ -301,11 +305,12 @@ where the core decides the sequence and an entry never claims a slot
   `frame` capability is therefore presentation-level trust, below
   `append` (a log writer). Two frame owners refuse the start, like
   the `status` row
-- A `row` owner supplies content, not layout: a `row_spec` is an
+- A `row` owner supplies content, not layout. A `row_spec` is an
   array of styled lines drawn at a host-owned position between the
   working row and the input box. The host reserves the layout and
-  collapses the slot when the spec is empty. Two `row` owners
-  refuse the start, like the `status` row
+  collapses the slot when every owner's spec is empty. Several
+  `row` owners are allowed. Their live lines stack in sequence
+  order, one cell per line
 - The `docs/tui.md` section 10 forbidden-string scan stays
 - Trust: an extension with `append` is a long-lived log writer.
   It holds loop-level trust, not tool-level trust. The tool contract is
@@ -387,7 +392,7 @@ P4. per-op-fallback: given a malformed extension reply, observe the TUI stay up 
 P5. append-whitelist: given an `append` for a type outside `append_types`, observe the host reject it with a flash. Whitelisted types are appended through the port.
 P6. restart-budget: given a repeatedly crashing extension, observe three restart attempts with 1 s, 2 s, and 4 s backoff, then a dead hint.
 P7. ext-status-cap: given more than 128 distinct `ext_status` ids, observe the host drop the oldest-updated id to hold the cap.
-P8. row-slot: given a row extension with content, observe the reserved row above the input box; with no row owner, or an empty spec, observe zero reserved rows; with two row owners, observe a start refusal that names both files.
+P8. row-slot: given a row extension with content, observe the reserved row above the input box. With no row owner, or an empty spec, observe zero reserved rows. With two row owners, observe both owners' lines stacked in sequence order.
 
 ## Verification
 
@@ -400,7 +405,7 @@ P8. row-slot: given a row extension with content, observe the reserved row above
 | P5 | append-whitelist | `append_whitelist_rejects_and_accepts` in `bin/tui/src/ext.rs` | proven |
 | P6 | restart-budget | `restart_budget_ends_in_dead`, `stop_kills_the_group` in `bin/tui/src/ext.rs` | proven |
 | P7 | ext-status-cap | `ext_statuses_drop_the_oldest_id_at_the_cap` in `bin/tui/src/app.rs` | proven |
-| P8 | row-slot | `row_caps_are_valid_manifest_caps`, `discovery_row_owner_resolves_and_conflict_refuses` in `bin/tui/src/ext.rs` | proven |
+| P8 | row-slot | `row_caps_are_valid_manifest_caps`, `discovery_row_owners_stack_in_sequence` in `bin/tui/src/ext.rs` | proven |
 
 ## Gate
 

@@ -359,18 +359,19 @@ macchiato` as the first internal color scheme. Shipped in
       the name. `result_status` returns empty on success. A new
       snapshot `snap_tool_result_read_shows_path_in_header` pins the
       path in the header.
-- [x] Follow-up (2026-09-14): dropped the compact tool labels
-       outright. Hard-coding a tool's argument shape in the kernel is a
-       red flag, so `compact_tool_label` is removed: the `tool_call`
-       line shows the bare name plus the truncated raw args JSON
-       (still the yank source, no `tool:` prefix) and the tool-result
-       panel header is the bare tool name. The `goal_complete`/
-       `goal_blocked` labels (from `rushi-exts/goal-app`, not the
-       kernel) and the `list`/`find` arms are gone, and the orphaned
-       `search`/`list` display stack went with them (`SearchMode`,
-       `ToolDisplay.search_mode`, the `search` `[tui.tool_display]`
-       key; `list` was the only caller) along with the `list` arm in
-       the JSON-detection `known` match. The snapshot was renamed to
-       `snap_tool_result_read_bare_name_header` and regenerated; the
-       31 layout snapshots were regenerated against the new top-only
-       session frame.
+- [x] Follow-up (2026-09-14): compact tool labels are scoped to the
+       kernel's own tools. `compact_tool_label` is gone for extension
+       tools: the `goal_complete`/`goal_blocked` labels (from
+       `rushi-exts/goal-app`, not the kernel) and the `list`/`find`
+       arms are removed, and the orphaned `search`/`list` display stack
+       went with them (`SearchMode`, `ToolDisplay.search_mode`, the
+       `search` `[tui.tool_display]` key; `list` was the only caller)
+       along with the `list` arm in the JSON-detection `known` match.
+       Call lines now carry the tool name only: no `tool:` prefix and
+       no raw args JSON (the full JSON stays the yank source). The
+       `read` result panel header keeps the file it read as a dim
+       label after the name, the one argument shape the kernel owns.
+       Snapshot `snap_tool_result_read_shows_path_in_header` pins the
+       path in the header; the `snap_pending_approval_banner` call line
+       is now the bare `bash` name; the 31 layout snapshots were
+       regenerated against the new top-only session frame.
