@@ -410,15 +410,19 @@ fn event_lines<'a>(
                         let header = vec![Span::styled(format!("{LABEL}thinking"), thinking_style)];
                         out.push(Line::from(header));
                         owns.push(None); // the thinking label: UI chrome, not shareable source
+                        // The reasoning body has no content gutter. It
+                        // wraps to the full available width, not the
+                        // gutter-reserved `wrap_w`. The one-column left and
+                        // right margin is the area inset in `draw`.
                         let wrapped = wrap_thinking(
                             &text,
-                            wrap_w,
+                            width,
                             palette,
                             thinking_style,
                             state.tool_display.highlight_engine,
                         );
                         let n = wrapped.len();
-                        out.extend(guttered(&wrapped, &gutter));
+                        out.extend(wrapped);
                         owns.extend(std::iter::repeat_n(None, n));
                     } else {
                         // The collapsed row: a one-line pi-style label with
@@ -2913,10 +2917,24 @@ pub fn draw(
     host: &crate::ext::ExtHost,
 ) {
     *cursor = None;
-    let area = f.area();
-    if area.width < 12 || area.height < 6 {
+    let full = f.area();
+    if full.width < 12 || full.height < 6 {
         return;
     }
+    // One column of left/right margin (user directive): the main content
+    // does not touch the terminal's left/right edge. The inset is a layout
+    // concern — it reserves one column on each side for the whole content
+    // region (title rule, transcript, input box, status rows).
+    let area = if full.width >= 2 {
+        ratatui::layout::Rect {
+            x: full.x + 1,
+            y: full.y,
+            width: full.width - 2,
+            height: full.height,
+        }
+    } else {
+        full
+    };
 
     // The active session id and the status bits need no live borrow:
     // the cache rebuild below takes a mutable borrow of `app`.
@@ -3041,10 +3059,10 @@ pub fn draw(
         constraints.push(Constraint::Length(1));
     }
     // The host-reserved row above the input box (docs/ui-extension.md
-    // section 4, `row` capability): the row owner's last valid
-    // `row_spec` lines, one layout cell per line. No cell when no row
-    // extension is installed, or when the owner's content is empty
-    // (the bare TUI shows no row).
+    // section 4, `row` capability): the row owners' last valid
+    // `row_spec` lines stacked in sequence order, one layout cell
+    // per line. No cell when no row extension is installed, or when
+    // every owner's content is empty (the bare TUI shows no row).
     let row_lines = host.row_spec().unwrap_or_default();
     let row_cells: Vec<Line<'static>> = row_lines
         .iter()
@@ -4022,5 +4040,64 @@ mod user_box_tests {
             "no 12-space gutter: {l2:?}"
         );
         assert!(l2.trim_start().starts_with("line two"), "{l2:?}");
+    }
+
+    /// The expanded thinking body has no content gutter: the reasoning
+    /// lines start at the left edge like the message body (the 12-space
+    /// indent was the last remnant of the content gutter).
+    #[test]
+    fn thinking_body_has_no_gutter() {
+        use super::{event_lines, RenderState};
+        use crate::event::Event;
+        use std::collections::{HashMap, HashSet};
+
+        let palette = Palette::builtin(Level::Rgb);
+        let tool_display = crate::tool_display::ToolDisplay::preset(
+            crate::tool_display::Preset::OpenCode,
+        );
+        let fracs: HashMap<String, f64> = HashMap::new();
+        let state = RenderState {
+            palette: &palette,
+            tool_display: &tool_display,
+            tool_expanded: false,
+            thinking_shown: true,
+            thinking_expanded: true,
+            expand_fracs: &fracs,
+        };
+        let details: HashMap<String, (String, serde_json::Value)> = HashMap::new();
+        let result_ids: HashSet<String> = HashSet::new();
+        let ev = Event::parse_line(
+            r#"{"v":1,"type":"assistant_message","ts":"t","id":"a1","content":"answer","tool_calls":[],"stop_reason":"stop","usage":{"input_tokens":1,"output_tokens":1},"reasoning":[{"content":[{"type":"reasoning_text","text":"step one\nstep two"}]}]}"#,
+        )
+        .unwrap();
+        let (lines, _) = event_lines()
+            .e(&ev)
+            .pending(false)
+            .call_details(&details)
+            .result_ids(&result_ids)
+            .width(80)
+            .event_id(0)
+            .state(&state)
+            .loop_running(false)
+            .compaction_last_open(false)
+            .call();
+        let joined = lines.iter().map(|l| l.to_string()).collect::<Vec<_>>().join("\n");
+        assert!(joined.contains("thinking"), "the thinking label: {joined:?}");
+        // Each reasoning line starts at the left edge: no gutter.
+        for text in ["step one", "step two"] {
+            let l = lines
+                .iter()
+                .find(|l| l.to_string().contains(text))
+                .unwrap_or_else(|| panic!("missing {text:?}: {joined:?}"))
+                .to_string();
+            assert!(
+                !l.starts_with("            "),
+                "no 12-space gutter on the thinking body: {l:?}"
+            );
+            assert!(
+                !l.starts_with(' '),
+                "the body starts at the left edge: {l:?}"
+            );
+        }
     }
 }

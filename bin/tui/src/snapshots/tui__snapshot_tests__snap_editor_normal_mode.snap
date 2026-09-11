@@ -2,8 +2,8 @@
 source: bin/tui/src/snapshot_tests.rs
 expression: out
 ---
-"Session: none─────────────────────────────────────────────────────────── [idle] "
-" (no session yet — type the new session name below, Enter confirms)             "
+" Session: none───────────────────────────────────────────────────────── [idle]  "
+"  (no session yet — type the new session name below, Enter confirms)            "
 "                                                                                "
 "                                                                                "
 "                                                                                "
@@ -21,8 +21,8 @@ expression: out
 "                                                                                "
 "                                                                                "
 "                                                                                "
-"╭[NORMAL]──────────────────────────────────────────────────────────────────────╮"
-"│hello world                                                                   │"
-"│                                                                              │"
-"╰──────────────────────────────────────────────────────────────────────────────╯"
-" q×2 quit · Ctrl+R run · Ctrl+E edit · Enter send · Ctrl-J ⏎ · vim · y/n/e · Tab"
+" ╭[NORMAL]────────────────────────────────────────────────────────────────────╮ "
+" │hello world                                                                 │ "
+" │                                                                            │ "
+" ╰────────────────────────────────────────────────────────────────────────────╯ "
+"  q×2 quit · Ctrl+R run · Ctrl+E edit · Enter send · Ctrl-J ⏎ · vim · y/n/e · T "

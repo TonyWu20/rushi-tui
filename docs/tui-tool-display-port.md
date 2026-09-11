@@ -62,8 +62,8 @@ The port lives in `bin/tui/src/tool_display.rs` plus the
   and one below the last body row. These margin rows are
   background-filled, so the panel reads as a band with breathing
   room. The header row names the tool in the purple `tool_name`
-  accent, bold. No compact label. The kernel does not hard-code any
-  tool's argument shape, so the header is the bare tool name. The
+  accent, bold. A `read` result adds the file it read as a dim label
+  after the name. Other tools keep the bare name. The
   status is the red bold accent on an error. A success shows no
   status word, the panel background already signals the outcome.
   No separate header line sits above the panel.
@@ -112,8 +112,8 @@ P2. call-merge: given a bash `tool_call` whose result follows, observe the call 
 P3. fold: given a result longer than the tool preview cap, observe a collapsed preview with a muted `N more lines` hint naming `Ctrl+O`.
 P4. expand: given a collapsed block, observe `Ctrl+O` open every block to the full output capped at `expanded_max_lines`.
 P5. preset-override: given a per-tool override in `[tui.tool_display]`, observe the effective preset become `custom` and the named per-tool limits apply.
-P6. external-call: given an external `tool_call` such as a goal tool, the call line has no `tool:` prefix. It shows the bare name in the purple `tool_name` role (bold) with the truncated raw args JSON. The kernel does not special-case extension tools, so the call line keeps its own row and the result panel renders on its own.
-P7. result-header: given a tool result, the panel header shows the bare tool name (no compact label: the kernel does not hard-code a tool's argument shape). A success shows no status word, the panel background signals the outcome.
+P6. external-call: given an external `tool_call` such as a goal tool, the call line shows only the bare name. It has no `tool:` prefix and no arguments. The kernel does not special-case extension tools, so the call line keeps its own row and the result panel renders on its own.
+P7. result-header: given a tool result, the panel header shows the tool name. A `read` result adds the file it read as a dim label after the name. A success shows no status word, the panel background signals the outcome.
 
 ## Verification
 

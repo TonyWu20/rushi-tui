@@ -255,11 +255,14 @@ pub struct Discovery {
     /// the input-area rendering (border style, border color, the
     /// label); one owner across the whole sequence, like `status`.
     pub frame_owner: Option<usize>,
-    /// The single `row` owner index, if one exists. The row owner
-    /// owns the host-reserved content row above the input box
-    /// (between the working row and the input area); one owner
-    /// across the whole sequence, like `status` and `frame`.
-    pub row_owner: Option<usize>,
+    /// All `row` owner indices, in sequence order. The row slot
+    /// allows several owners, unlike `status` and `frame` (one
+    /// surface, one owner). The reserved content row above the
+    /// input box is a composition surface. Every owner's live
+    /// `row_spec` lines stack in sequence order, one layout cell
+    /// per line. An owner with no content contributes nothing.
+    /// When every owner is empty, the slot collapses to zero rows.
+    pub row_owners: Vec<usize>,
 }
 
 impl Discovery {
@@ -342,26 +345,13 @@ pub fn discover(cfg: &TuiConfig) -> Result<Discovery, ExtError> {
     }
     let frame_owner = frames.into_iter().next();
 
-    // The row slot allows one owner across the whole sequence, like
-    // the status and frame slots: one surface (the host-reserved
-    // content row above the input box), one owner.
-    let rows: Vec<usize> = (0..exts.len())
+    // The row slot allows several owners, unlike the status and
+    // frame slots (one surface, one owner). The reserved content
+    // row above the input box composes the owners' live lines in
+    // sequence order, one layout cell per line.
+    let row_owners: Vec<usize> = (0..exts.len())
         .filter(|&i| exts[i].manifest.caps.iter().any(|c| c == "row"))
         .collect();
-    if rows.len() > 1 {
-        let names = rows
-            .iter()
-            .map(|&i| exts[i].manifest.manifest_path.display().to_string())
-            .collect::<Vec<_>>()
-            .join(" and ");
-        return Err(ExtError {
-            message: format!(
-                "two or more extensions own the `row` slot: {names}. \
-                 The host allows one owner across the whole sequence."
-            ),
-        });
-    }
-    let row_owner = rows.into_iter().next();
 
     let mut kind_owners = HashMap::new();
     let mut transform_owners = HashMap::new();
@@ -383,7 +373,7 @@ pub fn discover(cfg: &TuiConfig) -> Result<Discovery, ExtError> {
         exts,
         status_owner,
         frame_owner,
-        row_owner,
+        row_owners,
         kind_owners,
         transform_owners,
         index_by_name,
@@ -1514,47 +1504,47 @@ impl ExtHost {
         self.send_op(i, &obj);
     }
 
-    /// Send a `row` op to the row owner on its tick cadence. The row
-    /// extension replies `row_spec` with the content of the
-    /// host-reserved row above the input box (between the working
-    /// row and the input area): the goal extension uses it for the
-    /// goal status line and the armed hint. A missing or dead owner
-    /// sends nothing; the row shows nothing (the bare TUI has no
-    /// row, docs/ui-extension.md section 4).
+    /// Send a `row` op to every row owner on its tick cadence. Each
+    /// owner replies `row_spec` with the content of its share of
+    /// the host-reserved row above the input box. A skipped or dead
+    /// owner contributes nothing. With no row owners the bare TUI
+    /// shows no row (docs/ui-extension.md section 4).
     pub fn pump_row(&self, p: &TickPayload, mode: &str) {
-        let Some(i) = self.disc.row_owner else {
-            return;
-        };
-        let s = &self.inner.slots[i];
-        if *s.state.lock().unwrap() == SlotState::Skipped {
-            return;
-        }
-        let now = Instant::now();
-        let seq = {
-            let mut t = s.row_tick.lock().unwrap();
-            if now < t.next_at {
-                return;
+        for &i in &self.disc.row_owners {
+            let s = &self.inner.slots[i];
+            if *s.state.lock().unwrap() == SlotState::Skipped {
+                continue;
             }
-            t.seq += 1;
-            t.next_at = now + Duration::from_millis(s.manifest.tick_ms);
-            t.seq
-        };
-        let mut obj = json!({
-            "v": 1,
-            "op": "row",
-            "seq": seq,
-            "width": p.width,
-            "thinking": p.thinking,
-            "mode": mode,
-            "loop_running": p.loop_running,
-        });
-        if let Some(ses) = p.session {
-            obj["session"] = json!(ses);
+            let now = Instant::now();
+            let Some(seq) = ({
+                let mut t = s.row_tick.lock().unwrap();
+                if now < t.next_at {
+                    None
+                } else {
+                    t.seq += 1;
+                    t.next_at = now + Duration::from_millis(s.manifest.tick_ms);
+                    Some(t.seq)
+                }
+            }) else {
+                continue;
+            };
+            let mut obj = json!({
+                "v": 1,
+                "op": "row",
+                "seq": seq,
+                "width": p.width,
+                "thinking": p.thinking,
+                "mode": mode,
+                "loop_running": p.loop_running,
+            });
+            if let Some(ses) = p.session {
+                obj["session"] = json!(ses);
+            }
+            if let Some(m) = p.model {
+                obj["model"] = json!(m);
+            }
+            self.send_op(i, &obj);
         }
-        if let Some(m) = p.model {
-            obj["model"] = json!(m);
-        }
-        self.send_op(i, &obj);
     }
 
     /// Mark a status extension stale: no valid `status` reply for
@@ -1951,25 +1941,31 @@ impl ExtHost {
         s.last_frame.lock().unwrap().clone()
     }
 
-    /// The host-reserved row content above the input box (the `row`
-    /// owner's last valid `row_spec` reply, docs/ui-extension.md
-    /// section 4). `None` when no row extension is installed, when
-    /// its reply is still missing, or when it died: the row is
-    /// transient content, so a dead or absent owner clears it —
-    /// unlike `status`, which keeps its last valid row with a dead
-    /// hint. An empty `lines` array is a live "no row" from the
-    /// owner (the goal extension hides the row when no goal is open
-    /// and nothing is armed).
+    /// The host-reserved row content above the input box. It stacks
+    /// the live owners' last valid `row_spec` replies in sequence
+    /// order (docs/ui-extension.md section 4). A dead, skipped, or
+    /// silent owner contributes nothing. `None` when every owner is
+    /// empty. An empty `lines` array is a live "no row" from that
+    /// owner.
     pub fn row_spec(&self) -> Option<Vec<ExtLine>> {
-        let i = self.disc.row_owner?;
-        let s = &self.inner.slots[i];
-        if !matches!(
-            *s.state.lock().unwrap(),
-            SlotState::Running | SlotState::Restarting
-        ) {
-            return None;
+        let mut stacked: Vec<ExtLine> = Vec::new();
+        for &i in &self.disc.row_owners {
+            let s = &self.inner.slots[i];
+            if !matches!(
+                *s.state.lock().unwrap(),
+                SlotState::Running | SlotState::Restarting
+            ) {
+                continue;
+            }
+            if let Some(lines) = s.last_row.lock().unwrap().clone() {
+                stacked.extend(lines);
+            }
         }
-        s.last_row.lock().unwrap().clone()
+        if stacked.is_empty() {
+            None
+        } else {
+            Some(stacked)
+        }
     }
 
     /// The statusline row content (docs/ui-extension-plan stage 1
@@ -3183,7 +3179,7 @@ protocol_v = 1
     // ── row capability ─────────────────────────────────────────
 
     #[test]
-    fn discovery_row_owner_resolves_and_conflict_refuses() {
+    fn discovery_row_owners_stack_in_sequence() {
         let dir = TempDir::new().unwrap();
         let global = dir.path().join("ui_extensions");
         write_ext(
@@ -3191,20 +3187,21 @@ protocol_v = 1
             "r1",
             "[ext]\ncommand = \"bash\"\ncaps = [\"row\"]\nprotocol_v = 1\n",
         );
-        let mut cfg = cfg_for(dir.path());
-        cfg.ext_dirs = vec![global.clone()];
-        let disc = discover(&cfg).unwrap();
-        assert_eq!(disc.row_owner, Some(0), "a single row owner resolves");
-        // A second row owner refuses the start, like the status row.
         write_ext(
             &global,
             "r2",
             "[ext]\ncommand = \"bash\"\ncaps = [\"row\"]\nprotocol_v = 1\n",
         );
-        let err = discover(&cfg).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("r1/ext.toml"), "{msg}");
-        assert!(msg.contains("r2/ext.toml"), "{msg}");
+        let mut cfg = cfg_for(dir.path());
+        cfg.ext_dirs = vec![global.clone()];
+        // Two row owners are allowed. They keep sequence order
+        // instead of refusing the start (docs/ui-extension.md P8).
+        let disc = discover(&cfg).unwrap();
+        assert_eq!(
+            disc.row_owners,
+            vec![0, 1],
+            "two row owners keep their sequence order"
+        );
     }
 
     #[test]

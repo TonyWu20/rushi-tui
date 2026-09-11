@@ -446,13 +446,14 @@ preserves `id` and `iteration`.
 ### `bin/tui/src/ext.rs`
 
 - Host-reserved `row` capability (kernel-owned slot): `row` in
-  `CAPS`; `Discovery.row_owner` resolves a single row owner across
-  the composed sequence (two owners refuse the start, naming both
-  files); `SlotShared.last_row` + `row_tick`; `ExtHost::pump_row`
-  sends the `row` op on the owner's tick cadence; the `row_spec`
-  reply stores the last valid row (G5: a bad reply keeps the last
-  valid row); `ExtHost::row_spec()` exposes the owner's last valid
-  lines for the renderer.
+  `CAPS`; `Discovery.row_owners` collects every row owner across
+  the composed sequence (several owners are allowed. Their live
+  lines stack in sequence order); `SlotShared.last_row` +
+  `row_tick`; `ExtHost::pump_row` sends the `row` op to each owner
+  on its tick cadence; the `row_spec` reply stores the last valid
+  row (G5: a bad reply keeps the last valid row);
+  `ExtHost::row_spec()` stacks the live owners' last valid lines
+  for the renderer.
 
 ### `scripts/run-idle-continue-e2e.sh`
 

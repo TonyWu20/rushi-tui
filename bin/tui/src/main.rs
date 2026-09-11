@@ -1270,9 +1270,10 @@ fn main() {
         // The frame owner also gets a cadence ping so its frame_spec
         // reply stays live (border color tracks the thinking level).
         host.pump_frame(&tick, &app.editor_mode_label());
-        // The row owner (the host-reserved row above the input box)
-        // gets the same cadence ping. That keeps its row_spec reply
-        // live (docs/ui-extension.md section 4, `row` capability).
+        // Every row owner (the host-reserved row above the input
+        // box) gets the same cadence ping. That keeps each row_spec
+        // reply live (docs/ui-extension.md section 4, `row`
+        // capability).
         host.pump_row(&tick, &app.editor_mode_label());
         host.poll_transforms();
         host.poll_status();
