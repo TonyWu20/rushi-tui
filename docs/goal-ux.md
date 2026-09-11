@@ -674,7 +674,7 @@ moving to the next.
    `iteration`.
 
 6. **`bin/tui`** — host-reserved `row` capability in `ext.rs`
-   (`CAPS`, `Discovery.row_owner`, `SlotShared.last_row` /
+   (`CAPS`, `Discovery.row_owners`, `SlotShared.last_row` /
    `row_tick`, `ExtHost::pump_row`, the `row_spec` reply,
    `row_spec()` getter); the main loop pumps `pump_row` beside
    `pump_frame`; `render.rs` draws the slot from `host.row_spec()`
