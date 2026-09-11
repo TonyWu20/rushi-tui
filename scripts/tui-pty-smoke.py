@@ -387,7 +387,7 @@ def scroll_burst_reaches_head():
 
 
 def ext_config(tmpdir, fixture):
-    """A temp config that points `[ext] dir` at a fixture layer.
+    """A temp config that points `[tui] ext_dirs` at a fixture layer.
 
     The sessions root is a private dir so the ext cases never touch
     the repo session list.
@@ -400,8 +400,8 @@ def ext_config(tmpdir, fixture):
     with open(path, "w") as f:
         f.write("[paths]\n")
         f.write(f"sessions_root = \"{sessions}\"\n\n")
-        f.write("[ext]\n")
-        f.write(f"dir = \"{fixture_dir(fixture)}\"\n")
+        f.write("[tui]\n")
+        f.write(f"ext_dirs = [\"{fixture_dir(fixture)}\"]\n")
     return path, sessions
 
 
@@ -664,7 +664,7 @@ def ext_append_reject():
 
 
 def layer_config(tmpdir, layer_dir, active_model=None):
-    """A temp config that points `[ext] dir` at a layer directory.
+    """A temp config that points `[tui] ext_dirs` at a layer directory.
 
     The layer is usually the repo's `ui_extensions/` global layer
     (the reference extensions) or `ext-rs/`. The sessions root is a
@@ -678,8 +678,8 @@ def layer_config(tmpdir, layer_dir, active_model=None):
     with open(path, "w") as f:
         f.write("[paths]\n")
         f.write(f"sessions_root = \"{sessions}\"\n\n")
-        f.write("[ext]\n")
-        f.write(f"dir = \"{layer_dir}\"\n")
+        f.write("[tui]\n")
+        f.write(f"ext_dirs = [\"{layer_dir}\"]\n")
         if active_model:
             f.write("\n[active]\n")
             f.write(f"model = \"{active_model}\"\n")
@@ -975,38 +975,50 @@ def active_model_from_config(path):
 
 
 def repo_config_with_ext_dir(src_cfg, ext_dir, name=".ext-pty-smoke-cfg.toml"):
-    """A copy of a real repo config with `[ext] dir` pointed at ext_dir.
+    """A copy of a real repo config with `[tui] ext_dirs` pointed at ext_dir.
 
     Written inside the source config's own directory so relative paths
-    such as sessions_root still resolve against the checkout. If the
-    source config already has an `[ext]` table (the kernel config.toml
-    points `[ext] dir` at the sibling exts checkout, section 4 item 4),
-    its `dir` key is replaced: a second `[ext]` table would be a TOML
-    parse error and the TUI would die at startup. Otherwise the table
-    is appended. Returns the derived config's path."""
+    such as sessions_root still resolve against the checkout. The global
+    extension layer is the `ext_dirs` key inside the `[tui]` table. If
+    that key already exists it is replaced; otherwise it is appended to
+    the `[tui]` table (a `[tui]` table is created if missing). Returns
+    the derived config's path."""
     with open(src_cfg) as f:
-        body = f.read()
-    # The `[ext]` table: from its header line to the next section
-    # header (a line starting with `[`) or end of file.
-    m = re.search(r"(?ms)^\[ext\](.*?)(?=^\[|\Z)", body)
-    if m:
-        block = m.group(1)
-        if re.search(r"(?m)^[ \t]*dir[ \t]*=", block):
-            block = re.sub(
-                r"(?m)^[ \t]*dir[ \t]*=[^\n]*$",
-                f'dir = "{ext_dir}"',
-                block,
-            )
-        else:
-            block += f'dir = "{ext_dir}"\n'
-        body = body[: m.start()] + "[ext]" + block + body[m.end():]
+        lines = f.read().splitlines(keepends=True)
+
+    ext_line = f'ext_dirs = ["{ext_dir}"]\n'
+
+    # Locate the [tui] section body: from the "[tui]" header to the next
+    # section header or EOF.
+    tui_start = None
+    for i, l in enumerate(lines):
+        if re.match(r"^\s*\[tui\]\s*$", l):
+            tui_start = i
+            break
+
+    if tui_start is not None:
+        tui_end = len(lines)
+        for j in range(tui_start + 1, len(lines)):
+            if re.match(r"^\s*\[", lines[j]):
+                tui_end = j
+                break
+        replaced = False
+        for j in range(tui_start + 1, tui_end):
+            if re.match(r"^\s*ext_dirs\s*=", lines[j]):
+                lines[j] = ext_line
+                replaced = True
+                break
+        if not replaced:
+            lines.insert(tui_end, ext_line)
     else:
-        if not body.endswith("\n"):
-            body += "\n"
-        body += f'\n[ext]\ndir = "{ext_dir}"\n'
+        if lines and lines[-1].strip() != "":
+            lines.append("\n")
+        lines.append("[tui]\n")
+        lines.append(ext_line)
+
     out = os.path.join(os.path.dirname(os.path.abspath(src_cfg)), name)
     with open(out, "w") as f:
-        f.write(body)
+        f.writelines(lines)
     return out
 
 
@@ -1022,11 +1034,11 @@ def ext_statusline_repo():
     12. A missing value drops its marker, so the case passes on any
     branch or config."""
     # Two-repo split: the kernel no longer owns ui_extensions/, so its
-    # default [ext] dir (kernel/ui_extensions) is absent. Point the
-    # global layer at the exts checkout (EXTS_ROOT) while keeping the
-    # real repo's [active] model, sessions_root, and git checkout. The
-    # derived config lives inside REPO so the relative sessions_root
-    # still resolves against the kernel checkout.
+    # default global layer (<config-dir>/ui_extensions) is absent.
+    # Point `[tui] ext_dirs` at the exts checkout (EXTS_ROOT) while
+    # keeping the real repo's [active] model, sessions_root, and git
+    # checkout. The derived config lives inside REPO so the relative
+    # sessions_root still resolves against the kernel checkout.
     src_cfg = REPO + "/config.toml"
     cfg = repo_config_with_ext_dir(src_cfg, EXTS_ROOT + "/ui_extensions")
     master, pid = spawn(SESSION, cfg)

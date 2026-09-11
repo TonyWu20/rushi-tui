@@ -308,6 +308,8 @@ pub struct App {
         crate::color::Palette,
         Vec<Line<'static>>,
         Vec<Option<String>>,
+        std::collections::HashMap<String, (usize, usize)>,
+        u64,
     )>,
     /// The terminal's color capability the built-in palette is lowered
     /// to, and the selected color scheme (docs/tui-color-scheme.md
@@ -325,6 +327,40 @@ pub struct App {
     /// collapsed block to the full body, capped at
     /// `expanded_preview_max_lines`.
     tool_expanded: bool,
+    /// Per-block expand fractions for the animation system
+    /// (docs/tui-tool-display-fancy.md section 6). Keys are tool-result
+    /// event IDs. A value in `[0.0, 1.0]` is the current progress of
+    /// the block's expand/collapse transition. An empty map means no
+    /// animation is in flight; the global `tool_expanded` bool applies
+    /// as-is.
+    block_fracs: std::collections::HashMap<String, f64>,
+    /// Per-block expand targets (0.0 or 1.0). The animation moves
+    /// `block_fracs` toward these values.
+    block_targets: std::collections::HashMap<String, f64>,
+    /// The fraction value at the moment the current animation started.
+    block_anim_from: std::collections::HashMap<String, f64>,
+    /// Per-block animation start time, in milliseconds since process
+    /// start. Used to compute the eased progress.
+    block_anim_start: std::collections::HashMap<String, u64>,
+    /// The spawn time of each tool-result block, in milliseconds since
+    /// process start. Drives the fade-in animation
+    /// (docs/tui-tool-display-fancy.md section 6).
+    block_spawn_ms: std::collections::HashMap<String, u64>,
+    /// The last `pump_animations` timestamp, in milliseconds.
+    last_anim_tick_ms: u64,
+    /// Screen-row spans of tool-result blocks in the transcript, keyed
+    /// by event ID. Populated during the draw pass so mouse clicks can
+    /// be hit-tested against block boundaries.
+    block_spans: std::collections::HashMap<String, (usize, usize)>,
+    /// The screen row where the transcript area begins (inside the
+    /// outer border). Set each draw frame.
+    transcript_top_row: u16,
+    /// The index into the full transcript of the first visible line.
+    /// Set each draw frame.
+    transcript_visible_start: usize,
+    /// Bumped whenever `block_fracs` changes so the transcript cache
+    /// is invalidated and rebuilt with the new per-block expand state.
+    frac_epoch: u64,
     /// The thinking-block visibility (Ctrl+T, docs/tui-thinking-block.md
     /// section 4). `true` renders the block; `false` hides it
     /// entirely.
@@ -527,6 +563,16 @@ impl App {
                 crate::tool_display::Preset::OpenCode,
             ),
             tool_expanded: false,
+            block_fracs: std::collections::HashMap::new(),
+            block_targets: std::collections::HashMap::new(),
+            block_anim_from: std::collections::HashMap::new(),
+            block_anim_start: std::collections::HashMap::new(),
+            block_spawn_ms: std::collections::HashMap::new(),
+            last_anim_tick_ms: 0,
+            block_spans: std::collections::HashMap::new(),
+            transcript_top_row: 0,
+            transcript_visible_start: 0,
+            frac_epoch: 0,
             thinking_shown: true,
             thinking_expanded: true,
             follow_queue: false,
@@ -586,6 +632,264 @@ impl App {
     /// The thinking-block expand state (Ctrl+X).
     pub fn thinking_expanded(&self) -> bool {
         self.thinking_expanded
+    }
+
+    /// Per-block expand fractions for the animation system
+    /// (docs/tui-tool-display-fancy.md section 6). An empty map means
+    /// no animation is in flight; callers fall back to the global
+    /// `tool_expanded` bool.
+    pub fn expand_fracs(&self) -> &std::collections::HashMap<String, f64> {
+        &self.block_fracs
+    }
+
+    /// The tool-result block spans (transcript-line ranges), set each
+    /// draw frame. Returns an empty map before the first draw.
+    pub fn block_spans(&self) -> &std::collections::HashMap<String, (usize, usize)> {
+        &self.block_spans
+    }
+
+    /// Whether any expand/collapse animation or fade-in is in progress.
+    /// Used by the main loop to raise the poll cadence to ~60 fps.
+    pub fn is_animating(&self) -> bool {
+        // An expand/collapse animation is active until the fraction
+        // converges to its target.
+        let expand_collapse_active = self.block_fracs.iter().any(|(id, frac)| {
+            let target = self.block_targets.get(id).copied().unwrap_or(0.0);
+            (frac - target).abs() >= 0.01
+        });
+        if expand_collapse_active {
+            return true;
+        }
+
+        // A fade-in is active until anim_ms elapses since spawn.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let dur = self.tool_display.anim_ms.max(1);
+        self.block_spawn_ms
+            .values()
+            .any(|&spawn| now.saturating_sub(spawn) < dur)
+    }
+
+    /// Advance all in-flight expand/collapse animations toward their
+    /// targets. Call this once per frame while `is_animating()` is
+    /// true. Uses a linear ramp over `anim_ms` milliseconds.
+    /// (docs/tui-tool-display-fancy.md section 6)
+    pub fn pump_animations(&mut self) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let dur = self.tool_display.anim_ms.max(1) as u64;
+
+        // Snapshot the ids so we can mutate the maps without borrow conflicts.
+        let ids: Vec<String> = self.block_fracs.keys().cloned().collect();
+        let mut to_remove: Vec<String> = Vec::new();
+
+        for id in &ids {
+            let frac = self.block_fracs.get(id).copied().unwrap_or(0.0);
+            let target = self.block_targets.get(id).copied().unwrap_or(0.0);
+            if (frac - target).abs() < 0.005 {
+                // Snap to target; clean up if fully collapsed.
+                self.block_fracs.insert(id.clone(), target);
+                if target == 0.0 {
+                    to_remove.push(id.clone());
+                }
+                continue;
+            }
+            let start = self.block_anim_start.get(id).copied().unwrap_or(now);
+            let from = self.block_anim_from.get(id).copied().unwrap_or(frac);
+            let elapsed = now.saturating_sub(start).min(dur);
+            let progress = (elapsed as f64) / (dur as f64);
+            // Ease-in-out (smoothstep).
+            let eased = progress * progress * (3.0 - 2.0 * progress);
+            let new_frac = from + (target - from) * eased;
+            self.block_fracs.insert(id.clone(), new_frac);
+        }
+
+        for id in &to_remove {
+            self.block_fracs.remove(id);
+            self.block_targets.remove(id);
+            self.block_anim_from.remove(id);
+            self.block_anim_start.remove(id);
+        }
+
+        // Clean up stale fade-spawn entries.
+        self.block_spawn_ms
+            .retain(|_, spawn| now.saturating_sub(*spawn) < dur);
+
+        // Bump the fraction epoch so the transcript cache is invalidated
+        // and rebuilt with the new per-block expand state.
+        self.frac_epoch = self.frac_epoch.wrapping_add(1);
+
+        self.last_anim_tick_ms = now;
+    }
+
+    /// Start (or restart) an expand/collapse animation for a tool-result
+    /// block. `target` is the destination fraction (0.0 collapsed, 1.0
+    /// expanded).
+    pub fn animate_block(&mut self, tool_id: &str, target: f64) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let current = self.block_fracs.get(tool_id).copied().unwrap_or(0.0);
+        if target > 0.0 && self.block_targets.get(tool_id).copied().unwrap_or(0.0) == target {
+            return; // already at target
+        }
+        if target == 0.0 && current <= 0.005 {
+            return; // already collapsed
+        }
+        self.block_targets.insert(tool_id.to_string(), target);
+        self.block_fracs.entry(tool_id.to_string()).or_insert(current);
+        self.block_anim_from.insert(tool_id.to_string(), current);
+        self.block_anim_start.insert(tool_id.to_string(), now);
+        self.frac_epoch = self.frac_epoch.wrapping_add(1);
+    }
+
+    /// Toggle expand state for a tool-result block (mouse-click, click
+    /// mode). (docs/tui-tool-display-fancy.md section 6)
+    pub fn toggle_block_expand(&mut self, tool_id: &str) {
+        let current = self.block_fracs.get(tool_id).copied().unwrap_or(0.0);
+        let target = if current > 0.5 { 0.0 } else { 1.0 };
+        self.animate_block(tool_id, target);
+    }
+
+    /// Set the focus block (focus mode). Only this block is expanded;
+    /// all others collapse. (docs/tui-tool-display-fancy.md section 6)
+    pub fn set_focus_block(&mut self, tool_id: &str) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+
+        // Collapse all previously expanded blocks (set target + anim
+        // state directly so the guard in `animate_block` does not skip
+        // a block that has not yet been pumped from 0.0).
+        let ids: Vec<String> = self
+            .block_targets
+            .iter()
+            .filter(|(_, t)| **t > 0.0)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for id in ids {
+            if id != tool_id {
+                let current = self.block_fracs.get(&id).copied().unwrap_or(0.0);
+                self.block_targets.insert(id.clone(), 0.0);
+                self.block_anim_from.insert(id.clone(), current);
+                self.block_anim_start.insert(id.clone(), now);
+            }
+        }
+
+        // Expand the focus block.
+        if !self.block_targets.contains_key(tool_id) {
+            self.block_fracs.entry(tool_id.to_string()).or_insert(0.0);
+        }
+        self.animate_block(tool_id, 1.0);
+        self.frac_epoch = self.frac_epoch.wrapping_add(1);
+    }
+
+    /// Record the spawn time of a new tool-result block so it can fade
+    /// in. No-op if the block was already registered.
+    pub fn register_block_spawn(&mut self, tool_id: &str) {
+        if !self.block_spawn_ms.contains_key(tool_id) {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            self.block_spawn_ms.insert(tool_id.to_string(), now);
+        }
+    }
+
+    /// Compute the fade-in alpha (0.0–1.0) for a tool-result block.
+    /// Returns 1.0 when the fade-in is complete or the block was not
+    /// recently spawned.
+    pub fn fade_alpha(&self, tool_id: &str) -> f64 {
+        let Some(spawn) = self.block_spawn_ms.get(tool_id) else {
+            return 1.0;
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let dur = self.tool_display.anim_ms.max(1);
+        let elapsed = now.saturating_sub(*spawn);
+        if elapsed >= dur {
+            return 1.0;
+        }
+        (elapsed as f64) / (dur as f64)
+    }
+
+    /// Set the screen-row spans of tool-result blocks. Populated by
+    /// the render pass each frame so mouse clicks can be hit-tested.
+    pub fn set_block_spans(&mut self, spans: std::collections::HashMap<String, (usize, usize)>) {
+        self.block_spans = spans;
+    }
+
+    /// The screen row where the transcript area begins.
+    pub fn transcript_top_row(&self) -> u16 {
+        self.transcript_top_row
+    }
+
+    /// Set the screen row where the transcript area begins.
+    pub fn set_transcript_top_row(&mut self, row: u16) {
+        self.transcript_top_row = row;
+    }
+
+    /// The index into the full transcript of the first visible line.
+    pub fn transcript_visible_start(&self) -> usize {
+        self.transcript_visible_start
+    }
+
+    /// Set the index into the full transcript of the first visible line.
+    pub fn set_transcript_visible_start(&mut self, idx: usize) {
+        self.transcript_visible_start = idx;
+    }
+
+    /// Test-only accessor for the per-block animation targets.
+    #[cfg(test)]
+    pub fn block_targets_for_test(&self) -> &std::collections::HashMap<String, f64> {
+        &self.block_targets
+    }
+
+    /// The transcript pane height in lines (set during draw).
+    pub fn viewport_height(&self) -> usize {
+        self.viewport
+    }
+
+    /// Find the tool-result block ID whose span contains the given
+    /// transcript line index. Returns `None` if no block matches.
+    pub fn block_at_transcript_line(&self, line: usize) -> Option<&str> {
+        self.block_spans
+            .iter()
+            .find(|(_, &(start, end))| line >= start && line < end)
+            .map(|(id, _)| id.as_str())
+    }
+
+    /// Find the tool-result block ID closest to the given transcript
+    /// line. Used by focus mode to auto-expand the nearest block.
+    pub fn nearest_block_to_line(&self, line: usize) -> Option<&str> {
+        let mut best: Option<(&str, usize)> = None;
+        for (id, &(start, end)) in &self.block_spans {
+            let dist = if line >= start && line < end {
+                0
+            } else if line < start {
+                start.saturating_sub(line)
+            } else {
+                line.saturating_sub(end)
+            };
+            match best {
+                Some((_, d)) if dist < d => {
+                    best = Some((id, dist));
+                }
+                None => {
+                    best = Some((id, dist));
+                }
+                _ => {}
+            }
+        }
+        best.map(|(id, _)| id)
     }
 
     /// The input queue toggle state (Ctrl+F): the next draft sends
@@ -941,12 +1245,13 @@ impl App {
         ext: Option<&crate::ext::ExtHost>,
     ) -> &[Line<'static>] {
         let ext_ver = ext.map(|h| h.replies_version()).unwrap_or(0);
-        if let Some((v, w, ev, cl, p, _, _)) = &self.transcript_cache {
+        if let Some((v, w, ev, cl, p, _, _, _, fe)) = &self.transcript_cache {
             if *v == self.events_version
                 && *w == width
                 && *ev == ext_ver
                 && *cl == self.palette.level()
                 && *p == self.palette
+                && *fe == self.frac_epoch
             {
                 return &self.transcript_cache.as_ref().unwrap().5;
             }
@@ -954,6 +1259,7 @@ impl App {
         let build = crate::render::build_transcript(self, width, ext);
         let lines = build.lines;
         let line_raw = build.line_raw;
+        let block_spans = build.block_spans;
         self.transcript_cache = Some((
             self.events_version,
             width,
@@ -962,6 +1268,8 @@ impl App {
             self.palette.clone(),
             lines,
             line_raw,
+            block_spans,
+            self.frac_epoch,
         ));
         &self.transcript_cache.as_ref().unwrap().5
     }
@@ -978,6 +1286,17 @@ impl App {
     ) -> Vec<Option<String>> {
         let _lines = self.transcript_lines(width, ext);
         self.transcript_cache.as_ref().unwrap().6.clone()
+    }
+
+    /// Tool-result block spans (event ID → start/end transcript line
+    /// indices, exclusive end) for the current cached transcript.
+    pub fn transcript_block_spans(
+        &mut self,
+        width: usize,
+        ext: Option<&crate::ext::ExtHost>,
+    ) -> std::collections::HashMap<String, (usize, usize)> {
+        let _ = self.transcript_lines(width, ext);
+        self.transcript_cache.as_ref().unwrap().7.clone()
     }
 
     /// Events of the active session, oldest first.
@@ -1173,7 +1492,7 @@ impl App {
                     self.flash("browse left — view kept");
                 }
                 _ => {
-                    self.ss_arm = Some(Instant::now());
+                    self.ss_arm = Some(std::time::Instant::now());
                     self.flash("ss: press s again to leave browse");
                 }
             }
@@ -3109,6 +3428,35 @@ mod tests {
             .any(|l| l.to_string().contains("two")));
     }
 
+    /// When `frac_epoch` changes (via `animate_block` or `pump_animations`),
+    /// the transcript cache must be invalidated so the next
+    /// `transcript_lines` call rebuilds with the new expand fractions.
+    #[test]
+    fn transcript_cache_invalidates_on_frac_epoch_change() {
+        let mut app = app_with(vec![], "s1");
+        app.set_active(
+            SessionId::new("s1"),
+            vec![
+                tool_call("call-1"),
+                ev(r#"{"v":1,"type":"tool_result","ts":"t","call_id":"call-1","name":"bash","content":{"text":"hello","exit_code":0}}"#),
+            ],
+        );
+
+        // Prime the cache.
+        let a = app.transcript_lines(80, None) as *const _;
+        let b = app.transcript_lines(80, None) as *const _;
+        assert_eq!(a, b, "stable cache when nothing changes");
+
+        // Animate a block: bumps frac_epoch, so the cache must invalidate.
+        app.animate_block("call-1", 0.5);
+        let c = app.transcript_lines(80, None) as *const _;
+        assert_ne!(a, c, "animate_block must invalidate the transcript cache");
+
+        // A second call with no state change must reuse the new cache.
+        let d = app.transcript_lines(80, None) as *const _;
+        assert_eq!(c, d, "cache is stable when frac_epoch is unchanged");
+    }
+
     #[test]
     fn scroll_bounded_and_follows_tail() {
         let evs: Vec<Event> = (0..100)
@@ -5024,5 +5372,139 @@ mod tests {
         assert!(app.stream_buf().is_none());
         assert_eq!(app.stream_pending_chars(), 0);
         drop(dir);
+    }
+
+    // ── Fancy tool-result display tests
+    //    (docs/tui-tool-display-fancy.md sections 6–7) ──────────
+
+    /// Set up an App with the focus expand mode and a couple of
+    /// block spans so the focus / animation tests have something to
+    /// work with.
+    fn app_focus_test_setup() -> App {
+        let mut app = app_with(Vec::new(), "s1");
+        app.tool_display.expand_mode = crate::tool_display::ExpandMode::Focus;
+        app.set_block_spans(std::collections::HashMap::from([
+            ("block-a".to_string(), (0usize, 10usize)),
+            ("block-b".to_string(), (10usize, 20usize)),
+            ("block-c".to_string(), (20usize, 30usize)),
+        ]));
+        app
+    }
+
+    /// P4: the nearest-block picker returns the block whose span is
+    /// closest to the requested line.
+    #[test]
+    fn pick_focus_block_picks_the_nearest() {
+        let app = app_focus_test_setup();
+
+        // Focus line 5 → inside block-a → distance 0.
+        assert_eq!(app.nearest_block_to_line(5), Some("block-a"));
+        // Focus line 15 → inside block-b → distance 0.
+        assert_eq!(app.nearest_block_to_line(15), Some("block-b"));
+        // Focus line 9 → gap between a (0..10) and b (10..20):
+        // dist to a = 10-9=1, dist to b = 10-9=1 → tie, earlier wins.
+        assert_eq!(app.nearest_block_to_line(9), Some("block-a"));
+        // Focus line 35 → past all blocks → nearest is block-c (end=30, dist 5).
+        assert_eq!(app.nearest_block_to_line(35), Some("block-c"));
+        // Focus line 0 → inside block-a.
+        assert_eq!(app.nearest_block_to_line(0), Some("block-a"));
+    }
+
+    /// P5: expanding a block animates the fraction upward with a
+    /// smoothstep curve; collapsing reverses the same curve.
+    #[test]
+    fn step_progress_moves_toward_the_target_and_reverses() {
+        let mut app = app_focus_test_setup();
+        app.tool_display.anim_ms = 5; // fast for testing
+        let id = "block-a";
+
+        // Animate to expanded (target = 1.0).
+        app.animate_block(id, 1.0);
+        assert!(app.is_animating(), "should be animating after animate_block");
+
+        // Wait past the animation duration so the fraction reaches the target.
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        app.pump_animations();
+        let frac = app.expand_fracs().get(id).copied().unwrap_or(0.0);
+        assert!((frac - 1.0).abs() < 0.01, "should converge to 1.0, got {frac}");
+        assert!(!app.is_animating(), "should stop animating after completion");
+
+        // Now animate back to collapsed (reverse).
+        app.animate_block(id, 0.0);
+        assert!(app.is_animating(), "should be animating after animate_block back to 0");
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        app.pump_animations();
+        let frac = app.expand_fracs().get(id).copied().unwrap_or(0.0);
+        assert!((frac - 0.0).abs() < 0.01, "should converge to 0.0, got {frac}");
+        assert!(!app.is_animating());
+    }
+
+    /// P6: `fade_alpha` ramps linearly from 0→1 over `anim_ms`
+    /// milliseconds and then holds at 1.0. A block that has never
+    /// been registered returns 1.0 (no fade).
+    #[test]
+    fn fade_alpha_ramps_and_holds() {
+        let mut app = app_focus_test_setup();
+
+        // Unregistered block → no fade.
+        assert_eq!(app.fade_alpha("never-seen"), 1.0);
+
+        // Register a spawn at the current time.
+        app.register_block_spawn("block-a");
+
+        // Immediately after spawn, alpha should be very low (< 0.5
+        // for a 250 ms window).
+        let alpha = app.fade_alpha("block-a");
+        assert!(alpha < 0.5, "fresh spawn should be well below 0.5, got {alpha}");
+
+        // A block registered well before now (beyond anim_ms) is
+        // fully faded in.
+        let old_spawn = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+            - 10_000; // 10 s ago, well past the default 250 ms
+        app.block_spawn_ms
+            .insert("block-b".to_string(), old_spawn);
+        assert_eq!(app.fade_alpha("block-b"), 1.0, "stale spawn should be fully faded");
+
+        // Re-registering the same block is a no-op (no timestamp reset).
+        let first_spawn = app.block_spawn_ms.get("block-a").copied().unwrap();
+        app.register_block_spawn("block-a");
+        let second_spawn = app.block_spawn_ms.get("block-a").copied().unwrap();
+        assert_eq!(first_spawn, second_spawn, "re-register must not reset the clock");
+    }
+
+    /// `set_focus_block` collapses previously-expanded blocks and
+    /// expands the newly focused one.
+    #[test]
+    fn set_focus_block_collapses_others_and_expands_target() {
+        let mut app = app_focus_test_setup();
+
+        // Focus block-a.
+        app.set_focus_block("block-a");
+        assert_eq!(
+            app.expand_fracs().get("block-a").copied().unwrap_or(0.0),
+            0.0,
+            "just started, fraction is 0"
+        );
+        assert_eq!(
+            app.block_targets_for_test().get("block-a").copied(),
+            Some(1.0),
+            "target should be 1.0"
+        );
+
+        // Focus block-b: block-a should now be targeted for collapse.
+        app.set_focus_block("block-b");
+        assert_eq!(
+            app.block_targets_for_test().get("block-a").copied(),
+            Some(0.0),
+            "previous focus should be targeted for collapse"
+        );
+        assert_eq!(
+            app.block_targets_for_test().get("block-b").copied(),
+            Some(1.0),
+            "new focus should be targeted for expansion"
+        );
     }
 }

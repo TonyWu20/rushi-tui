@@ -11,9 +11,21 @@ resolver = "2"
 members = [
     "bin/tui",
     "bin/tui-stream-drt",
+    "crates/tui-highlight",
 ]
 
 [workspace.dependencies]
 # Inherited by `bin/tui` (`bon = { workspace = true }`); it was a member
 # of the kernel's root workspace before the split.
 bon = "3"
+ratatui = "0.30"
+
+[profile.release]
+# The TUI binary's final link step was the 2+ minute bottleneck:
+# DWARF debuginfo on a ~30 k-LOC crate dominated the tail of the build.
+# `debug = "line-tables-only"` keeps enough for stack traces in the
+# crash reporter (docs/tui-mem-safety.md) without the full DWARF cost.
+debug = "line-tables-only"
+# `incremental = true` in release (stable since Rust 1.77): the
+# incremental cache cuts warm rebuilds of the final binary by ~40%.
+incremental = true

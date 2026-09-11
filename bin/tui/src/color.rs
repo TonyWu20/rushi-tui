@@ -257,6 +257,13 @@ pub enum Role {
     DiffRemoved,
     /// A diff context line. pi `toolDiffContext`.
     DiffContext,
+    /// The background shade of an added diff line (docs/tui-tool-
+    /// display-fancy.md section 7): a dark green tint that spans the
+    /// whole line so the syntax colors of the text stay readable.
+    DiffAddedBg,
+    /// The background shade of a removed diff line: a dark red tint
+    /// that spans the whole line.
+    DiffRemovedBg,
     /// The input-area border of thinking level 0 (no thinking). pi
     /// `thinkingOff`.
     Border0,
@@ -281,6 +288,14 @@ pub enum Role {
     /// The light background of a failed tool-result box. pi
     /// `toolErrorBg`.
     ToolBoxBgError,
+    /// The browse-mode visual selection shading (docs/tui-
+    /// conversation-browsing.md section 11.4): a background tone
+    /// distinct from the search-highlight tone (section 7.3).
+    Selection,
+    /// The browse-mode cursorline background (section 4.1): a dark
+    /// shade so the cursor row is visible without overpowering the
+    /// selection tone.
+    CursorLine,
 }
 
 impl Role {
@@ -317,6 +332,8 @@ impl Role {
         Role::DiffAdded,
         Role::DiffRemoved,
         Role::DiffContext,
+        Role::DiffAddedBg,
+        Role::DiffRemovedBg,
         Role::Border0,
         Role::Border1,
         Role::Border2,
@@ -325,6 +342,8 @@ impl Role {
         Role::ToolBoxBg,
         Role::ToolBoxBgSuccess,
         Role::ToolBoxBgError,
+        Role::Selection,
+        Role::CursorLine,
     ];
 
     /// The built-in value of the role at every capability level. The
@@ -362,6 +381,13 @@ impl Role {
             Success | DiffAdded => Color::Rgb(0xb5, 0xbd, 0x68),
             Warning => Color::Rgb(0xff, 0xff, 0x00),
             DiffContext => Color::Rgb(0x80, 0x80, 0x80),
+            // The diff-line background shades: a dark green tint for
+            // added lines and a dark red tint for removed lines. They
+            // are deliberately darker than the accent `DiffAdded` /
+            // `DiffRemoved` foregrounds so the syntax colors of the
+            // text stay readable on top of the tint.
+            DiffAddedBg => Color::Rgb(0x1e, 0x33, 0x2a),
+            DiffRemovedBg => Color::Rgb(0x3a, 0x20, 0x26),
             Border0 => Color::Rgb(0x50, 0x50, 0x50),
             Border1 => Color::Rgb(0x5f, 0x87, 0xaf),
             Border2 => Color::Rgb(0x81, 0xa2, 0xbe),
@@ -370,6 +396,16 @@ impl Role {
             ToolBoxBg => Color::Rgb(0x28, 0x28, 0x32),
             ToolBoxBgSuccess => Color::Rgb(0x28, 0x32, 0x28),
             ToolBoxBgError => Color::Rgb(0x3c, 0x28, 0x28),
+            // The cursorline background: a dark shade so the cursor
+            // row is visible without overpowering text.
+            CursorLine => Color::Rgb(0x1e, 0x20, 0x30),
+            // The selection background: a muted blue-gray, distinct
+            // from the search highlight (the `Hint` bold tone) so a
+            // selected span that also matches a search reads as two
+            // layers.
+            // A blue selection tone (distinct from the `Hint`
+            // search-highlight gray: lowers to Blue vs DarkGray at C16).
+            Selection => Color::Rgb(0x36, 0x45, 0x73),
         };
         lower(c, level)
     }
@@ -409,6 +445,8 @@ impl Role {
             DiffAdded => "diff_added",
             DiffRemoved => "diff_removed",
             DiffContext => "diff_context",
+            DiffAddedBg => "diff_added_bg",
+            DiffRemovedBg => "diff_removed_bg",
             Border0 => "border0",
             Border1 => "border1",
             Border2 => "border2",
@@ -417,7 +455,19 @@ impl Role {
             ToolBoxBg => "tool_box_bg",
             ToolBoxBgSuccess => "tool_box_bg_success",
             ToolBoxBgError => "tool_box_bg_error",
+            Selection => "selection",
+            CursorLine => "cursor_line",
         }
+    }
+
+    /// Look up a role by its wire key, accepting both snake_case
+    /// (`cursor_line`) and PascalCase (`CursorLine`) forms.
+    pub fn from_key(k: &str) -> Option<Role> {
+        let norm = |s: &str| -> String {
+            s.to_lowercase().replace('_', "")
+        };
+        let nk = norm(k);
+        Role::ALL.iter().find(|r| norm(r.key()) == nk).copied()
     }
 }
 
@@ -461,7 +511,7 @@ pub const SCHEME_CATPPUCCIN_MACCHIATO: &str = "catppuccin macchiato";
 /// internal scheme.
 pub fn catppuccin_macchiato() -> std::collections::HashMap<Role, &'static str> {
     use Role::*;
-    let pairs: [(Role, &str); 38] = [
+    let pairs: [(Role, &str); 42] = [
         (PlainText, "#cad3f5"),
         (ToolOutput, "#cad3f5"),
         (ToolCommand, "#c6a0f6"),
@@ -492,6 +542,8 @@ pub fn catppuccin_macchiato() -> std::collections::HashMap<Role, &'static str> {
         (DiffAdded, "#a6da95"),
         (DiffRemoved, "#ed8796"),
         (DiffContext, "#a5adcb"),
+        (DiffAddedBg, "#26402f"),
+        (DiffRemovedBg, "#3d2830"),
         (Border0, "#8087a2"),
         (Border1, "#8bd5ca"),
         (Border2, "#a6da95"),
@@ -500,6 +552,8 @@ pub fn catppuccin_macchiato() -> std::collections::HashMap<Role, &'static str> {
         (ToolBoxBg, "#363a4f"),
         (ToolBoxBgSuccess, "#363a4f"),
         (ToolBoxBgError, "#363a4f"),
+        (Selection, "#5b6078"),
+        (CursorLine, "#1e2030"),
     ];
     pairs.iter().cloned().collect()
 }
@@ -561,6 +615,19 @@ impl Palette {
         Palette { level, colors }
     }
 
+    /// Overlay a partial hex table on an existing palette: set roles
+    /// get their hex values lowered to `level`, unset roles keep the
+    /// base palette's values.
+    pub fn overlay(base: &Self, hexes: &std::collections::HashMap<Role, String>) -> Self {
+        let mut colors = base.colors.clone();
+        for (role, hex) in hexes {
+            let c = parse_scheme_color(hex)
+                .expect("the config layer validates the scheme hex values");
+            colors.insert(*role, lower(c, base.level));
+        }
+        Palette { level: base.level, colors }
+    }
+
     /// The capability level the palette lowers to.
     pub fn level(&self) -> Level {
         self.level
@@ -601,22 +668,33 @@ pub fn palette_from_config(
     scheme: Option<&str>,
     custom: &std::collections::HashMap<String, std::collections::HashMap<Role, String>>,
 ) -> Result<Palette, String> {
-    let Some(name) = scheme else {
-        // The default scheme: the reference pi theme.
-        return Ok(Palette::named(level, SCHEME_CATPPUCCIN_MACCHIATO)
-            .unwrap_or_else(|| Palette::builtin(level)));
+    let name = scheme.unwrap_or(SCHEME_CATPPUCCIN_MACCHIATO);
+    // Resolve the base palette: a built-in scheme or the built-in
+    // dark palette (user-defined schemes overlay on it).
+    let base = if name == SCHEME_CATPPUCCIN_MACCHIATO
+        || name.replace('-', " ") == SCHEME_CATPPUCCIN_MACCHIATO
+    {
+        Palette::named(level, SCHEME_CATPPUCCIN_MACCHIATO)
+            .unwrap_or_else(|| Palette::builtin(level))
+    } else {
+        Palette::builtin(level)
     };
-    if name == SCHEME_CATPPUCCIN_MACCHIATO {
-        return Ok(Palette::named(level, SCHEME_CATPPUCCIN_MACCHIATO)
-            .unwrap_or_else(|| Palette::builtin(level)));
+    // Overlay a user table (either `color_schemes` or `custom_schemes`
+    // in the config) on the base palette.  The table name is looked
+    // up by the original name and by the hyphen→space normalised form,
+    // so both `catppuccin-macchiato` and `catppuccin macchiato` work.
+    let norm = |s: &str| s.replace('-', " ");
+    let norm_name = norm(name);
+    let table = custom
+        .get(name)
+        .or_else(|| custom.get(&norm_name))
+        .or_else(|| {
+            custom.iter().find_map(|(k, t)| (norm(k) == norm_name).then(|| t))
+        });
+    match table {
+        Some(hexes) => Ok(Palette::overlay(&base, hexes)),
+        None => Ok(base),
     }
-    let table = custom.get(name).ok_or_else(|| {
-        format!(
-            "color scheme {name:?} is not a built-in scheme \
-             (expected {SCHEME_CATPPUCCIN_MACCHIATO}) and has no [tui] color_schemes table"
-        )
-    })?;
-    Ok(Palette::custom(level, table))
 }
 
 /// The xterm 256-palette: indices 0-15 (the ANSI swatches, `#c0c0c0`
@@ -945,11 +1023,34 @@ mod tests {
         // Every role has a built-in value at every level: a new role
         // that misses the table fails here, not at render time.
         for level in [Level::Rgb, Level::C256, Level::C16] {
-            assert_eq!(Role::ALL.len(), 38, "the role list grows: update the table");
+            assert_eq!(Role::ALL.len(), 42, "the role list grows: update the table");
             for role in Role::ALL {
                 let _ = role.builtin(level);
             }
         }
+    }
+
+    #[test]
+    fn selection_role_lowers_and_stays_distinct_from_search_highlight() {
+        // The stage-3 `Role::Selection` (docs/tui-conversation-
+        // browsing.md section 11.4): lowered like every other role,
+        // and distinct from the search-highlight tone (`Hint`) at
+        // every capability level.
+        for level in [Level::Rgb, Level::C256, Level::C16] {
+            let p = Palette::builtin(level);
+            assert_ne!(
+                p.color(Role::Selection),
+                p.color(Role::Hint),
+                "selection tone must differ from the search highlight at {level:?}"
+            );
+            // The built-in value lowers to the level.
+            let c = p.color(Role::Selection);
+            let expected = Role::Selection.builtin(level);
+            assert_eq!(c, expected);
+        }
+        // The Macchiato scheme maps it to the surface2 tone.
+        let p = Palette::named(Level::Rgb, SCHEME_CATPPUCCIN_MACCHIATO).unwrap();
+        assert_eq!(p.color(Role::Selection), Color::Rgb(0x5b, 0x60, 0x78));
     }
 
     #[test]

@@ -18,7 +18,7 @@
     #
     # Local dev path: the sibling kernel checkout is a path input, so
     # the devShell can put the Nix-built `rushi` launcher on PATH.
-    rushi-kernel = { url = "path:/home/tony/programming/rust-unix-harness"; };
+    rushi-kernel = { url = "git+file:/home/tony/programming/rust-unix-harness"; };
   };
 
   outputs = inputs @ { self, nixpkgs, flake-utils, fenix, ... }:
@@ -42,6 +42,10 @@
         devShells.default = pkgs.mkShell {
           buildInputs = [
             rustToolchain
+            # The tree-sitter grammar crates (tui-highlight) compile
+            # C parser sources via the `cc` build-dep; the fenix
+            # Rust toolchain does not ship a C compiler.
+            pkgs.stdenv.cc
             pkgs.jq
             pkgs.python3
             pkgs.file

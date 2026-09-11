@@ -110,21 +110,21 @@ pub(crate) enum SearchKind {
 
 /// A motion result (the pi-vim `MotionResult`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct MotionResult {
-    pos: (usize, usize),
+pub(crate) struct MotionResult {
+    pub(crate) pos: (usize, usize),
     /// Whether the motion operates on whole lines (for operators).
-    linewise: bool,
+    pub(crate) linewise: bool,
     /// Whether the end position is included in operator ranges.
-    inclusive: bool,
+    pub(crate) inclusive: bool,
 }
 
 /// An operator range (the pi-vim `OperatorRange`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct OpRange {
-    start: (usize, usize),
-    end: (usize, usize),
-    linewise: bool,
-    inclusive: bool,
+pub(crate) struct OpRange {
+    pub(crate) start: (usize, usize),
+    pub(crate) end: (usize, usize),
+    pub(crate) linewise: bool,
+    pub(crate) inclusive: bool,
 }
 
 /// The multi-line textarea plus the vim modal state. The invariant
@@ -178,8 +178,10 @@ pub struct Editor {
     current_recording: Option<RecordedChange>,
     is_recording_insert: bool,
     is_replaying: bool,
-    // ── registers and undo / redo ──
-    registers: HashMap<char, RegContent>,
+    // ── undo / redo ──
+    /// The register store is shared with the browse overlay: it lives
+    /// on `App` (docs/tui-conversation-browsing.md section 11.3) and
+    /// is passed into [`Editor::press`] as the shared store.
     undo_stack: Vec<Snapshot>,
     redo_stack: Vec<Snapshot>,
 }
@@ -350,7 +352,6 @@ impl Editor {
             current_recording: None,
             is_recording_insert: false,
             is_replaying: false,
-            registers: HashMap::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
         }
@@ -365,7 +366,8 @@ impl Editor {
 
     /// Load a whole draft. The cursor is clamped to the new text.
     /// External text resets the vim command state and the undo
-    /// stacks; the registers survive (like vim across buffers).
+    /// stacks; the register store is shared and out of scope here
+    /// (docs/tui-conversation-browsing.md section 11.3).
     pub fn set_text(&mut self, text: &str) {
         let mut ls: Vec<String> = text.lines().map(str::to_string).collect();
         if ls.is_empty() {
@@ -647,7 +649,15 @@ impl Editor {
     /// changed nothing the user should know (a cancelled operator,
     /// an unhandled key in an editing mode). Unknown keys in
     /// normal mode are silently ignored, like vim.
-    pub fn press(&mut self, key_in: Key) -> Option<String> {
+    ///
+    /// `registers` is the shared register store: it lives on the
+    /// host (`App`, docs/tui-conversation-browsing.md section 11.3)
+    /// so a browse-mode yank lands where the editor's `p` reads.
+    pub fn press(
+        &mut self,
+        key_in: Key,
+        registers: &mut std::collections::HashMap<char, RegContent>,
+    ) -> Option<String> {
         // `CtrlJ` is the multi-line newline key: the host maps it
         // here so every mode's `Enter` arm applies (insert splits
         // the line, normal moves down, command-line confirms).
@@ -658,9 +668,9 @@ impl Editor {
         match self.mode {
             Mode::Insert => self.insert_press(key),
             Mode::Replace => self.replace_press(key),
-            Mode::Visual | Mode::VisualLine => self.visual_press(key),
+            Mode::Visual | Mode::VisualLine => self.visual_press(key, registers),
             Mode::CommandLine => self.command_line_press(key),
-            Mode::Normal => self.normal_press(key),
+            Mode::Normal => self.normal_press(key, registers),
         }
     }
 }
@@ -984,7 +994,11 @@ impl Editor {
     /// Normal mode. The pending states are resolved first (register
     /// selection, text object key, char motion, `g`), then the
     /// count prefix, then the command keys.
-    fn normal_press(&mut self, key: Key) -> Option<String> {
+    fn normal_press(
+        &mut self,
+        key: Key,
+        registers: &mut std::collections::HashMap<char, RegContent>,
+    ) -> Option<String> {
         // --- pending register selection (after `"`) ---
         if self.pending_register {
             self.pending_register = false;
@@ -1019,7 +1033,7 @@ impl Editor {
                                 self.record_key(c);
                             }
                             let obj_range = text_object_to_range(&range);
-                            self.apply_operator_to_range(op, &obj_range);
+                            self.apply_operator_to_range(op, &obj_range, registers);
                         } else {
                             // Text objects without an operator do
                             // nothing in normal mode.
@@ -1066,7 +1080,7 @@ impl Editor {
                                 c,
                                 &mut self.last_char_search,
                             );
-                            self.run_motion(res);
+                            self.run_motion(res, registers);
                         }
                         'F' => {
                             let res = find_char_backward(
@@ -1076,7 +1090,7 @@ impl Editor {
                                 c,
                                 &mut self.last_char_search,
                             );
-                            self.run_motion(res);
+                            self.run_motion(res, registers);
                         }
                         't' => {
                             let res = till_char_forward(
@@ -1086,7 +1100,7 @@ impl Editor {
                                 c,
                                 &mut self.last_char_search,
                             );
-                            self.run_motion(res);
+                            self.run_motion(res, registers);
                         }
                         _ => {
                             let res = till_char_backward(
@@ -1096,7 +1110,7 @@ impl Editor {
                                 c,
                                 &mut self.last_char_search,
                             );
-                            self.run_motion(res);
+                            self.run_motion(res, registers);
                         }
                     }
                     if self.is_recording() {
@@ -1127,7 +1141,7 @@ impl Editor {
                     self.record_key('g');
                 }
                 let res = go_to_first_line(&self.lines, (self.row, self.col), n);
-                self.run_motion(res);
+                self.run_motion(res, registers);
                 if self.pending_operator.is_none() {
                     self.reset_operator_state();
                 }
@@ -1165,7 +1179,7 @@ impl Editor {
             }
             // --- dot repeat (the pi-vim `.`) ---
             Key::Char('.') => {
-                self.replay_last_change(if count_explicit { count } else { 0 });
+                self.replay_last_change(if count_explicit { count } else { 0 }, registers);
                 self.reset_operator_state();
                 return None;
             }
@@ -1178,7 +1192,7 @@ impl Editor {
                         self.record_key(c);
                     }
                     let n = self.pending_operator_count * count;
-                    self.apply_linewise_operator(c, n);
+                    self.apply_linewise_operator(c, n, registers);
                     return None;
                 }
                 if self.pending_operator.is_some() {
@@ -1212,7 +1226,7 @@ impl Editor {
                 self.begin_change_recording('D', count);
                 let res = line_end(&self.lines, (self.row, self.col), 1);
                 let range = motion_to_range((self.row, self.col), &res);
-                self.apply_operator_to_range('d', &range);
+                self.apply_operator_to_range('d', &range, registers);
                 return None;
             }
             Key::Char('C') => {
@@ -1220,20 +1234,20 @@ impl Editor {
                 self.begin_change_recording('C', count);
                 let res = line_end(&self.lines, (self.row, self.col), 1);
                 let range = motion_to_range((self.row, self.col), &res);
-                self.apply_operator_to_range('c', &range);
+                self.apply_operator_to_range('c', &range, registers);
                 // No finalize: it enters insert, finalized on Esc.
                 return None;
             }
             Key::Char('Y') => {
                 // Y = yy (yank the whole line).
-                self.apply_linewise_operator('y', count);
+                self.apply_linewise_operator('y', count, registers);
                 return None;
             }
             // --- paste commands ---
             Key::Char('p') | Key::Char('P') => {
                 let before = key == Key::Char('P');
                 self.begin_change_recording(if before { 'P' } else { 'p' }, count);
-                if let Some(reg) = get_register(&self.registers, self.register) {
+                if let Some(reg) = get_register(registers, self.register) {
                     self.paste(&reg, before, count as usize);
                 }
                 self.finalize_change_recording();
@@ -1249,7 +1263,7 @@ impl Editor {
             _ => {}
         }
 
-        self.normal_motion(key, count, motion_count, count_explicit)
+        self.normal_motion(key, count, motion_count, count_explicit, registers)
     }
 
     /// The motion and command keys of normal mode (the pi-vim
@@ -1263,6 +1277,7 @@ impl Editor {
         count: u32,
         motion_count: u32,
         count_explicit: bool,
+        registers: &mut std::collections::HashMap<char, RegContent>,
     ) -> Option<String> {
         let cursor = (self.row, self.col);
         let ch: Option<char> = match key {
@@ -1288,7 +1303,7 @@ impl Editor {
                 // Vim: h stops at column 0; it never wraps to the
                 // previous line (the compat fix).
                 let res = char_left(&self.lines, cursor, motion_count);
-                self.run_motion(res);
+                self.run_motion(res, registers);
                 if self.pending_operator.is_none() {
                     self.reset_operator_state();
                 }
@@ -1317,7 +1332,7 @@ impl Editor {
                 } else {
                     char_right(&self.lines, cursor, motion_count)
                 };
-                self.run_motion(res);
+                self.run_motion(res, registers);
                 if self.pending_operator.is_none() {
                     self.reset_operator_state();
                 }
@@ -1338,7 +1353,7 @@ impl Editor {
                         inclusive: true,
                     };
                     if let Some(op) = self.pending_operator {
-                        self.apply_operator_to_range(op, &range);
+                        self.apply_operator_to_range(op, &range, registers);
                     }
                 } else {
                     let mut r = cursor.0;
@@ -1365,7 +1380,7 @@ impl Editor {
                         inclusive: true,
                     };
                     if let Some(op) = self.pending_operator {
-                        self.apply_operator_to_range(op, &range);
+                        self.apply_operator_to_range(op, &range, registers);
                     }
                 } else {
                     let mut r = cursor.0;
@@ -1383,7 +1398,7 @@ impl Editor {
                     self.record_key('0');
                 }
                 let res = line_start(&self.lines, cursor, 1);
-                self.run_motion(res);
+                self.run_motion(res, registers);
                 if self.pending_operator.is_none() {
                     self.reset_operator_state();
                 }
@@ -1394,7 +1409,7 @@ impl Editor {
                     self.record_key('$');
                 }
                 let res = line_end(&self.lines, cursor, count);
-                self.run_motion(res);
+                self.run_motion(res, registers);
                 if self.pending_operator.is_none() {
                     self.reset_operator_state();
                 }
@@ -1405,7 +1420,7 @@ impl Editor {
                     self.record_key('^');
                 }
                 let res = first_nonblank_motion(&self.lines, cursor, 1);
-                self.run_motion(res);
+                self.run_motion(res, registers);
                 if self.pending_operator.is_none() {
                     self.reset_operator_state();
                 }
@@ -1415,7 +1430,7 @@ impl Editor {
                 if self.is_recording() && self.pending_operator.is_some() {
                     self.record_key('w');
                 }
-                self.execute_word_forward(motion_count);
+                self.execute_word_forward(motion_count, registers);
                 if self.pending_operator.is_none() {
                     self.reset_operator_state();
                 }
@@ -1435,7 +1450,7 @@ impl Editor {
                 if c == 'W' && self.pending_operator.is_some() {
                     res = extend_w_eol(&self.lines, cursor, res);
                 }
-                self.run_motion(res);
+                self.run_motion(res, registers);
                 if self.pending_operator.is_none() {
                     self.reset_operator_state();
                 }
@@ -1454,7 +1469,7 @@ impl Editor {
                 } else {
                     reverse_char_search(&self.lines, cursor, count, &self.last_char_search)
                 };
-                self.run_motion(res);
+                self.run_motion(res, registers);
                 if self.pending_operator.is_none() {
                     self.reset_operator_state();
                 }
@@ -1476,7 +1491,7 @@ impl Editor {
                     self.lines.len() as u32
                 };
                 let res = go_to_last_line(&self.lines, cursor, n.max(1));
-                self.run_motion(res);
+                self.run_motion(res, registers);
                 if self.pending_operator.is_none() {
                     self.reset_operator_state();
                 }
@@ -1491,7 +1506,7 @@ impl Editor {
                 } else {
                     paragraph_forward(&self.lines, cursor, count)
                 };
-                self.run_motion(res);
+                self.run_motion(res, registers);
                 if self.pending_operator.is_none() {
                     self.reset_operator_state();
                 }
@@ -1502,7 +1517,7 @@ impl Editor {
                     self.record_key('%');
                 }
                 let res = matching_bracket(&self.lines, cursor, 1);
-                self.run_motion(res);
+                self.run_motion(res, registers);
                 if self.pending_operator.is_none() {
                     self.reset_operator_state();
                 }
@@ -1517,7 +1532,7 @@ impl Editor {
                 } else {
                     self.search_repeat(count, !self.last_search_forward)
                 };
-                self.run_motion(res);
+                self.run_motion(res, registers);
                 if self.pending_operator.is_none() {
                     self.reset_operator_state();
                 }
@@ -1528,7 +1543,7 @@ impl Editor {
                     self.record_key(c);
                 }
                 let res = self.search_word_under_cursor(c == '*');
-                self.run_motion(res);
+                self.run_motion(res, registers);
                 self.reset_operator_state();
                 None
             }
@@ -1549,7 +1564,7 @@ impl Editor {
                     linewise: false,
                     inclusive: true,
                 };
-                self.apply_operator_to_range('c', &range);
+                self.apply_operator_to_range('c', &range, registers);
                 self.reset_operator_state();
                 None
             }
@@ -1565,7 +1580,7 @@ impl Editor {
                     linewise: true,
                     inclusive: true,
                 };
-                self.apply_operator_to_range('c', &range);
+                self.apply_operator_to_range('c', &range, registers);
                 self.reset_operator_state();
                 None
             }
@@ -1635,11 +1650,11 @@ impl Editor {
             }
             // --- basic editing ---
             Some('x') => {
-                self.delete_forward_compat(count);
+                self.delete_forward_compat(count, registers);
                 None
             }
             Some('X') => {
-                self.delete_backward_compat(count);
+                self.delete_backward_compat(count, registers);
                 None
             }
             Some('r') => {
@@ -1704,11 +1719,15 @@ impl Editor {
     /// Run a motion: with a pending operator it applies the
     /// operator to the motion range; otherwise it moves the cursor
     /// (the pi-vim `executeMotion`).
-    fn run_motion(&mut self, res: MotionResult) {
+    fn run_motion(
+        &mut self,
+        res: MotionResult,
+        registers: &mut std::collections::HashMap<char, RegContent>,
+    ) {
         if let Some(op) = self.pending_operator {
             let cursor = (self.row, self.col);
             let range = motion_to_range(cursor, &res);
-            self.apply_operator_to_range(op, &range);
+            self.apply_operator_to_range(op, &range, registers);
         } else {
             self.go_to(res.pos);
         }
@@ -1718,7 +1737,11 @@ impl Editor {
     /// `executeWordForward`): `cw` behaves as `ce` off a blank; a
     /// single `dw` on the last word of a line does not consume the
     /// newline, but bigger counts do.
-    fn execute_word_forward(&mut self, n: u32) {
+    fn execute_word_forward(
+        &mut self,
+        n: u32,
+        registers: &mut std::collections::HashMap<char, RegContent>,
+    ) {
         let cursor = (self.row, self.col);
         let op = self.pending_operator;
         let current = chars_of(&self.lines, cursor.0).get(cursor.1).copied();
@@ -1747,7 +1770,7 @@ impl Editor {
         };
         if let Some(op) = self.pending_operator {
             let range = motion_to_range(cursor, &res);
-            self.apply_operator_to_range(op, &range);
+            self.apply_operator_to_range(op, &range, registers);
         } else {
             self.go_to(res.pos);
         }
@@ -1755,11 +1778,16 @@ impl Editor {
 
     /// Apply a pending operator to a range (the pi-vim
     /// `applyOperatorToRange`).
-    fn apply_operator_to_range(&mut self, op: char, range: &OpRange) {
+    fn apply_operator_to_range(
+        &mut self,
+        op: char,
+        range: &OpRange,
+        registers: &mut std::collections::HashMap<char, RegContent>,
+    ) {
         let lines = self.lines.clone();
         let reg = self.register;
         let (new_lines, cursor, enter_insert) =
-            apply_operator(op, &lines, range, &mut self.registers, reg);
+            apply_operator(op, &lines, range, registers, reg);
         self.push_undo();
         self.lines = new_lines;
         self.row = clamp_line(self.lines.len(), cursor.0);
@@ -1777,7 +1805,12 @@ impl Editor {
 
     /// Apply a linewise operator to the doubled form
     /// (`dd`, `cc`, `3dd`, the pi-vim `applyLinewiseOperator`).
-    fn apply_linewise_operator(&mut self, op: char, n: u32) {
+    fn apply_linewise_operator(
+        &mut self,
+        op: char,
+        n: u32,
+        registers: &mut std::collections::HashMap<char, RegContent>,
+    ) {
         let n = n.max(1) as usize;
         let end_line = (self.row + n - 1).min(self.lines.len().saturating_sub(1));
         let range = OpRange {
@@ -1786,7 +1819,7 @@ impl Editor {
             linewise: true,
             inclusive: true,
         };
-        self.apply_operator_to_range(op, &range);
+        self.apply_operator_to_range(op, &range, registers);
     }
 
     // ── counted char deletes (the compat fixes) ────────────────
@@ -1794,7 +1827,11 @@ impl Editor {
     /// `x` with a count: delete up to `count` chars under the
     /// cursor, clamped to the line end. Vim never joins lines
     /// with `x` (the compat fix).
-    fn delete_forward_compat(&mut self, count: u32) {
+    fn delete_forward_compat(
+        &mut self,
+        count: u32,
+        registers: &mut std::collections::HashMap<char, RegContent>,
+    ) {
         self.begin_change_recording('x', count);
         let len = line_len(&self.lines, self.row);
         if self.col < len {
@@ -1805,7 +1842,7 @@ impl Editor {
                 linewise: false,
                 inclusive: true,
             };
-            self.apply_operator_to_range('d', &range);
+            self.apply_operator_to_range('d', &range, registers);
         } else {
             self.finalize_change_recording();
             self.reset_operator_state();
@@ -1814,7 +1851,11 @@ impl Editor {
 
     /// `X` with a count: delete up to `count` chars before the
     /// cursor, clamped to the line start (the compat fix).
-    fn delete_backward_compat(&mut self, count: u32) {
+    fn delete_backward_compat(
+        &mut self,
+        count: u32,
+        registers: &mut std::collections::HashMap<char, RegContent>,
+    ) {
         self.begin_change_recording('X', count);
         if self.col > 0 {
             let start = self.col.saturating_sub(count as usize);
@@ -1824,7 +1865,7 @@ impl Editor {
                 linewise: false,
                 inclusive: true,
             };
-            self.apply_operator_to_range('d', &range);
+            self.apply_operator_to_range('d', &range, registers);
         } else {
             self.finalize_change_recording();
             self.reset_operator_state();
@@ -1997,14 +2038,18 @@ impl Editor {
     /// and an insert-session text is typed once. A bare `N.`
     /// override does not multiply the replayed change (the reference
     /// ignores the override in the replay loop).
-    fn replay_last_change(&mut self, _count_override: u32) {
+    fn replay_last_change(
+        &mut self,
+        _count_override: u32,
+        registers: &mut std::collections::HashMap<char, RegContent>,
+    ) {
         let rec = match self.last_change.clone() {
             Some(r) => r,
             None => return,
         };
         self.is_replaying = true;
         for k in rec.keys.iter() {
-            self.normal_press(Key::Char(*k));
+            self.normal_press(Key::Char(*k), registers);
         }
         if rec.entered_insert {
             let was_replace = self.mode == Mode::Replace;
@@ -2142,7 +2187,11 @@ impl Editor {
     /// Char-wise (`v`) and line-wise (`V`) visual mode. The anchor
     /// and the cursor bound the selection; motions move the
     /// cursor against the anchor; operators act on the selection.
-    fn visual_press(&mut self, key: Key) -> Option<String> {
+    fn visual_press(
+        &mut self,
+        key: Key,
+        registers: &mut std::collections::HashMap<char, RegContent>,
+    ) -> Option<String> {
         // --- Escape / Ctrl+C: back to normal ---
         if key == Key::Esc || key == Key::CtrlC {
             self.visual_anchor = None;
@@ -2267,13 +2316,13 @@ impl Editor {
                 'y' | 'Y' => 'y',
                 _ => c,
             };
-            self.apply_visual_operator(op_norm);
+            self.apply_visual_operator(op_norm, registers);
             return None;
         }
 
         // --- paste replaces the selection with the register ---
         if key == Key::Char('p') || key == Key::Char('P') {
-            self.paste_visual(key == Key::Char('P'));
+            self.paste_visual(key == Key::Char('P'), registers);
             return None;
         }
 
@@ -2370,12 +2419,16 @@ impl Editor {
 
     /// Apply an operator to the visual selection and return to the
     /// insert or normal mode (the pi-vim `applyVisualOperator`).
-    fn apply_visual_operator(&mut self, op: char) {
+    fn apply_visual_operator(
+        &mut self,
+        op: char,
+        registers: &mut std::collections::HashMap<char, RegContent>,
+    ) {
         let cursor = (self.row, self.col);
         let lines = self.lines.clone();
         let range = self.visual_range(cursor);
         let (new_lines, cur, enter_insert) =
-            apply_operator(op, &lines, &range, &mut self.registers, self.register);
+            apply_operator(op, &lines, &range, registers, self.register);
         self.push_undo();
         self.lines = new_lines;
         self.row = clamp_line(self.lines.len(), cur.0);
@@ -2392,14 +2445,18 @@ impl Editor {
     /// `p` / `P` in visual: replace the selection with the register
     /// (the pi-vim visual paste); the deleted text goes to the
     /// unnamed register.
-    fn paste_visual(&mut self, before: bool) {
+    fn paste_visual(
+        &mut self,
+        before: bool,
+        registers: &mut std::collections::HashMap<char, RegContent>,
+    ) {
         let _ = before; // visual p and P paste alike (reference rule)
         let cursor = (self.row, self.col);
         let lines = self.lines.clone();
         let range = self.visual_range(cursor);
         let deleted_text = extract_text(&lines, &range);
         let (mut new_lines, pos) = delete_range(&lines, &range);
-        let reg = get_register(&self.registers, self.register);
+        let reg = get_register(registers, self.register);
         match reg {
             None => {
                 // No register: the selection is simply deleted.
@@ -2452,7 +2509,7 @@ impl Editor {
                         self.col = line_len(&self.lines, self.row).saturating_sub(1);
                     }
                 }
-                delete_to_register(&mut self.registers, '"', &deleted_text, range.linewise);
+                delete_to_register(registers, '"', &deleted_text, range.linewise);
             }
         }
         self.visual_anchor = None;
@@ -2741,7 +2798,7 @@ impl Editor {
 /// At the end of the file the cursor stays on the last character;
 /// a `w` on the last word of a line lands on that word's last
 /// char, or crosses to the next line.
-fn word_forward(lines: &[String], cursor: (usize, usize), count: u32) -> MotionResult {
+pub(crate) fn word_forward(lines: &[String], cursor: (usize, usize), count: u32) -> MotionResult {
     let mut pos = cursor;
     for _ in 0..count.max(1) {
         pos = next_word_start(lines, pos.0, pos.1);
@@ -2758,7 +2815,7 @@ fn word_forward(lines: &[String], cursor: (usize, usize), count: u32) -> MotionR
 /// motion did not move), an operator consumes to the end of the
 /// line. The pinned reference stops one char short. A plain
 /// movement ignores this: `go_to` clamps the column anyway.
-fn extend_w_eol(lines: &[String], cursor: (usize, usize), res: MotionResult) -> MotionResult {
+pub(crate) fn extend_w_eol(lines: &[String], cursor: (usize, usize), res: MotionResult) -> MotionResult {
     if res.pos.0 != cursor.0 {
         return res; // cross-line landing: the merge rule applies
     }
@@ -2833,7 +2890,7 @@ fn next_word_start(lines: &[String], line: usize, col: usize) -> (usize, usize) 
 }
 
 /// `b` — the start of the previous word.
-fn word_backward(lines: &[String], cursor: (usize, usize), count: u32) -> MotionResult {
+pub(crate) fn word_backward(lines: &[String], cursor: (usize, usize), count: u32) -> MotionResult {
     let mut pos = cursor;
     for _ in 0..count.max(1) {
         pos = prev_word_start(lines, pos.0, pos.1);
@@ -2881,7 +2938,7 @@ fn prev_word_start(lines: &[String], line: usize, col: usize) -> (usize, usize) 
 }
 
 /// `e` — the end of the current / next word (inclusive motion).
-fn word_end(lines: &[String], cursor: (usize, usize), count: u32) -> MotionResult {
+pub(crate) fn word_end(lines: &[String], cursor: (usize, usize), count: u32) -> MotionResult {
     let mut pos = cursor;
     for _ in 0..count.max(1) {
         pos = next_word_end(lines, pos.0, pos.1);
@@ -3088,7 +3145,7 @@ fn go_to_first_line(lines: &[String], _cursor: (usize, usize), count: u32) -> Mo
 }
 
 /// `G` — to the last line, or line N with a count (linewise).
-fn go_to_last_line(lines: &[String], _cursor: (usize, usize), count: u32) -> MotionResult {
+pub(crate) fn go_to_last_line(lines: &[String], _cursor: (usize, usize), count: u32) -> MotionResult {
     let target = clamp_line(lines.len(), (count.max(1) as usize).saturating_sub(1));
     MotionResult {
         pos: (target, first_nonblank(&lines[target])),
@@ -3098,7 +3155,7 @@ fn go_to_last_line(lines: &[String], _cursor: (usize, usize), count: u32) -> Mot
 }
 
 /// `^` — the first non-blank char of the line.
-fn first_nonblank_motion(lines: &[String], cursor: (usize, usize), _count: u32) -> MotionResult {
+pub(crate) fn first_nonblank_motion(lines: &[String], cursor: (usize, usize), _count: u32) -> MotionResult {
     MotionResult {
         pos: (cursor.0, first_nonblank(&lines[cursor.0])),
         linewise: false,
@@ -3107,7 +3164,7 @@ fn first_nonblank_motion(lines: &[String], cursor: (usize, usize), _count: u32) 
 }
 
 /// `0` — the start of the line.
-fn line_start(_lines: &[String], cursor: (usize, usize), _count: u32) -> MotionResult {
+pub(crate) fn line_start(_lines: &[String], cursor: (usize, usize), _count: u32) -> MotionResult {
     MotionResult {
         pos: (cursor.0, 0),
         linewise: false,
@@ -3117,7 +3174,7 @@ fn line_start(_lines: &[String], cursor: (usize, usize), _count: u32) -> MotionR
 
 /// `$` — the end of the line (the last char; a count moves down
 /// first). Inclusive motion.
-fn line_end(lines: &[String], cursor: (usize, usize), count: u32) -> MotionResult {
+pub(crate) fn line_end(lines: &[String], cursor: (usize, usize), count: u32) -> MotionResult {
     let target = clamp_line(
         lines.len(),
         cursor.0 + (count.max(1) as usize).saturating_sub(1),
@@ -3131,7 +3188,7 @@ fn line_end(lines: &[String], cursor: (usize, usize), count: u32) -> MotionResul
 
 /// `h` — left within the line; it never crosses the line start
 /// (the compat fix).
-fn char_left(_lines: &[String], cursor: (usize, usize), count: u32) -> MotionResult {
+pub(crate) fn char_left(_lines: &[String], cursor: (usize, usize), count: u32) -> MotionResult {
     MotionResult {
         pos: (cursor.0, cursor.1.saturating_sub(count as usize)),
         linewise: false,
@@ -3142,7 +3199,7 @@ fn char_left(_lines: &[String], cursor: (usize, usize), count: u32) -> MotionRes
 /// `l` — right within the line; it never crosses the line end,
 /// and the cursor cannot rest past the last character in normal
 /// mode (the compat fix).
-fn char_right(lines: &[String], cursor: (usize, usize), count: u32) -> MotionResult {
+pub(crate) fn char_right(lines: &[String], cursor: (usize, usize), count: u32) -> MotionResult {
     let cap = line_len(lines, cursor.0).saturating_sub(1);
     let col = if cap == 0 && line_len(lines, cursor.0) == 0 {
         0
@@ -3439,7 +3496,7 @@ fn matching_bracket(lines: &[String], cursor: (usize, usize), _count: u32) -> Mo
 
 /// Convert a motion result (from the cursor) into an operator
 /// range.
-fn motion_to_range(cursor: (usize, usize), motion: &MotionResult) -> OpRange {
+pub(crate) fn motion_to_range(cursor: (usize, usize), motion: &MotionResult) -> OpRange {
     let p = motion.pos;
     let (start, end) = if p < cursor { (p, cursor) } else { (cursor, p) };
     OpRange {
@@ -3452,7 +3509,7 @@ fn motion_to_range(cursor: (usize, usize), motion: &MotionResult) -> OpRange {
 
 /// Convert a text object range into an operator range (text
 /// objects are always inclusive).
-fn text_object_to_range(range: &OpRange) -> OpRange {
+pub(crate) fn text_object_to_range(range: &OpRange) -> OpRange {
     OpRange {
         start: range.start,
         end: range.end,
@@ -3462,7 +3519,7 @@ fn text_object_to_range(range: &OpRange) -> OpRange {
 }
 
 /// Extract the text of a range within the buffer lines.
-fn extract_text(lines: &[String], r: &OpRange) -> String {
+pub(crate) fn extract_text(lines: &[String], r: &OpRange) -> String {
     if r.linewise {
         return lines[r.start.0..=r.end.0].join("\n");
     }
@@ -3617,7 +3674,7 @@ fn toggle_case_line(line: &str) -> String {
 
 /// The valid register names: `"` default, `_` black hole, `0-9`
 /// numbered, `a-z` named, `A-Z` append, `+` / `*` clipboard.
-fn is_valid_register(name: char) -> bool {
+pub(crate) fn is_valid_register(name: char) -> bool {
     matches!(
         name,
         '"' | '_' | '0'..='9' | 'a'..='z' | 'A'..='Z' | '+' | '*'
@@ -3625,7 +3682,7 @@ fn is_valid_register(name: char) -> bool {
 }
 
 /// Read a register (the pi-vim `getRegister`).
-fn get_register(registers: &HashMap<char, RegContent>, name: char) -> Option<RegContent> {
+pub(crate) fn get_register(registers: &HashMap<char, RegContent>, name: char) -> Option<RegContent> {
     registers.get(&name).cloned()
 }
 
@@ -3633,7 +3690,7 @@ fn get_register(registers: &HashMap<char, RegContent>, name: char) -> Option<Reg
 /// `yankToRegister`): unnamed + `0` on yanks, named reads and
 /// writes, `A-Z` append to lowercase, `_` discards, `+` / `*`
 /// alias the clipboard.
-fn yank_to_register(
+pub(crate) fn yank_to_register(
     registers: &mut HashMap<char, RegContent>,
     name: char,
     text: &str,
@@ -3750,7 +3807,7 @@ fn is_obj_word_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
 }
 
-type TextObjectFn = fn(&[String], (usize, usize)) -> Option<OpRange>;
+pub(crate) type TextObjectFn = fn(&[String], (usize, usize)) -> Option<OpRange>;
 
 fn range_on_line(row: usize, start: usize, end: usize) -> OpRange {
     OpRange {
@@ -3958,7 +4015,7 @@ fn a_backtick(lines: &[String], cursor: (usize, usize)) -> Option<OpRange> {
 
 /// Resolve a text object key sequence (`iw`, `a(`, ...). The
 /// prefix is `i` or `a`; the key is the object.
-fn resolve_text_object(prefix: char, key: char) -> Option<TextObjectFn> {
+pub(crate) fn resolve_text_object(prefix: char, key: char) -> Option<TextObjectFn> {
     let inner = prefix == 'i';
     match key {
         'w' => Some(if inner { inner_word } else { a_word }),
@@ -4200,75 +4257,106 @@ mod tests {
         e
     }
 
+    /// A fresh shared register store for the test's key presses.
+    fn regs() -> std::collections::HashMap<char, RegContent> {
+        std::collections::HashMap::new()
+    }
+
     /// Press key strings. Single chars become `Key::Char`; the
-    /// known names map onto their host keys.
-    fn press(e: &mut Editor, keys: &[&str]) {
+    /// known names map onto their host keys. The register store is
+    /// shared across the whole press run (the host's lift, section
+    /// 11.3): a yank lands where a later `p` reads.
+    fn press_with_regs(
+        e: &mut Editor,
+        r: &mut std::collections::HashMap<char, RegContent>,
+        keys: &[&str],
+    ) {
         for k in keys {
             match *k {
                 "esc" => {
-                    e.press(Key::Esc);
+                    e.press(Key::Esc, r);
                 }
                 "enter" => {
-                    e.press(Key::Enter);
+                    e.press(Key::Enter, r);
                 }
                 "bs" => {
-                    e.press(Key::Backspace);
+                    e.press(Key::Backspace, r);
                 }
                 "tab" => {
-                    e.press(Key::Tab);
+                    e.press(Key::Tab, r);
                 }
                 "ctrl-c" => {
-                    e.press(Key::CtrlC);
+                    e.press(Key::CtrlC, r);
                 }
                 "ctrl-d" => {
-                    e.press(Key::CtrlD);
+                    e.press(Key::CtrlD, r);
                 }
                 "ctrl-u" => {
-                    e.press(Key::CtrlU);
+                    e.press(Key::CtrlU, r);
                 }
                 "ctrl-j" => {
-                    e.press(Key::CtrlJ);
+                    e.press(Key::CtrlJ, r);
                 }
                 "left" => {
-                    e.press(Key::Left);
+                    e.press(Key::Left, r);
                 }
                 "right" => {
-                    e.press(Key::Right);
+                    e.press(Key::Right, r);
                 }
                 "up" => {
-                    e.press(Key::Up);
+                    e.press(Key::Up, r);
                 }
                 "down" => {
-                    e.press(Key::Down);
+                    e.press(Key::Down, r);
                 }
                 "home" => {
-                    e.press(Key::Home);
+                    e.press(Key::Home, r);
                 }
                 "end" => {
-                    e.press(Key::End);
+                    e.press(Key::End, r);
                 }
                 "delete" => {
-                    e.press(Key::Delete);
+                    e.press(Key::Delete, r);
                 }
                 s => {
                     // A plain string: one key press per char.
                     // `"a` selects register a; `ab` types two chars
                     // in insert mode.
                     for c in s.chars() {
-                        e.press(Key::Char(c));
+                        e.press(Key::Char(c), r);
                     }
                 }
             }
         }
     }
 
-    /// Normal-mode edits on `text` starting at `(row, col)`.
-    fn norm(text: &str, row: usize, col: usize, keys: &[&str]) -> Editor {
+    /// Press key strings on a throwaway register store: the test
+    /// asserts on the text and cursor, not the registers.
+    fn press(e: &mut Editor, keys: &[&str]) {
+        let mut r = regs();
+        press_with_regs(e, &mut r, keys);
+    }
+
+    /// Normal-mode edits on `text` starting at `(row, col)`, with
+    /// the shared register store returned for assertions.
+    fn norm_with_regs(
+        text: &str,
+        row: usize,
+        col: usize,
+        keys: &[&str],
+    ) -> (Editor, std::collections::HashMap<char, RegContent>) {
         let mut e = ed(text);
         e.mode = Mode::Normal;
         e.row = row;
         e.col = col;
-        press(&mut e, keys);
+        let mut r = regs();
+        press_with_regs(&mut e, &mut r, keys);
+        (e, r)
+    }
+
+    /// Normal-mode edits on `text` starting at `(row, col)`.
+    fn norm(text: &str, row: usize, col: usize, keys: &[&str]) -> Editor {
+        let (e, _) = norm_with_regs(text, row, col, keys);
         e
     }
 
@@ -4318,9 +4406,10 @@ mod tests {
     fn w_and_b_round_trip() {
         let mut e = norm("a b c", 0, 0, &["w", "w"]);
         assert_eq!(e.cursor(), (0, 4));
-        e.press(Key::Char('b'));
+        let mut r = regs();
+        e.press(Key::Char('b'), &mut r);
         assert_eq!(e.cursor(), (0, 2));
-        e.press(Key::Char('b'));
+        e.press(Key::Char('b'), &mut r);
         assert_eq!(e.cursor(), (0, 0));
     }
 
@@ -4369,10 +4458,10 @@ mod tests {
 
     #[test]
     fn dw_registers_word_with_trailing_blank() {
-        let e = norm("a b c d", 0, 2, &["d", "w"]);
+        let (e, r) = norm_with_regs("a b c d", 0, 2, &["d", "w"]);
         assert_eq!(e.text(), "a c d");
         assert_eq!(e.cursor(), (0, 2), "cursor stays on `c`");
-        assert_eq!(e.registers.get(&'"').unwrap().text, "b ");
+        assert_eq!(r.get(&'"').unwrap().text, "b ");
     }
 
     #[test]
@@ -4386,10 +4475,10 @@ mod tests {
 
     #[test]
     fn yy_then_p_pastes_line_below_and_P_pastes_above() {
-        let mut e = norm("one\ntwo", 1, 0, &["y", "y", "p"]);
+        let (mut e, mut r) = norm_with_regs("one\ntwo", 1, 0, &["y", "y", "p"]);
         assert_eq!(e.text(), "one\ntwo\ntwo");
         assert_eq!(e.cursor(), (2, 0));
-        e.press(Key::Char('P'));
+        e.press(Key::Char('P'), &mut r);
         assert_eq!(e.text(), "one\ntwo\ntwo\ntwo");
         assert_eq!(e.cursor(), (2, 0), "P keeps the cursor row index");
     }
@@ -4752,9 +4841,9 @@ mod tests {
         // `yw` on the last word consumes to the end of line (the
         // neovim rule), so the yank covers `cd`. The paste lands
         // after the cursor char, inline.
-        let e = norm("ab cd", 0, 3, &["\"a", "y", "w", "\"a", "p"]);
+        let (e, r) = norm_with_regs("ab cd", 0, 3, &["\"a", "y", "w", "\"a", "p"]);
         assert_eq!(e.text(), "ab ccdd");
-        assert_eq!(e.registers.get(&'a').unwrap().text, "cd");
+        assert_eq!(r.get(&'a').unwrap().text, "cd");
     }
 
     #[test]
@@ -4762,9 +4851,10 @@ mod tests {
         // The reference yank keeps the cursor on the range start,
         // so the second `yw` yanks the same `aa ` word. Char-wise
         // append joins without a separator.
-        let mut e = norm("aa bb", 0, 0, &["\"A", "y", "w", "\"A", "y", "w"]);
-        assert_eq!(e.registers.get(&'a').unwrap().text, "aa aa ");
-        press(&mut e, &["\"a", "p"]);
+        let (mut e, mut r) =
+            norm_with_regs("aa bb", 0, 0, &["\"A", "y", "w", "\"A", "y", "w"]);
+        assert_eq!(r.get(&'a').unwrap().text, "aa aa ");
+        press_with_regs(&mut e, &mut r, &["\"a", "p"]);
         assert_eq!(e.text(), "aaa aa a bb");
     }
 
@@ -4773,9 +4863,10 @@ mod tests {
         // `"_dw` deletes the word without touching any register;
         // a following `p` pastes nothing. `dw` on the two-char
         // line consumes to the end of line.
-        let mut e = norm("ab", 0, 0, &["\"_", "d", "w"]);
+        let (mut e, mut r) = norm_with_regs("ab", 0, 0, &["\"_", "d", "w"]);
         assert_eq!(e.text(), "");
-        press(&mut e, &["p"]);
+        assert!(r.get(&'"').is_none(), "the black hole discards");
+        press_with_regs(&mut e, &mut r, &["p"]);
         assert_eq!(e.text(), "");
     }
 
@@ -4940,7 +5031,8 @@ mod tests {
         let mut e = ed("hello\nworld");
         e.row = 0;
         e.col = 2;
-        e.press(Key::Char('A'));
+        let mut r = regs();
+        e.press(Key::Char('A'), &mut r);
         assert_eq!(e.mode(), Mode::Insert);
         assert_eq!(e.text(), "heAllo\nworld");
     }
@@ -4949,7 +5041,8 @@ mod tests {
     fn shift_a_at_line_end_appends_the_char() {
         let mut e = ed("ab");
         e.col = 2;
-        e.press(Key::Char('A'));
+        let mut r = regs();
+        e.press(Key::Char('A'), &mut r);
         assert_eq!(e.text(), "abA");
         assert_eq!(e.cursor(), (0, 3));
     }
