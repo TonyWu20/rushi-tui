@@ -1,0 +1,24 @@
+---
+source: bin/tui/src/snapshot_tests.rs
+expression: out
+---
+"┌Session: s1─────────────────────────────────────── [idle] ┐"
+"│ user  Hello in a narrow pane                             │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│ 1 message wai… — no loop running — waiting for Ctrl+R run│"
+"│  1. Hello in a narrow pane                               │"
+"│╭[INSERT]────────────────────────────────────────────────╮│"
+"││                                                        ││"
+"││                                                        ││"
+"│╰────────────────────────────────────────────────────────╯│"
+"│ q×2 quit · Ctrl+R run · Ctrl+E edit · Enter send · Ctrl-J│"
+"└──────────────────────────────────────────────────────────┘"

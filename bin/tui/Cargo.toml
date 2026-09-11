@@ -45,4 +45,5 @@ notify-debouncer-mini = "0.7"
 ansi-to-tui = "8.0.1"
 
 [dev-dependencies]
+insta = "1.48.0"
 tempfile = "3"
