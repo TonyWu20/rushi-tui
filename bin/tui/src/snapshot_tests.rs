@@ -155,6 +155,24 @@ fn snap_pending_user_messages() {
 }
 
 #[test]
+fn snap_assistant_thinking_block() {
+    // The expanded thinking block: the reasoning body starts at the
+    // left edge with no content gutter (the 12-space indent was the
+    // last remnant of the content gutter), and the whole panel keeps
+    // the one-column left/right margin.
+    let events = vec![
+        ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u1","content":"explain"}"#),
+        ev(
+            r#"{"v":1,"type":"assistant_message","ts":"t","id":"a1","content":"The answer is 42.","tool_calls":[],"stop_reason":"stop","usage":{"input_tokens":10,"output_tokens":5},"reasoning":[{"content":[{"type":"reasoning_text","text":"Step one: read the question.\nStep two: compute the answer."}]}]}"#,
+        ),
+    ];
+    let mut app = app_with_session(events);
+    let (host, _tmp) = empty_host();
+    let out = render(&mut app, &host, 80, 24);
+    insta::assert_snapshot!(out);
+}
+
+#[test]
 fn snap_tool_result_collapsed() {
     let events = vec![
         ev(r#"{"v":1,"type":"tool_call","ts":"t","id":"c1","name":"bash","arguments":{"command":"make"}}"#),
