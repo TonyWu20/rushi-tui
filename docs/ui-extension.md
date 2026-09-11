@@ -34,7 +34,7 @@ Seven capabilities:
 | `append` | Writes whitelisted event types to the log |
 | `notify` | Terminal effects (bell, OSC), applied by the host |
 | `frame` | Owns the input-area chrome: border style, the label, and the interior height. The host renders the draft content and the cursor; the extension owns the frame, never the input state |
-| `row` | Contributes lines to the host-reserved row above the input box (between the working row and the input area). One or more styled lines, or none. Several owners may claim the slot. Their live lines stack in sequence order, one layout cell per line. The host owns the slot position. Each extension supplies the content |
+| `row` | Contributes lines to the host-reserved row above the input box (between the working row and the input area). One or more styled lines, or none. Several owners may claim the slot. Each live owner reserves a slot. A live owner with no content pins one blank row in its slot, so siblings never shift. Their live lines stack in sequence order, one layout cell per line. The host owns the slot position. Each extension supplies the content |
 
 Out of scope:
 
@@ -185,8 +185,8 @@ Layout:
 - without one, the TUI shows its built-in help/status row
 - the row owners' lines reserve layout cells between the working row
   and the input box, one cell per line, stacked in sequence order
-- with no `row` owner, or when every owner's spec is empty, the slot
-  collapses to zero rows
+- with no live `row` owner the slot collapses to zero rows. A live
+  owner with no content still reserves its slot as a blank row
 - transformed text renders in place in the transcript
 
 Load order is host-owned. This follows the deepseek-harness loader,
@@ -307,10 +307,12 @@ where the core decides the sequence and an entry never claims a slot
   the `status` row
 - A `row` owner supplies content, not layout. A `row_spec` is an
   array of styled lines drawn at a host-owned position between the
-  working row and the input box. The host reserves the layout and
-  collapses the slot when every owner's spec is empty. Several
-  `row` owners are allowed. Their live lines stack in sequence
-  order, one cell per line
+  working row and the input box. Several `row` owners are allowed.
+  Each live owner reserves a slot. A live owner with no content
+  pins one blank row in its slot, so siblings never shift. Their
+  live lines stack in sequence order, one cell per line. A dead or
+  skipped owner holds no slot for this session. The slot collapses
+  to zero rows only when no owner is live
 - The `docs/tui.md` section 10 forbidden-string scan stays
 - Trust: an extension with `append` is a long-lived log writer.
   It holds loop-level trust, not tool-level trust. The tool contract is
@@ -392,7 +394,7 @@ P4. per-op-fallback: given a malformed extension reply, observe the TUI stay up 
 P5. append-whitelist: given an `append` for a type outside `append_types`, observe the host reject it with a flash. Whitelisted types are appended through the port.
 P6. restart-budget: given a repeatedly crashing extension, observe three restart attempts with 1 s, 2 s, and 4 s backoff, then a dead hint.
 P7. ext-status-cap: given more than 128 distinct `ext_status` ids, observe the host drop the oldest-updated id to hold the cap.
-P8. row-slot: given a row extension with content, observe the reserved row above the input box. With no row owner, or an empty spec, observe zero reserved rows. With two row owners, observe both owners' lines stacked in sequence order.
+P8. row-slot: given a row extension with content, observe the reserved row above the input box. With no live row owner, observe zero reserved rows. With two row owners, observe both owners' lines stacked in sequence order. A live owner with empty content still reserves its slot as a blank row, so siblings never shift into its position.
 
 ## Verification
 
