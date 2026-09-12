@@ -37,9 +37,10 @@
           "rust-analyzer"
         ]);
         rushiPkg = inputs."rushi-kernel".packages.${system}.default;
+        moldStdenv = pkgs.stdenvAdapters.useMoldLinker pkgs.clangStdenv;
       in
       {
-        devShells.default = pkgs.mkShell {
+        devShells.default = pkgs.mkShell.override { stdenv = moldStdenv; } {
           buildInputs = [
             rustToolchain
             # The tree-sitter grammar crates (tui-highlight) compile

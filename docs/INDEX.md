@@ -30,6 +30,7 @@ extension-host lifecycle. Method and conventions:
 | `tui.md` | Historical | 2026-09-07 | Original TUI proposal: coupling contract, `SessionPort`, wire format. Superseded by shipped code. |
 | `tui-plan.html` | Historical | 2026-09-07 | HTML implementation plan with mermaid diagrams for the first TUI build. |
 | `NEW-refactor.md` | Implemented | 2026-09-11 | Decision to drop syntect for tree-sitter and adopt the ratatui widget ecosystem. This repo is the result. |
+| `tui-ratatui-ecosystem-audit.md` | Active | 2026-09-28 | Per-module and per-feature audit of hand-rolled vs. ratatui-ecosystem libraries. Action items with priorities. |
 | `ui-extension.md` | Active | 2026-09-07 | UI extension design: protocol, host lifecycle, trust model. The contract for `../rushi-exts`. |
 | `ui-extension-plan.md` | Plan | 2026-09-07 | Staged build plan for the extension mechanism. |
 | `tui-extension-design-review.md` | Review | 2026-09-07 | Adversarial review of `ui-extension.md`: missing `notify` op, `transform` reply correlation. |

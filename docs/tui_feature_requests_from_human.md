@@ -382,3 +382,18 @@ macchiato` as the first internal color scheme. Shipped in
       block cannot be scrolled and its grow/collapse drifts the
       cursorline position. Not work for that session. Detail:
       `docs/tui-streaming-simplify.md`.
+
+## New requests (2026-09-24)
+
+- [x] Restore markdown rendering in the thinking block. After the
+      `ratatui-markdown` migration the body used plain word-wrap.
+      Now `wrap_thinking` runs prose lines through `md_line`. The
+      tree-sitter fence and table-grid paths are unchanged.
+
+- [x] Add a `ThinkingTag` color role for the `thinking` label.
+      Expanded: `#c6a0f6`. Folded: `#8087a2`.
+      `Palette::thinking_tag(expanded)` picks the right one.
+
+- [x] Recolor the `Thinking` role to `#8087a2`. Updated the
+      `Level::thinking` fallback, the macchiato scheme, and the
+      color alignment doc.

@@ -135,12 +135,12 @@ impl Level {
     }
 
     /// The color for the model's thinking (reasoning) block. The pi
-    /// `thinkingText` role: the `dark` theme gray (`#808080`), the
-    /// `catppuccin macchiato` scheme the theme `subtext1` (`#b8c0e0`).
+    /// `thinkingText` role. A muted blue-gray (`#8087a2`), the
+    /// catppuccin macchiato `overlay1` tone.
     pub fn thinking(self) -> Color {
         match self {
-            Level::Rgb => Color::Rgb(0x80, 0x80, 0x80),
-            Level::C256 => lower(Color::Rgb(0x80, 0x80, 0x80), Level::C256),
+            Level::Rgb => Color::Rgb(0x80, 0x87, 0xa2),
+            Level::C256 => lower(Color::Rgb(0x80, 0x87, 0xa2), Level::C256),
             Level::C16 => Color::DarkGray,
         }
     }
@@ -235,8 +235,14 @@ pub enum Role {
     /// Structural punctuation token; the JSON braces, colons, commas
     /// and brackets color through it. pi `syntaxPunctuation`.
     SyntaxPunctuation,
-    /// The model thinking block. pi `thinkingText`.
+    /// The model thinking block body text. pi `thinkingText`.
     Thinking,
+    /// The leading `thinking` tag label of a thinking block.
+    ///
+    /// Distinct from [`Role::Thinking`] so the tag is colored
+    /// independently of the block text.  Expanded: `#c6a0f6`.
+    /// Folded: `#8087a2`.
+    ThinkingTag,
     /// Fold/expand hints and other muted text (`… +N more lines`).
     /// pi `muted`.
     Hint,
@@ -328,6 +334,7 @@ impl Role {
         Role::SyntaxOperator,
         Role::SyntaxPunctuation,
         Role::Thinking,
+        Role::ThinkingTag,
         Role::Hint,
         Role::Status,
         Role::Error,
@@ -380,6 +387,7 @@ impl Role {
             SyntaxOperator => Color::Rgb(0xd4, 0xd4, 0xd4),
             SyntaxPunctuation => Color::Rgb(0xd4, 0xd4, 0xd4),
             Thinking => level.thinking(),
+            ThinkingTag => Color::Rgb(0xc6, 0xa0, 0xf6),
             Hint => Color::Rgb(0x80, 0x80, 0x80),
             Status => Color::Rgb(0x66, 0x66, 0x66),
             Error | DiffRemoved => Color::Rgb(0xcc, 0x66, 0x66),
@@ -444,6 +452,7 @@ impl Role {
             SyntaxOperator => "syntax_operator",
             SyntaxPunctuation => "syntax_punctuation",
             Thinking => "thinking",
+            ThinkingTag => "thinking_tag",
             Hint => "hint",
             Status => "status",
             Error => "error",
@@ -519,7 +528,7 @@ pub const SCHEME_CATPPUCCIN_MACCHIATO: &str = "catppuccin macchiato";
 /// internal scheme.
 pub fn catppuccin_macchiato() -> std::collections::HashMap<Role, &'static str> {
     use Role::*;
-    let pairs: [(Role, &str); 43] = [
+    let pairs: [(Role, &str); 44] = [
         (PlainText, "#cad3f5"),
         (ToolOutput, "#cad3f5"),
         (ToolCommand, "#c6a0f6"),
@@ -541,7 +550,8 @@ pub fn catppuccin_macchiato() -> std::collections::HashMap<Role, &'static str> {
         (SyntaxType, "#eed49f"),
         (SyntaxOperator, "#91d7e3"),
         (SyntaxPunctuation, "#939ab7"),
-        (Thinking, "#b8c0e0"),
+        (Thinking, "#8087a2"),
+        (ThinkingTag, "#c6a0f6"),
         (Hint, "#a5adcb"),
         (Status, "#8087a2"),
         (Error, "#ed8796"),
@@ -664,6 +674,18 @@ impl Palette {
             _ => self.color(Border4),
         }
     }
+
+    /// The color of the leading `thinking` tag. The tag is a distinct
+    /// role from the block text: while the block is expanded it uses
+    /// the `ThinkingTag` role (the active accent); while folded it
+    /// drops to the muted `Thinking` tone.
+    pub fn thinking_tag(&self, expanded: bool) -> Color {
+        if expanded {
+            self.color(Role::ThinkingTag)
+        } else {
+            self.color(Role::Thinking)
+        }
+    }
 }
 
 /// The palette of the loaded TUI config (docs/tui-color-scheme.md
@@ -760,10 +782,10 @@ fn palette256(idx: u8) -> (u8, u8, u8) {
 /// Nearest index in the 256 palette.
 ///
 /// Free-form RGB is quantized into the 6x6x6 cube (16-231) and the
-/// grayscale ramp (232-255); the basic 0-15 swatches are reserved for
-/// the native ANSI colors, so a true-color value never collapses onto
-/// a basic swatch even when one happens to be an exact match. Ties
-/// keep the lower index. Exact ramp values (the 24 grays) win with a
+/// grayscale ramp (232-255). The basic 0-15 swatches are reserved for
+/// the native ANSI colors. A true-color value never collapses onto a
+/// basic swatch, even when one happens to be an exact match. Ties keep
+/// the lower index. Exact ramp values (the 24 grays) win with a
 /// distance of 0, since no cube corner coincides with them.
 fn nearest_256(r: u8, g: u8, b: u8) -> u8 {
     let mut best: (u8, u32) = (16, u32::MAX);

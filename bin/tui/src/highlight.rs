@@ -805,14 +805,32 @@ pub fn is_table_separator(line: &str) -> bool {
         .all(|c| c.is_empty() || c.chars().all(|c| c == '-'))
 }
 
+/// True when the run of `|`-prefixed lines starting at `lines[i]`
+/// opens a GFM table: the first line is a table row **and** the next
+/// line is the `|---|` separator. Without the separator, a
+/// `|`-prefixed line (e.g. a closure like `|x| y => x` in code or
+/// prose) is **not** a table and must render as plain text.
+///
+/// This is the `|`-disambiguation fix (docs/tui-ratatui-ecosystem-
+/// audit.md §4.1, bug 1).
+pub fn is_table_block_start(lines: &[&str], i: usize) -> bool {
+    if !is_table_row(lines[i]) {
+        return false;
+    }
+    lines.get(i + 1).map(|l| is_table_separator(l)).unwrap_or(false)
+}
+
 /// The grid table of one table block: the rows are the `|`-separated
 /// lines in order; a separator row after the header row drops from
 /// the grid, and the header row styles bold. The box-drawing grid
 /// fits `width` columns: the column width takes the content width
-/// capped at the even share, the overflow elides with a trailing
-/// ellipsis (the narrow-pane rule of docs/tui-markdown-render.md
-/// section 3). Each returned inner `Vec` is one grid row of styled
-/// segments, in cell order.
+/// capped at the even share. Overflow **wraps** — a cell wider than
+/// its column breaks onto as many visual lines as needed, and the
+/// row height grows to the tallest cell, so no cell content is lost
+/// (the old code elided overflow with a trailing `…`, losing data).
+/// Each returned inner `Vec` is one visual grid row of styled
+/// segments, in cell order; a data row that wraps emits one inner
+/// `Vec` per wrapped line, padded to the row height.
 pub fn table_grid(rows: &[String], width: usize, palette: &Palette) -> Vec<Vec<(Style, String)>> {
     let has_sep = rows.get(1).map(|r| is_table_separator(r)).unwrap_or(false);
     let mut cells_rows: Vec<Vec<String>> = Vec::new();
@@ -856,45 +874,91 @@ pub fn table_grid(rows: &[String], width: usize, palette: &Palette) -> Vec<Vec<(
     let plain = palette.style(Role::PlainText, Modifier::empty());
     let header_style = palette.style(Role::PlainText, Modifier::BOLD);
 
-    let clamp = |s: &str, w: usize| -> String {
-        let chars: Vec<char> = s.chars().collect();
-        if chars.len() <= w {
-            return s.to_string();
-        }
-        if w == 0 {
-            return String::new();
-        }
-        let mut out: String = chars[..w - 1].iter().collect();
-        out.push('…');
-        out
-    };
-
     let mut out: Vec<Vec<(Style, String)>> = Vec::new();
     out.push(grid_border('┌', '┐', '┬', '─', &widths, &border));
     for (ri, row) in cells_rows.iter().enumerate() {
         let is_header = header_index == Some(ri);
-        let mut cells_out: Vec<(Style, String)> = Vec::new();
-        cells_out.push((border, "│".to_string()));
-        for (c, &w) in widths.iter().enumerate().take(ncols) {
-            let cell = row.get(c).cloned().unwrap_or_default();
-            // Pad to the column width: every row's verticals must land
-            // on the same columns as the border rows (a shorter cell
-            // renders at the column's full width, left-aligned).
-            let text = format!(" {:<w$} ", clamp(&cell, w));
-            let st = if is_header { &header_style } else { &plain };
-            cells_out.push((*st, text));
-            if c + 1 < ncols {
-                cells_out.push((border, "│".to_string()));
+        let st = if is_header { header_style } else { plain };
+        // Wrap each cell to its column width. A data row then spans
+        // as many visual lines as its tallest wrapped cell; shorter
+        // cells pad with blanks so every row's verticals land on the
+        // same columns as the border rows. No content is elided.
+        let wrapped: Vec<Vec<String>> = (0..ncols)
+            .map(|c| {
+                let cell = row.get(c).cloned().unwrap_or_default();
+                wrap_cell_text(&cell, widths[c])
+            })
+            .collect();
+        let row_h = wrapped.iter().map(|lines| lines.len()).max().unwrap_or(1);
+        for line_i in 0..row_h {
+            let mut cells_out: Vec<(Style, String)> = Vec::new();
+            cells_out.push((border, "│".to_string()));
+            for (c, &w) in widths.iter().enumerate().take(ncols) {
+                let piece = wrapped[c].get(line_i).cloned().unwrap_or_default();
+                // Left-align in the column; missing wrapped lines pad
+                // with blanks.
+                let text = format!(" {:<w$} ", piece, w = w);
+                cells_out.push((st, text));
+                if c + 1 < ncols {
+                    cells_out.push((border, "│".to_string()));
+                }
             }
+            cells_out.push((border, "│".to_string()));
+            out.push(cells_out);
         }
-        cells_out.push((border, "│".to_string()));
-        out.push(cells_out);
         if ri + 1 < cells_rows.len() {
             out.push(grid_border('├', '┤', '┼', '─', &widths, &border));
         }
     }
     out.push(grid_border('└', '┘', '┴', '─', &widths, &border));
     out
+}
+
+/// Word-wrap one table cell to at most `width` columns: words break
+/// on runs of whitespace, and a single word longer than the column
+/// hard-breaks into `width`-sized chunks so no content is lost
+/// (docs/tui-ratatui-ecosystem-audit.md section 4.1, bug 2: the old
+/// code elided overflow with a trailing `…`). Empty input yields
+/// one empty line so callers can index it like any other wrapped
+/// cell.
+fn wrap_cell_text(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let words: Vec<&str> = text.split_whitespace().collect();
+    if words.is_empty() {
+        return vec![String::new()];
+    }
+    let mut lines: Vec<String> = Vec::new();
+    let mut cur: Vec<&str> = Vec::new();
+    let mut cur_w = 0usize;
+    for word in words {
+        let w = word.chars().count();
+        if w > width {
+            // A word wider than the column: flush the current line,
+            // then hard-break the word into width-sized chunks.
+            if !cur.is_empty() {
+                lines.push(cur.join(" "));
+                cur.clear();
+                cur_w = 0;
+            }
+            let chars: Vec<char> = word.chars().collect();
+            for chunk in chars.chunks(width) {
+                lines.push(chunk.iter().collect());
+            }
+            continue;
+        }
+        let sep = usize::from(!cur.is_empty());
+        if !cur.is_empty() && cur_w + sep + w > width {
+            lines.push(cur.join(" "));
+            cur.clear();
+            cur_w = 0;
+        }
+        cur_w += usize::from(cur.is_empty()) + w;
+        cur.push(word);
+    }
+    if !cur.is_empty() {
+        lines.push(cur.join(" "));
+    }
+    lines
 }
 
 /// One grid border row: the left corner, one `─` run per column
