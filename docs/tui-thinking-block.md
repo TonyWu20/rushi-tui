@@ -45,8 +45,8 @@ Commit `61cde02`:
   an `assistant_message` shows above the message body. The block
   renders for the typed `reasoning_text` content entries and for
   the plain text entries of older logs. Collapsed, one label row;
-  expanded, the full reasoning text in the lighter thinking tone
-  (the pi `subtext1` color, not a dim gray).
+  expanded, the full reasoning text in the muted `Thinking` tone
+  (`#8087a2`. See section 5 for the 2026-09-24 retune).
 - `Ctrl+T` collapses or expands the thinking blocks (the pi
   `app.thinking.toggle` keymap; the 2026-08-31 toggle extension).
   `Ctrl+X` shows or hides them entirely.
@@ -55,6 +55,21 @@ Commit `61cde02`:
   `[model.<active>]` in `config.toml` in place, comments kept,
   and creates the table when absent. The input-border color
   follows the new level.
+
+## 5. Markdown rendering + `ThinkingTag` role (2026-09-24)
+
+- The thinking block body now renders through the shared markdown
+  line highlighter (`highlight::md_line`) instead of plain
+  word-wrap. Headings, lists, blockquotes, inline code, bold,
+  italic, and links in reasoning text are rendered with their
+  respective palette roles. Plain prose runs keep the `Thinking`
+  tone. Table grid and fenced-code (tree-sitter) handling are
+  unchanged.
+- New `ThinkingTag` color role: the leading `thinking` label uses
+  `ThinkingTag` (`#c6a0f6`) when the block is expanded, and falls
+  back to `Thinking` (`#8087a2`) when folded. The `Thinking` role
+  default changed from `#808080` to `#8087a2` (catppuccin
+  macchiato `overlay1`).
 
 ## Properties
 

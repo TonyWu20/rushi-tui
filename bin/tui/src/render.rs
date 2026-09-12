@@ -398,16 +398,19 @@ fn event_lines<'a>(
             // pi-aligned keymap: `Ctrl+T` collapses or expands
             // the block (the pi `app.thinking.toggle`). Collapsed it is a
             // one-line label row; expanded it is the full reasoning text.
-            // `Ctrl+X` hides or shows the block entirely. The color is
-            // the lighter thinking tone (docs/tui-color-tones.md), not a
-            // dimmed gray.
+            // `Ctrl+X` hides or shows the block entirely. The leading
+            // `thinking` tag uses the `ThinkingTag` role: the active
+            // accent when expanded, the muted thinking tone when folded.
+            // The block body keeps the `Thinking` role.
             if state.thinking_shown {
                 let reasoning = e.get("reasoning").and_then(|v| v.as_array());
                 if let Some(text) = thinking_text(reasoning) {
                     let thinking_style =
                         palette.style(crate::color::Role::Thinking, Modifier::empty());
+                    let tag_style =
+                        Style::default().fg(palette.thinking_tag(state.thinking_expanded));
                     if state.thinking_expanded {
-                        let header = vec![Span::styled(format!("{LABEL}thinking"), thinking_style)];
+                        let header = vec![Span::styled(format!("{LABEL}thinking"), tag_style)];
                         out.push(Line::from(header));
                         owns.push(None); // the thinking label: UI chrome, not shareable source
                         // The reasoning body aligns with the tool-result
@@ -430,7 +433,7 @@ fn event_lines<'a>(
                         // the expand hint, not the full reasoning text.
                         out.push(Line::from(Span::styled(
                             format!("{LABEL}thinking \u{2026} (Ctrl+T to expand)"),
-                            thinking_style,
+                            tag_style,
                         )));
                         owns.push(None);
                     }
@@ -904,15 +907,18 @@ fn push_line(cur: &mut Vec<Span<'static>>, out: &mut Vec<Line<'static>>) {
 /// measured in characters; CJK and combining characters will drift a
 /// few columns on non-ASCII lines (phase-1 log content is ASCII).
 /// The expanded thinking block text (docs/tui-thinking-block.md
-/// section 4): the raw reasoning text in the thinking tone. Two
-/// exceptions: a run of consecutive `|` table lines draws as the
-/// box-drawing grid (the 2026-09-03 user report: tables inside a
-/// thinking block lost their fixed column widths), and a fenced code
-/// block (` ``` ` / `~~~`) draws through the active highlight engine
-/// (`tree-sitter` by default, the 2026-09-11 request): the fence marker
-/// lines take the dimmed `Fence` tone, the language tag after the
-/// opening delimiter drives the highlight, and the unscoped runs fall
-/// back to the `Code` tone, fg-only, like the tool-result bodies.
+/// section 4). The reasoning body renders as markdown: headings,
+/// lists, blockquotes, and inline code, bold, italic, and links get
+/// their respective palette styles. Plain runs take the `style`
+/// parameter (the thinking tone). Two exceptions remain: a run of
+/// consecutive `|` table lines draws as the box-drawing grid (the
+/// 2026-09-03 user report: tables inside a thinking block lost their
+/// fixed column widths), and a fenced code block draws through the
+/// active highlight engine (the 2026-09-11 request): the fence
+/// marker lines take the dimmed `Fence` tone, the language tag after
+/// the opening delimiter drives the highlight, and the unscoped runs
+/// fall back to the `Code` tone, fg-only, like the tool-result
+/// bodies.
 fn wrap_thinking(
     text: &str,
     wrap_w: usize,
@@ -985,7 +991,7 @@ fn wrap_thinking(
             }
             continue;
         }
-        if highlight::is_table_row(hard_lines[i]) {
+        if highlight::is_table_block_start(&hard_lines, i) {
             let mut block: Vec<String> = Vec::new();
             while i < hard_lines.len() && highlight::is_table_row(hard_lines[i]) {
                 block.push(hard_lines[i].to_string());
@@ -1012,7 +1018,17 @@ fn wrap_thinking(
             out.push(Line::default());
             continue;
         }
-        out.extend(wrap_styled(vec![(style, line.to_string())], wrap_w));
+        // Prose renders as markdown: the per-line highlighter recovers
+        // headings, lists, blockquotes, and inline code, bold, italic,
+        // and links. Plain runs fall back to the thinking tone. Fence
+        // and table lines are handled by the branches above, so the
+        // fence state here stays `false`.
+        let mut md_fence = false;
+        let segs = with_plain_base(
+            highlight::md_line(line, &mut md_fence, palette),
+            style,
+        );
+        out.extend(wrap_flow(segs, wrap_w));
     }
     out
 }
@@ -1584,7 +1600,11 @@ fn render_message_content(
                     // table lines, clamped to the pane width,
                     // like wrap_markdown_p.
                     let text = block_line_text(&parts[li]);
-                    if highlight::is_table_row(&text) {
+                    let next_is_sep = parts
+                        .get(li + 1)
+                        .map(|p| highlight::is_table_separator(&block_line_text(p)))
+                        .unwrap_or(false);
+                    if highlight::is_table_row(&text) && next_is_sep {
                         let mut block: Vec<String> = Vec::new();
                         while li < parts.len() {
                             let t = block_line_text(&parts[li]);
@@ -1901,6 +1921,7 @@ fn stream_block_lines(app: &App, width: usize, max_body_lines: usize) -> Vec<Lin
     // lines slide out as the text arrives, so the view never jumps
     // (no flicker at the thinking → text transition).
     let thinking_style = palette.style(crate::color::Role::Thinking, Modifier::empty());
+    let thinking_tag_style = Style::default().fg(palette.thinking_tag(true));
     let mut thinking_tail: Vec<Line<'static>> = Vec::new();
     let mut shows_thinking_label = false;
     if has_thinking && max_body_lines > 0 {
@@ -1949,7 +1970,7 @@ fn stream_block_lines(app: &App, width: usize, max_body_lines: usize) -> Vec<Lin
         if shows_thinking_label {
             body_lines.push(Line::from(vec![Span::styled(
                 "thinking".to_string(),
-                thinking_style,
+                thinking_tag_style,
             )]));
         }
         body_lines.extend(
@@ -3881,6 +3902,55 @@ mod cursor_span_tests {
             "the pipe line stays literal: {joined:?}"
         );
     }
+
+    /// Markdown markup in the thinking block is rendered, not shown raw.
+    /// The 2026-09-24 user request: markdown in thinking is not lost.
+    #[test]
+    fn thinking_block_renders_markdown() {
+        let palette = crate::color::Palette::builtin(crate::color::Level::Rgb);
+        let style = palette.style(crate::color::Role::Thinking, Modifier::empty());
+        let heading_style = palette.style(crate::color::Role::Heading, Modifier::BOLD);
+        let inline_code = palette.style(crate::color::Role::InlineCode, Modifier::empty());
+        let text = "# Plan\nRun **cargo build** and check `main.rs`";
+        let lines = wrap_thinking(
+            text,
+            60,
+            &palette,
+            style,
+            crate::tool_display::HighlightEngine::TreeSitter,
+        );
+        let joined: String = lines
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        // The heading marker `#` is dropped; the text "Plan" is kept.
+        assert!(joined.contains("Plan"), "heading text survives: {joined:?}");
+        assert!(!joined.contains("# Plan"), "the `#` marker is dropped: {joined:?}");
+        // Inline code renders without backticks.
+        assert!(joined.contains("main.rs"), "inline code text: {joined:?}");
+        assert!(!joined.contains("`main.rs`"), "backticks are stripped: {joined:?}");
+        // The heading line carries the Heading style, not the thinking tone.
+        let heading_line = lines
+            .iter()
+            .find(|l| l.to_string().contains("Plan"))
+            .expect("heading line present");
+        assert!(
+            heading_line.iter().any(|s| s.style == heading_style),
+            "heading uses the Heading style: {joined:?}"
+        );
+        // Inline-code span keeps the InlineCode role.
+        let code_line = lines
+            .iter()
+            .find(|l| l.to_string().contains("main.rs"))
+            .expect("inline code line present");
+        assert!(
+            code_line
+                .iter()
+                .any(|s| s.content == "main.rs" && s.style == inline_code),
+            "inline code carries the InlineCode style: {code_line:?}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -4108,5 +4178,91 @@ mod user_box_tests {
             );
             assert!(l.trim_start().starts_with(text), "{l:?}");
         }
+    }
+}
+
+// ── §4.1 table rendering fixes ──────────────────────────────────────────
+
+#[cfg(test)]
+mod table_fix_tests {
+    use crate::color::{Level, Palette};
+    use crate::highlight::{is_table_block_start, is_table_row, table_grid};
+
+    /// A lone `|`-prefixed line with no following separator must NOT
+    /// be treated as the start of a table block.
+    #[test]
+    fn lone_pipe_line_is_not_a_table_block() {
+        let lines: Vec<&str> = vec!["Some prose", "|x| y => x", "more prose"];
+        assert!(
+            !is_table_block_start(&lines, 1),
+            "lone pipe line must not start a table block"
+        );
+        // It IS a table row (two pipes), but not a block start.
+        assert!(is_table_row("|x| y => x"));
+    }
+
+    /// A proper GFM table (header + separator) IS detected.
+    #[test]
+    fn gfm_table_is_detected() {
+        let lines: Vec<&str> = vec![
+            "| Name | Value |",
+            "|------|-------|",
+            "| a    | 1     |",
+        ];
+        assert!(
+            is_table_block_start(&lines, 0),
+            "header + separator must be detected"
+        );
+    }
+
+    /// A single `|`-prefixed line with no separator is not a block.
+    #[test]
+    fn single_pipe_row_without_separator_is_not_a_block() {
+        let lines: Vec<&str> = vec!["|a| b|", "some prose"];
+        assert!(!is_table_block_start(&lines, 0));
+    }
+
+    /// Wide cells are wrapped onto multiple visual lines, not
+    /// truncated with a trailing `…`.
+    #[test]
+    fn wide_cell_wraps_not_truncates() {
+        let palette = Palette::builtin(Level::Rgb);
+        let rows = vec![
+            "| A | B                          |".to_string(),
+            "|---|--------------------------|".to_string(),
+            "| x | a very long value that exceeds the column width comfortably and should wrap to a second visual line inside the box |".to_string(),
+        ].into_iter().map(String::from).collect::<Vec<_>>();
+        let grid = table_grid(&rows, 30, &palette);
+        let joined: String = grid
+            .iter()
+            .map(|row| row.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>().concat())
+            .collect::<Vec<_>>()
+            .join("\n");
+        // Every word of the original cell content must be present
+        // (no truncation).
+        for word in [
+            "very", "long", "value", "that", "exceeds",
+            "column", "width", "comfortably", "wrap",
+            "visual", "line", "inside", "the", "box",
+        ] {
+            assert!(
+                joined.contains(word),
+                "word `{word}` must appear in output:\n{joined}"
+            );
+        }
+        // No ellipsis character from truncation.
+        assert!(
+            !joined.contains('…'),
+            "no truncation ellipsis expected:\n{joined}"
+        );
+        // The cell must span more than one visual line (it wrapped).
+        let data_line_count = grid
+            .iter()
+            .filter(|row| row.iter().any(|(_, t)| t.contains("very") || t.contains("box")))
+            .count();
+        assert!(
+            data_line_count >= 2,
+            "the long cell should wrap to ≥2 visual lines, got {data_line_count}:\n{joined}"
+        );
     }
 }

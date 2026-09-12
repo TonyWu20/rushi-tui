@@ -28,7 +28,8 @@ this pass and after.
 | inline code (`InlineCode`) | `mdCode` | `#91d7e3` | `#f0c674` (a free-form hex) | `#91d7e3` |
 | link text (`Link`) | `mdLink` | `#8aadf4` | `#74c7ec` (the mocha `sapphire` var) | `#8aadf4` |
 | link URL (`LinkUrl`) | `mdLinkUrl` | `#a5adcb` | `#7c7f96` | `#a5adcb` |
-| thinking block content (`Thinking`) | `thinkingText` | `#b8c0e0` | `#b8c0e0` (already aligned) | `#b8c0e0` |
+| thinking block content (`Thinking`) | `thinkingText` | `#8087a2` | `#8087a2` (already aligned) | `#8087a2` |
+| thinking block tag label (`ThinkingTag`, new role) | — | `#c6a0f6` | no role | `#c6a0f6` |
 | fold/expand hint (`Hint`) | `muted` | `#a5adcb` | `#7c7f96` | `#a5adcb` |
 | status/help row (`Status`) | `dim` | `#8087a2` | `#7c7f96` | `#8087a2` |
 | error accent (`Error`) | `error` | `#ed8796` | `#ed8796` (aligned) | `#ed8796` |

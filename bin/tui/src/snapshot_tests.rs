@@ -533,6 +533,65 @@ fn snap_markdown_table() {
     insta::assert_snapshot!(out);
 }
 
+/// §4.1 bug 1 — `|` disambiguation: a `|`-prefixed line with no
+/// following separator (e.g. a closure like `|x| y => x`) must NOT
+/// be drawn as a grid table. The pipe line renders as plain prose and
+/// the output carries no box-drawing borders.
+#[test]
+fn snap_table_pipe_not_a_table() {
+    // A `|` line that is a table *row* but is NOT followed by the
+    // GFM separator. Before the fix this was swallowed into a
+    // spurious one-row grid; now it stays prose.
+    let md = "Consider the rule\n|x| y => x\napplied inline.";
+    let events = vec![
+        ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u1","content":"show pipes"}"#),
+        ev(&format!(
+            r#"{{"v":1,"type":"assistant_message","ts":"t","id":"a1","content":{},"tool_calls":[],"stop_reason":"stop","usage":{{"input_tokens":10,"output_tokens":5}},"reasoning":{{}}}}"#,
+            serde_json::to_string(md).unwrap()
+        )),
+    ];
+    let mut app = app_with_session(events);
+    let (host, _tmp) = empty_host();
+    let out = render(&mut app, &host, 80, 24);
+    // The `|` line stays text — no spurious grid.
+    assert!(out.contains("|x| y => x"), "pipe line must render as prose: {out}");
+    assert!(!out.contains('┌'), "no grid border expected: {out}");
+    assert!(!out.contains('└'), "no grid border expected: {out}");
+    insta::assert_snapshot!(out);
+}
+
+/// §4.1 bug 2 — cell truncation: a table cell wider than its column
+/// wraps onto multiple visual lines instead of being elided with a
+/// trailing `…`. No data is lost.
+#[test]
+fn snap_table_wide_cell_wraps() {
+    // The `Description` cell is wide enough to exceed the even-share
+    // column width at 80 columns, so it wraps.
+    let md = "Some results:\n\n| Name  | Description                          |\n|-------|------------------------------------|\n| alpha | This value is very long and should wrap to a second visual line in the grid |";
+    let events = vec![
+        ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u1","content":"show wide table"}"#),
+        ev(&format!(
+            r#"{{"v":1,"type":"assistant_message","ts":"t","id":"a1","content":{},"tool_calls":[],"stop_reason":"stop","usage":{{"input_tokens":10,"output_tokens":5}},"reasoning":{{}}}}"#,
+            serde_json::to_string(md).unwrap()
+        )),
+    ];
+    let mut app = app_with_session(events);
+    let (host, _tmp) = empty_host();
+    let out = render(&mut app, &host, 80, 24);
+    // The full cell content survives (wraps, no truncation).
+    // The last words would be lost if the cell were truncated.
+    for word in [
+        "This", "value", "very", "long", "should", "wrap", "second", "visual", "line", "grid",
+    ] {
+        assert!(out.contains(word), "word `{word}` must survive: {out}");
+    }
+    assert!(
+        !out.contains('…'),
+        "no truncation ellipsis expected: {out}"
+    );
+    insta::assert_snapshot!(out);
+}
+
 #[test]
 fn snap_markdown_inline() {
     let md = "Use **bold text** and *italic text* and `inline code` and [a link](https://example.com).";
