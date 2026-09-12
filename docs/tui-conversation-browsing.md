@@ -607,12 +607,10 @@ on top of it, with three points:
   `transcript_lines` output of `bin/tui/src/render.rs`),
   not the source event JSON. The deviation D1 of section
   6.4 holds: the line unit is the wrapped visual line.
-- Raw source yank was requested for message bodies.
-  The 2026-09-13 decision keeps message yank rendered.
+- Raw source yank was requested for message and thinking
+  blocks. The 2026-09-13 decision keeps yank rendered.
   The renderer exposes no line level source mapping.
-  Thinking blocks are the exception. The first expanded
-  reasoning line owns the raw text, so a yank that
-  includes it returns the source. See the feature log.
+  A raw export path may be explored later.
 
 ### 11.3 The shared register store
 
