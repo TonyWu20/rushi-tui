@@ -1,12 +1,19 @@
 //! Config loading for the TUI.
 //!
-//! The TUI reads two things from the harness config file:
+//! The TUI reads these parts of the shared harness config file:
 //! - `[paths] sessions_root` — where session directories live
+//!   (shared with the kernel; the TUI only re-reads this key)
+//! - `[active] model` — the active model name (shared with the kernel;
+//!   the TUI re-reads it for the extension `tick` payload)
 //! - `[loop]` — the opaque loop command (docs/tui.md section 2.3)
+//! - `[tui]` — TUI-only settings: `ext_dirs` (the global UI-extension
+//!   extension directories, docs/ui-extension.md section 3), `color`,
+//!   `color_scheme`, `color_schemes`, `tool_display`, `clipboard`
 //!
-//! The TUI source contains no loop script names: they are config values.
-//! Relative paths resolve against the config file's directory, so the TUI
-//! behaves the same no matter where it is launched from.
+//! The kernel-owned sections (`[model]`, `[limits]`, `[hooks]`,
+//! `[system_prompt]`) are ignored here. Relative paths resolve against
+//! the config file's directory, so the TUI behaves the same no matter
+//! where it is launched from.
 
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
@@ -62,10 +69,15 @@ pub struct TuiConfig {
     pub config_dir: PathBuf,
     /// Absolute config file path (exported to the loop process).
     pub config_path: PathBuf,
-    /// The global extension directory, if the `[ext] dir` override is
-    /// set. `None` uses `<config_dir>/ui_extensions`
-    /// (docs/ui-extension.md section 3).
-    pub ext_dir: Option<PathBuf>,
+    /// The global extension directories. Each entry is either a directory
+    /// that holds its own `ext.toml` (one extension, e.g. a crate dir)
+    /// or a layer directory containing one `<name>/ext.toml` subdir per
+    /// extension. Later entries override earlier ones by extension name.
+    /// An empty list means "use the built-in default"
+    /// (`<config_dir>/ui_extensions`).
+    ///
+    /// Supports multiple independent extension sources (docs/ui-extension.md §3).
+    pub ext_dirs: Vec<PathBuf>,
     /// The active model name, for the extension `tick` payload
     /// (docs/ui-extension.md section 4). `None` when unconfigured.
     pub active_model: Option<String>,
@@ -82,28 +94,52 @@ pub struct TuiConfig {
     /// scheme.md section 3).
     pub custom_schemes:
         std::collections::HashMap<String, std::collections::HashMap<crate::color::Role, String>>,
+    /// The `[tui] clipboard` flag (docs/tui-conversation-browsing.md
+    /// section 11.3): when `true` (`[tui] clipboard = "unnamed"`), a
+    /// bare unnamed browse `y` also emits the OSC 52 host-clipboard
+    /// write, not only the explicit `+` / `*` register yank.
+    pub clipboard_unnamed: bool,
     /// The tool-result display state (docs/tui-tool-display-port.md
     /// section 2, the config part): a preset plus the per-field
-    /// overrides. The `opencode` preset is the default: read and
-    /// search results stay collapsed.
+    /// overrides. The `opencode` preset is the default: read stays
+    /// collapsed.
     pub tool_display: crate::tool_display::ToolDisplay,
 }
 
+/// Raw deserialized shape of `config.toml`.
+///
+/// One config file is shared by two programs, so the top-level sections
+/// are split by who owns them at runtime (see `config.toml`'s banner
+/// comments, which mirror this split):
+///
+/// - **Kernel-owned** (read by `rushi` only; the TUI ignores them):
+///   `[model]`, `[limits]`, `[hooks]`, `[system_prompt]`.
+/// - **Shared** (read by both): `[paths].sessions_root` and
+///   `[active].model`. The kernel is the source of truth; the TUI
+///   re-reads just the two keys it needs.
+/// - **TUI-owned** (read by the TUI only; the harness ignores them):
+///   `[loop]` (the opaque loop command) and `[tui]` (everything the
+///   TUI itself configures, including the `ext_dirs` UI-extension
+///   layer list).
+///
+/// The TUI deserializes only the sections it needs; serde ignores every
+/// unknown key, so the kernel may add keys without breaking the TUI and
+/// vice versa. There is deliberately no `deny_unknown_fields`.
 #[derive(Debug, Default, Deserialize)]
 struct RawConfig {
+    // ── shared with the kernel ──
+    /// `[paths]` — kernel-owned; the TUI re-reads only `sessions_root`.
     paths: Option<RawPaths>,
+    /// `[active] model` — kernel-owned; the TUI re-reads it for the
+    /// extension `tick` payload.
+    active: Option<RawActive>,
+    // ── TUI-only sections (the harness never reads these) ──
+    /// TUI-only: the opaque loop command the TUI spawns per session.
     #[serde(rename = "loop")]
     loop_cmd: Option<RawLoop>,
-    ext: Option<RawExt>,
-    active: Option<RawActive>,
+    /// TUI-only: color, clipboard, tool-display, and `ext_dirs`
+    /// (the UI-extension directory list).
     tui: Option<RawTui>,
-}
-
-/// The optional `[ext]` section: an override for the global extension
-/// directory (docs/ui-extension-plan.md stage 1).
-#[derive(Debug, Default, Deserialize)]
-struct RawExt {
-    dir: Option<String>,
 }
 
 /// The optional `[active]` section: the active model name.
@@ -130,13 +166,18 @@ fn default_arg_style() -> String {
     "append_session".to_string()
 }
 
-/// The optional `[tui]` table: `color` forces the color capability
+/// The optional `[tui]` table: everything the TUI itself configures.
+/// `color` forces the color capability
 /// level (`truecolor`, `256`, `8`, `16`; unknown names are a hard
 /// error like the other keys). `color_scheme` selects a named color
 /// scheme (docs/tui-color-scheme.md section 3: the default is the
-/// `catppuccin macchiato` scheme, the reference pi theme). `color_schemes` holds user-defined
+/// `catppuccin macchiato` scheme, the reference pi theme).
+/// `color_schemes` holds user-defined
 /// role-to-hex tables; a table name the `color_scheme` value does
-/// not name is inert.
+/// not name is inert. `ext_dirs` lists the global UI-extension layer
+/// directories (docs/ui-extension.md section 3): later entries
+/// override earlier ones by extension name; an empty/absent list falls
+/// back to the built-in default `<config_dir>/ui_extensions`.
 #[derive(Debug, Default, Deserialize)]
 struct RawTui {
     #[serde(default)]
@@ -145,25 +186,43 @@ struct RawTui {
     color_scheme: Option<String>,
     #[serde(default)]
     color_schemes: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
+    /// Alias for `color_schemes` (accepted so users can write either
+    /// `color_schemes` or `custom_schemes` per the docs).
+    #[serde(default)]
+    custom_schemes: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
     /// The tool-result display table (docs/tui-tool-display-port.md
     /// section 2). Every field is optional; a missing field keeps
     /// the preset value. The preset defaults to `opencode`.
     #[serde(default)]
     tool_display: Option<RawToolDisplay>,
+    /// The `[tui] clipboard` flag (docs/tui-conversation-browsing.md
+    /// section 11.3): `unnamed` routes a bare browse `y` to the host
+    /// clipboard (the OSC 52 write). Absent keeps the vim default:
+    /// only an explicit `+` / `*` register yank reaches the host.
+    #[serde(default)]
+    clipboard: Option<String>,
+    /// The `[tui] ext_dirs` list: the global UI-extension layer
+    /// directories, in precedence order (later entries override
+    /// earlier ones by name). Each entry is either a directory that
+    /// holds its own `ext.toml` (one extension) or a layer directory
+    /// with one `<name>/ext.toml` subdir per extension. An empty/absent
+    /// list means "use the built-in default"
+    /// (`<config_dir>/ui_extensions`). Relative entries resolve
+    /// against the config dir.
+    #[serde(default)]
+    ext_dirs: Vec<String>,
 }
 
 /// The `[tui.tool_display]` table: a preset name plus the per-field
 /// overrides (docs/tui-tool-display-port.md section 2, the config
-/// part). The presets are `opencode` (the default: read and search
-/// hidden, bash collapsed to 10 lines), `balanced` (summaries), and
-/// `verbose` (larger previews).
+/// part). The presets are `opencode` (the default: read hidden, bash
+/// collapsed to 10 lines), `balanced` (summaries), and `verbose`
+/// (larger previews).
 #[derive(Debug, Default, Deserialize)]
 struct RawToolDisplay {
     preset: Option<String>,
     /// The read output mode: `hidden`, `summary`, `preview`.
     read: Option<String>,
-    /// The search output mode: `hidden`, `count`, `preview`.
-    search: Option<String>,
     /// The bash output mode: `hidden`, `summary`, `preview`.
     bash: Option<String>,
     /// The preview line count of the read preview.
@@ -176,6 +235,17 @@ struct RawToolDisplay {
     expanded_preview_max_lines: Option<usize>,
     /// The diff layout: `auto`, `split`, `unified`.
     diff_view: Option<String>,
+    /// The syntax-highlight engine: `tree-sitter` (grammar-based, the
+    /// default, the 2026-09-11 request) or `builtin` (the hand-rolled
+    /// tokenizer, the opt-out) (docs/tui-tool-display-fancy.md
+    /// section 4).
+    highlight_engine: Option<String>,
+    /// The expand mode: `global` (Ctrl+O toggles all), `focus` (nearest
+    /// block auto-expands), `click` (click toggles a block).
+    expand_mode: Option<String>,
+    /// The animation duration in ms for expand/collapse and fade-in.
+    /// 0 disables animation.
+    anim_ms: Option<u64>,
 }
 
 impl TuiConfig {
@@ -240,11 +310,16 @@ impl TuiConfig {
             None => None,
         };
 
-        let ext_dir = raw
-            .ext
+        let ext_dirs: Vec<PathBuf> = raw
+            .tui
             .as_ref()
-            .and_then(|e| e.dir.clone())
-            .map(|d| resolve(&config_dir, d));
+            .map(|t| {
+                t.ext_dirs
+                    .iter()
+                    .map(|d| resolve(&config_dir, d.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
 
         let active_model = raw.active.as_ref().and_then(|a| a.model.clone());
 
@@ -273,29 +348,31 @@ impl TuiConfig {
             String,
             std::collections::HashMap<crate::color::Role, String>,
         > = std::collections::HashMap::new();
-        for (name, table) in raw
-            .tui
-            .as_ref()
-            .map(|t| t.color_schemes.clone())
-            .unwrap_or_default()
-        {
+        // Merge `color_schemes` and the `custom_schemes` alias.
+        let mut raw_schemes: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>> =
+            std::collections::BTreeMap::new();
+        if let Some(t) = raw.tui.as_ref() {
+            for (name, table) in t.color_schemes.iter() {
+                raw_schemes.insert(name.clone(), table.clone());
+            }
+            for (name, table) in t.custom_schemes.iter() {
+                raw_schemes.insert(name.clone(), table.clone());
+            }
+        }
+        for (name, table) in raw_schemes {
             let key_to_role = |k: &str| -> Result<crate::color::Role, String> {
-                crate::color::Role::ALL
-                    .iter()
-                    .find(|r| r.key() == k)
-                    .copied()
-                    .ok_or_else(|| {
-                        format!(
-                            "config [tui] color_schemes.{}: unknown role {k:?} \
-                             (expected one of {})",
-                            name,
-                            crate::color::Role::ALL
-                                .iter()
-                                .map(|r| r.key())
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        )
-                    })
+                crate::color::Role::from_key(k).ok_or_else(|| {
+                    format!(
+                        "config [tui] color_schemes.{}: unknown role {k:?} \
+                         (expected one of {})",
+                        name,
+                        crate::color::Role::ALL
+                            .iter()
+                            .map(|r| r.key())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                })
             };
             let mut roles: std::collections::HashMap<crate::color::Role, String> =
                 std::collections::HashMap::new();
@@ -313,8 +390,11 @@ impl TuiConfig {
             custom_schemes.insert(name, roles);
         }
         if let Some(name) = raw.tui.as_ref().and_then(|t| t.color_scheme.clone()) {
+            let normalized = name.replace('-', " ");
             let known = name == crate::color::SCHEME_CATPPUCCIN_MACCHIATO
-                || custom_schemes.contains_key(&name);
+                || normalized == crate::color::SCHEME_CATPPUCCIN_MACCHIATO
+                || custom_schemes.contains_key(&name)
+                || custom_schemes.contains_key(&normalized);
             if !known {
                 return Err(format!(
                     "config [tui] color_scheme: unknown scheme {name:?} \
@@ -324,6 +404,21 @@ impl TuiConfig {
             }
         }
         let color_scheme = raw.tui.as_ref().and_then(|t| t.color_scheme.clone());
+
+        // The `[tui] clipboard` flag (docs/tui-conversation-browsing.md
+        // section 11.3): `unnamed` routes a bare browse `y` to the
+        // host clipboard (the OSC 52 write). An unknown value is a
+        // hard error at load, like the other keys.
+        let clipboard_unnamed = match raw.tui.as_ref().and_then(|t| t.clipboard.clone()) {
+            Some(v) if v.eq_ignore_ascii_case("unnamed") => true,
+            Some(v) => {
+                return Err(format!(
+                    "config [tui] clipboard: unknown value {v:?} \
+                     (expected \"unnamed\")"
+                ));
+            }
+            None => false,
+        };
 
         // The tool-result display table (docs/tui-tool-display-port.md
         // section 2, the config part). The preset table is the base;
@@ -348,15 +443,6 @@ impl TuiConfig {
                         )
                     })?;
             }
-            if let Some(m) = t.search.as_deref() {
-                tool_display.search_mode =
-                    crate::tool_display::parse_search_mode(m).ok_or_else(|| {
-                        format!(
-                            "config [tui.tool_display] search: unknown mode {m:?} \
-                             (expected hidden, count, or preview)"
-                        )
-                    })?;
-            }
             if let Some(m) = t.bash.as_deref() {
                 tool_display.bash_mode =
                     crate::tool_display::parse_output_mode(m).ok_or_else(|| {
@@ -374,6 +460,27 @@ impl TuiConfig {
                              (expected auto, split, or unified)"
                         )
                     })?;
+            }
+            if let Some(m) = t.highlight_engine.as_deref() {
+                tool_display.highlight_engine =
+                    crate::tool_display::parse_highlight_engine(m).ok_or_else(|| {
+                        format!(
+                            "config [tui.tool_display] highlight_engine: unknown value {m:?} \
+                             (expected tree-sitter (the default) or builtin)"
+                        )
+                    })?;
+            }
+            if let Some(m) = t.expand_mode.as_deref() {
+                tool_display.expand_mode =
+                    crate::tool_display::parse_expand_mode(m).ok_or_else(|| {
+                        format!(
+                            "config [tui.tool_display] expand_mode: unknown value {m:?} \
+                             (expected global, focus, or click)"
+                        )
+                    })?;
+            }
+            if let Some(n) = t.anim_ms {
+                tool_display.anim_ms = n;
             }
             if let Some(n) = t.preview_lines {
                 tool_display.preview_lines = n;
@@ -395,11 +502,12 @@ impl TuiConfig {
             loop_cmd,
             config_dir,
             config_path: canonical,
-            ext_dir,
+            ext_dirs,
             active_model,
             color,
             color_scheme,
             custom_schemes,
+            clipboard_unnamed,
             tool_display,
         })
     }
@@ -429,11 +537,12 @@ impl TuiConfig {
             loop_cmd: None,
             config_dir,
             config_path: path.to_path_buf(),
-            ext_dir: None,
+            ext_dirs: Vec::new(),
             active_model: None,
             color: None,
             color_scheme: None,
             custom_schemes: std::collections::HashMap::new(),
+            clipboard_unnamed: false,
             tool_display: crate::tool_display::ToolDisplay::preset(
                 crate::tool_display::Preset::OpenCode,
             ),
@@ -527,20 +636,46 @@ arg_style = "append_session"
     }
 
     #[test]
-    fn ext_dir_override_and_active_model_parse() {
+    fn ext_dirs_parse_and_resolve_against_config_dir() {
         let dir = tempfile::tempdir().unwrap();
         write(
             dir.path(),
             "config.toml",
-            "[ext]\ndir = \"my-exts\"\n\n[active]\nmodel = \"test-model\"\n",
+            "[tui]\next_dirs = [\"my-exts\", \"../more-exts\"]\n\n[active]\nmodel = \"test-model\"\n",
         );
         let cfg = TuiConfig::load(dir.path().join("config.toml").to_str().unwrap()).unwrap();
         assert_eq!(
-            cfg.ext_dir,
-            Some(dir.path().join("my-exts")),
-            "relative dir resolves against the config dir"
+            cfg.ext_dirs,
+            vec![dir.path().join("my-exts"), dir.path().join("../more-exts")],
+            "relative dirs resolve against the config dir, in listed order"
         );
         assert_eq!(cfg.active_model.as_deref(), Some("test-model"));
+    }
+
+    #[test]
+    fn ext_dirs_absent_falls_back_to_default() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "config.toml",
+            "[tui]\ncolor_scheme = \"catppuccin macchiato\"\n",
+        );
+        let cfg = TuiConfig::load(dir.path().join("config.toml").to_str().unwrap()).unwrap();
+        assert!(
+            cfg.ext_dirs.is_empty(),
+            "absent ext_dirs means the built-in default layer is used"
+        );
+    }
+
+    #[test]
+    fn legacy_top_level_ext_section_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "config.toml", "[ext]\ndir = \"my-exts\"\n");
+        let cfg = TuiConfig::load(dir.path().join("config.toml").to_str().unwrap()).unwrap();
+        assert!(
+            cfg.ext_dirs.is_empty(),
+            "the top-level `[ext]` section is TUI-unused and no longer read; the key moved to `[tui] ext_dirs`"
+        );
     }
 
     #[test]
@@ -548,7 +683,7 @@ arg_style = "append_session"
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "config.toml", "[loop]\ncommand = \"bash\"\n");
         let cfg = TuiConfig::load(dir.path().join("config.toml").to_str().unwrap()).unwrap();
-        assert!(cfg.ext_dir.is_none());
+        assert!(cfg.ext_dirs.is_empty());
         assert!(cfg.active_model.is_none());
     }
 
@@ -667,10 +802,67 @@ plain_text = "#cdd6f4"
         assert!(cfg.custom_schemes.is_empty());
     }
 
+    // The `custom_schemes` TOML key is an alias for `color_schemes`;
+    // PascalCase role keys are accepted alongside snake_case.
+    #[test]
+    fn custom_schemes_alias_and_pascalcase_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "config.toml",
+            r##"[tui]
+custom_schemes."catppuccin-macchiato"."CursorLine" = "#24273a"
+"##,
+        );
+        let cfg = TuiConfig::load(dir.path().join("config.toml").to_str().unwrap()).unwrap();
+        assert!(
+            cfg.custom_schemes.contains_key("catppuccin-macchiato"),
+            "custom_schemes alias is accepted"
+        );
+        let table = cfg.custom_schemes.get("catppuccin-macchiato").unwrap();
+        assert_eq!(
+            table.get(&crate::color::Role::CursorLine),
+            Some(&"#24273a".to_string()),
+            "PascalCase CursorLine maps to cursor_line"
+        );
+    }
+
+    // A `custom_schemes` entry that names the built-in macchiato
+    // scheme overlays on top of it (the default).
+    #[test]
+    fn custom_schemes_overlay_on_default_macchiato() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "config.toml",
+            r##"[tui]
+custom_schemes."catppuccin-macchiato"."CursorLine" = "#111111"
+"##,
+        );
+        let cfg = TuiConfig::load(dir.path().join("config.toml").to_str().unwrap()).unwrap();
+        let palette = crate::color::palette_from_config(
+            crate::color::Level::Rgb,
+            cfg.color_scheme.as_deref(),
+            &cfg.custom_schemes,
+        )
+        .unwrap();
+        // The overridden role uses the custom value.
+        assert_eq!(
+            palette.color(crate::color::Role::CursorLine),
+            ratatui::style::Color::Rgb(0x11, 0x11, 0x11)
+        );
+        // Unset roles keep the macchiato value (overlay, not replace).
+        assert_eq!(
+            palette.color(crate::color::Role::PlainText),
+            ratatui::style::Color::Rgb(0xca, 0xd3, 0xf5),
+            "unoverridden roles keep the macchiato value"
+        );
+    }
+
     // ── tool display (docs/tui-tool-display-port.md section 2) ──
 
-    /// The default table is the `opencode` preset: read and search
-    /// hidden, bash collapsed to the first 10 lines.
+    /// The default table is the `opencode` preset: read shows a
+    /// preview, bash collapses to the first 10 lines.
     #[test]
     fn tool_display_defaults_to_the_opencode_preset() {
         let dir = tempfile::tempdir().unwrap();
@@ -724,7 +916,6 @@ preview_lines = 12
         assert_eq!(cfg.tool_display.read_mode, OutputMode::Preview);
         assert_eq!(cfg.tool_display.preview_lines, 12);
         // The untouched fields keep the preset values.
-        assert_eq!(cfg.tool_display.search_mode, SearchMode::Hidden);
         assert_eq!(cfg.tool_display.bash_mode, OutputMode::Preview);
     }
 

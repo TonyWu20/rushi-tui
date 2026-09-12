@@ -1,0 +1,28 @@
+---
+source: bin/tui/src/snapshot_tests.rs
+expression: out
+---
+" Session: new — ─────────────────────────────────────────────────────── [idle]  "
+"  (no session yet — type the new session name below, Enter confirms)            "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+" ╭[INSERT]────────────────────────────────────────────────────────────────────╮ "
+" │> _                                                                         │ "
+" │                                                                            │ "
+" ╰────────────────────────────────────────────────────────────────────────────╯ "
+"  Enter confirm · Esc cancel · q×2 quit                                         "

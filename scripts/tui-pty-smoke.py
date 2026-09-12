@@ -126,76 +126,89 @@ class Screen:
         # the raw buffer keeps them for assertions like "the turn
         # finished and the terminal bell rang".
         self.raw = bytearray()
+        # Tail bytes of the last read that do not yet form complete
+        # UTF-8; a multibyte character split across two reads (the
+        # Nerd Font footer glyphs are 3-byte sequences) decodes whole
+        # instead of turning into U+FFFD.
+        self.utf8_carry = b""
 
     def feed(self, data):
         self.raw += data
-        i = 0
-        n = len(data)
-        while i < n:
-            b = data[i]
-            if b == 0x1B:  # escape
-                if i + 1 < n and data[i + 1] == 0x5B:  # CSI: \x1b[
-                    j = i + 2
+        # Decode the largest complete-UTF-8 prefix of the carried +
+        # fresh bytes; a partial multibyte tail waits for the next
+        # read, so a Nerd Font glyph split across reads never decodes
+        # to U+FFFD.
+        full = self.utf8_carry + data
+        i = len(full)
+        while i > 0:
+            try:
+                text = full[:i].decode("utf-8")
+                break
+            except UnicodeDecodeError:
+                i -= 1
+        else:
+            text = ""
+        self.utf8_carry = full[i:]
+        n = len(text)
+        j = 0
+        while j < n:
+            ch = text[j]
+            if ch == "\x1b":  # escape
+                if j + 1 < n and text[j + 1] == "[":  # CSI: \x1b[
+                    k = j + 2
                     private = False
-                    params = b""
-                    while j < n:
-                        ch = data[j]
-                        if 0x30 <= ch <= 0x39 or ch == 0x3B:  # digit or ;
-                            params += bytes([ch])
-                            j += 1
-                        elif ch == 0x3F:  # ? (private mode)
+                    params = ""
+                    while k < n:
+                        c = text[k]
+                        if c.isdigit() or c == ";":
+                            params += c
+                            k += 1
+                        elif c == "?":  # ? (private mode)
                             private = True
-                            j += 1
+                            k += 1
                         else:
                             break
-                    fin = data[j:j + 1]
-                    if fin == b"H" or fin == b"F":
-                        p = params.decode().split(";")
+                    fin = text[k] if k < n else ""
+                    if fin in ("H", "F"):
+                        p = params.split(";")
                         self.r = int(p[0]) - 1 if p[0] else 0
                         self.c = int(p[1]) - 1 if len(p) > 1 and p[1] else 0
                         self.r = max(0, min(self.r, self.rows - 1))
                         self.c = max(0, min(self.c, self.cols - 1))
-                    elif fin == b"K":  # erase to end of line
-                        for k in range(self.c, self.cols):
-                            self.grid[self.r][k] = " "
-                    elif fin == b"J":  # clear display
+                    elif fin == "K":  # erase to end of line
+                        for col in range(self.c, self.cols):
+                            self.grid[self.r][col] = " "
+                    elif fin == "J":  # clear display
                         self.grid = [[" "] * self.cols for _ in range(self.rows)]
-                    elif fin == b"d":  # vertical position
+                    elif fin == "d":  # vertical position
                         if params and not private:
-                            self.r = int(params.decode()) - 1
+                            self.r = int(params) - 1
                             self.r = max(0, min(self.r, self.rows - 1))
                         self.c = 0
-                    elif fin == b"n":  # DSR query: the answer flows
+                    elif fin == "n":  # DSR query: the answer flows
                         # back to us on the pty master; ignore it.
                         pass
                     # m and unknowns: nothing to apply
-                    i = j + 1
+                    j = k + 1
                     continue
-                i += 1
+                j += 1
                 continue
-            if b == 0x0A:  # LF
+            if ch == "\n":  # LF
                 self.c = 0
                 self.r = min(self.r + 1, self.rows - 1)
-                i += 1
+                j += 1
                 continue
-            if b == 0x0D:  # CR
+            if ch == "\r":  # CR
                 self.c = 0
-                i += 1
+                j += 1
                 continue
-            if b >= 0x20:
-                if b >= 0x80:  # start of a UTF-8 sequence
-                    need = 2 if b < 0xE0 else 3 if b < 0xF0 else 4
-                    chunk = data[i:i + need].decode("utf-8", errors="replace")
-                    if self.r < self.rows and self.c < self.cols:
-                        self.grid[self.r][self.c] = chunk[0]
-                    i += need
-                else:
-                    if self.r < self.rows and self.c < self.cols:
-                        self.grid[self.r][self.c] = chr(b)
-                    i += 1
+            if ord(ch) >= 0x20:
+                if self.r < self.rows and self.c < self.cols:
+                    self.grid[self.r][self.c] = ch
                 self.c = min(self.c + 1, self.cols - 1)
+                j += 1
                 continue
-            i += 1
+            j += 1
 
     def text(self):
         return "\n".join("".join(row).rstrip() for row in self.grid)
@@ -387,7 +400,7 @@ def scroll_burst_reaches_head():
 
 
 def ext_config(tmpdir, fixture):
-    """A temp config that points `[ext] dir` at a fixture layer.
+    """A temp config that points `[tui] ext_dirs` at a fixture layer.
 
     The sessions root is a private dir so the ext cases never touch
     the repo session list.
@@ -400,8 +413,8 @@ def ext_config(tmpdir, fixture):
     with open(path, "w") as f:
         f.write("[paths]\n")
         f.write(f"sessions_root = \"{sessions}\"\n\n")
-        f.write("[ext]\n")
-        f.write(f"dir = \"{fixture_dir(fixture)}\"\n")
+        f.write("[tui]\n")
+        f.write(f"ext_dirs = [\"{fixture_dir(fixture)}\"]\n")
     return path, sessions
 
 
@@ -664,7 +677,7 @@ def ext_append_reject():
 
 
 def layer_config(tmpdir, layer_dir, active_model=None):
-    """A temp config that points `[ext] dir` at a layer directory.
+    """A temp config that points `[tui] ext_dirs` at a layer directory.
 
     The layer is usually the repo's `ui_extensions/` global layer
     (the reference extensions) or `ext-rs/`. The sessions root is a
@@ -678,8 +691,8 @@ def layer_config(tmpdir, layer_dir, active_model=None):
     with open(path, "w") as f:
         f.write("[paths]\n")
         f.write(f"sessions_root = \"{sessions}\"\n\n")
-        f.write("[ext]\n")
-        f.write(f"dir = \"{layer_dir}\"\n")
+        f.write("[tui]\n")
+        f.write(f"ext_dirs = [\"{layer_dir}\"]\n")
         if active_model:
             f.write("\n[active]\n")
             f.write(f"model = \"{active_model}\"\n")
@@ -975,38 +988,59 @@ def active_model_from_config(path):
 
 
 def repo_config_with_ext_dir(src_cfg, ext_dir, name=".ext-pty-smoke-cfg.toml"):
-    """A copy of a real repo config with `[ext] dir` pointed at ext_dir.
+    """A copy of a real repo config with `[tui] ext_dirs` pointed at ext_dir.
 
     Written inside the source config's own directory so relative paths
-    such as sessions_root still resolve against the checkout. If the
-    source config already has an `[ext]` table (the kernel config.toml
-    points `[ext] dir` at the sibling exts checkout, section 4 item 4),
-    its `dir` key is replaced: a second `[ext]` table would be a TOML
-    parse error and the TUI would die at startup. Otherwise the table
-    is appended. Returns the derived config's path."""
+    such as sessions_root still resolve against the checkout. The global
+    extension layer is the `ext_dirs` key inside the `[tui]` table. If
+    that key already exists it is replaced; otherwise it is appended to
+    the `[tui]` table (a `[tui]` table is created if missing). Returns
+    the derived config's path."""
     with open(src_cfg) as f:
-        body = f.read()
-    # The `[ext]` table: from its header line to the next section
-    # header (a line starting with `[`) or end of file.
-    m = re.search(r"(?ms)^\[ext\](.*?)(?=^\[|\Z)", body)
-    if m:
-        block = m.group(1)
-        if re.search(r"(?m)^[ \t]*dir[ \t]*=", block):
-            block = re.sub(
-                r"(?m)^[ \t]*dir[ \t]*=[^\n]*$",
-                f'dir = "{ext_dir}"',
-                block,
-            )
-        else:
-            block += f'dir = "{ext_dir}"\n'
-        body = body[: m.start()] + "[ext]" + block + body[m.end():]
+        lines = f.read().splitlines(keepends=True)
+
+    ext_line = f'ext_dirs = ["{ext_dir}"]\n'
+
+    # Locate the [tui] section body: from the "[tui]" header to the next
+    # section header or EOF.
+    tui_start = None
+    for i, l in enumerate(lines):
+        if re.match(r"^\s*\[tui\]\s*$", l):
+            tui_start = i
+            break
+
+    if tui_start is not None:
+        tui_end = len(lines)
+        for j in range(tui_start + 1, len(lines)):
+            if re.match(r"^\s*\[", lines[j]):
+                tui_end = j
+                break
+        replaced = False
+        j = tui_start + 1
+        while j < tui_end:
+            if re.match(r"^\s*ext_dirs\s*=", lines[j]):
+                # Replace the whole value span: a single-line array or a
+                # multi-line array up to its closing bracket.
+                depth = lines[j].count("[") - lines[j].count("]")
+                k = j
+                while depth > 0:
+                    k += 1
+                    depth += lines[k].count("[") - lines[k].count("]")
+                lines[j : k + 1] = [ext_line]
+                replaced = True
+                break
+            j += 1
+        if not replaced:
+            lines.insert(tui_end, ext_line)
     else:
-        if not body.endswith("\n"):
-            body += "\n"
-        body += f'\n[ext]\ndir = "{ext_dir}"\n'
+        if lines and lines[-1].strip() != "":
+            lines.append("\n")
+        lines.append("[tui]\n")
+        lines.append(ext_line)
+
     out = os.path.join(os.path.dirname(os.path.abspath(src_cfg)), name)
     with open(out, "w") as f:
-        f.write(body)
+        f.writelines(lines)
     return out
 
 
@@ -1022,11 +1056,11 @@ def ext_statusline_repo():
     12. A missing value drops its marker, so the case passes on any
     branch or config."""
     # Two-repo split: the kernel no longer owns ui_extensions/, so its
-    # default [ext] dir (kernel/ui_extensions) is absent. Point the
-    # global layer at the exts checkout (EXTS_ROOT) while keeping the
-    # real repo's [active] model, sessions_root, and git checkout. The
-    # derived config lives inside REPO so the relative sessions_root
-    # still resolves against the kernel checkout.
+    # default global layer (<config-dir>/ui_extensions) is absent.
+    # Point `[tui] ext_dirs` at the exts checkout (EXTS_ROOT) while
+    # keeping the real repo's [active] model, sessions_root, and git
+    # checkout. The derived config lives inside REPO so the relative
+    # sessions_root still resolves against the kernel checkout.
     src_cfg = REPO + "/config.toml"
     cfg = repo_config_with_ext_dir(src_cfg, EXTS_ROOT + "/ui_extensions")
     master, pid = spawn(SESSION, cfg)
@@ -1439,14 +1473,14 @@ def ext_rus():
         deadline = time.time() + 15.0
         seen, _ = wait_markers(
             master, pid, screen,
-            ["git:none", "smoke-model", stats_marker],
+            ["\ue725 none", "smoke-model", stats_marker],
             deadline,
         )
         if not alive(pid):
             print("FAIL ext-rus: process died during startup")
             cleanup_layer(pid, EXTS_ROOT + "/ext-rs")
             return False
-        missing = [m for m in ["git:none", "smoke-model", stats_marker] if m not in seen]
+        missing = [m for m in ["\ue725 none", "smoke-model", stats_marker] if m not in seen]
         if missing:
             print(f"FAIL ext-rus: markers not seen: {missing}")
             print("screen was:\n" + screen.text())
@@ -1495,6 +1529,67 @@ def ext_rus():
         try:
             os.close(master)
         except OSError:
+            pass
+
+
+def ext_signal_orphan():
+    """A SIGTERM to the TUI leaves no orphaned extension processes.
+
+    Start the real ext-rs layer, wait for the statusline extension,
+    then send SIGTERM to the TUI process. The TUI exits through its
+    shutdown handler and `host.stop()` must stop the extension groups
+    before exit (docs/ui-extension.md section 7). Extensions run in
+    their own sessions, so only the host's stop sequence can reap
+    them."""
+    tmp = tempfile.mkdtemp(prefix="tui-ext-sig-")
+    cfg, sessions = layer_config(tmp, EXTS_ROOT + "/ext-rs", active_model="smoke-model")
+    seed_session(sessions, EXT_SESSION, seed_events())
+    master, pid = spawn(EXT_SESSION, cfg)
+    screen = Screen(24, 80)
+    try:
+        deadline = time.time() + 15.0
+        while time.time() < deadline:
+            pump(master, 0.2, screen)
+            if not alive(pid):
+                print("FAIL ext-signal-orphan: process died during startup")
+                cleanup_layer(pid, EXTS_ROOT + "/ext-rs")
+                return False
+            if "in:" in screen.text():
+                break
+        if "in:" not in screen.text():
+            print("FAIL ext-signal-orphan: statusline marker never appeared")
+            cleanup_layer(pid, EXTS_ROOT + "/ext-rs")
+            return False
+        os.kill(pid, signal.SIGTERM)
+        deadline = time.time() + 10.0
+        while time.time() < deadline and alive(pid):
+            pump(master, 0.2, screen)
+        if alive(pid):
+            print("FAIL ext-signal-orphan: TUI still running 10 s after SIGTERM")
+            os.kill(pid, signal.SIGKILL)
+            reap(pid)
+            cleanup_layer(pid, EXTS_ROOT + "/ext-rs")
+            return False
+        reap(pid)
+        orphans = settled_orphans(EXTS_ROOT + "/ext-rs", seconds=10.0)
+        if orphans:
+            print(f"FAIL ext-signal-orphan: orphans after SIGTERM: {orphans}")
+            for p in orphans:
+                try:
+                    os.kill(p, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            return False
+        print("OK ext-signal-orphan: SIGTERM quit left no orphan extensions")
+        return True
+    finally:
+        try:
+            os.close(master)
+        except OSError:
+            pass
+        try:
+            shutil.rmtree(tmp, ignore_errors=True)
+        except Exception:
             pass
 
 
@@ -1706,6 +1801,7 @@ def main():
     ok &= ext_tool_result_kill()
     ok &= ext_mermaid()
     ok &= ext_rus()
+    ok &= ext_signal_orphan()
     ok &= ext_goal_row_installed()
     ok &= ext_goal_row_bare()
     if not ok:
