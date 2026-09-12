@@ -480,9 +480,7 @@ impl Role {
     /// Look up a role by its wire key, accepting both snake_case
     /// (`cursor_line`) and PascalCase (`CursorLine`) forms.
     pub fn from_key(k: &str) -> Option<Role> {
-        let norm = |s: &str| -> String {
-            s.to_lowercase().replace('_', "")
-        };
+        let norm = |s: &str| -> String { s.to_lowercase().replace('_', "") };
         let nk = norm(k);
         Role::ALL.iter().find(|r| norm(r.key()) == nk).copied()
     }
@@ -560,8 +558,8 @@ pub fn catppuccin_macchiato() -> std::collections::HashMap<Role, &'static str> {
         (DiffAdded, "#a6da95"),
         (DiffRemoved, "#ed8796"),
         (DiffContext, "#a5adcb"),
-        (DiffAddedBg, "#26402f"),
-        (DiffRemovedBg, "#3d2830"),
+        (DiffAddedBg, "#B1D99C"),
+        (DiffRemovedBg, "#DF8C97"),
         (Border0, "#8087a2"),
         (Border1, "#8bd5ca"),
         (Border2, "#a6da95"),
@@ -640,11 +638,14 @@ impl Palette {
     pub fn overlay(base: &Self, hexes: &std::collections::HashMap<Role, String>) -> Self {
         let mut colors = base.colors.clone();
         for (role, hex) in hexes {
-            let c = parse_scheme_color(hex)
-                .expect("the config layer validates the scheme hex values");
+            let c =
+                parse_scheme_color(hex).expect("the config layer validates the scheme hex values");
             colors.insert(*role, lower(c, base.level));
         }
-        Palette { level: base.level, colors }
+        Palette {
+            level: base.level,
+            colors,
+        }
     }
 
     /// The capability level the palette lowers to.
@@ -720,7 +721,9 @@ pub fn palette_from_config(
         .get(name)
         .or_else(|| custom.get(&norm_name))
         .or_else(|| {
-            custom.iter().find_map(|(k, t)| (norm(k) == norm_name).then(|| t))
+            custom
+                .iter()
+                .find_map(|(k, t)| (norm(k) == norm_name).then(|| t))
         });
     match table {
         Some(hexes) => Ok(Palette::overlay(&base, hexes)),
@@ -842,4 +845,3 @@ fn dist(r: u8, g: u8, b: u8, pr: u8, pg: u8, pb: u8) -> u32 {
     // Squared Euclidean distance; the sum of squares is non-negative.
     (dr * dr + dg * dg + db * db) as u32
 }
-
