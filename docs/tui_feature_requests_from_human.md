@@ -412,3 +412,23 @@ macchiato` as the first internal color scheme. Shipped in
       visible height. Detail:
       `docs/tui-ratatui-ecosystem-audit.md` (§4.8).
 
+- [x] Fix browse-mode search typing. While the search line is
+      open, typing `s` armed the double-`s` exit instead of
+      entering the query. The exit arm is now suppressed while
+      the line is typing.
+
+- [x] Pin the browse view on streaming growth. The live tail
+      growth flushed the viewport and re-centered it. The stream
+      growth now pins the view like a settled event.
+
+- [ ] Yank returns the raw source for message bodies.
+      Decision 2026-09-13: not implemented. The user conceded
+      to rendered-text yank. The renderer exposes no line
+      level source mapping. Anchoring raw ownership at a
+      block's first line made sub-block yanks behave
+      unexpectedly. A raw export path may come later.
+
+- [x] Thinking-block lines yank the raw reasoning text.
+      The first expanded reasoning line owns the joined raw
+      text. Collapsed labels stay chrome. Shipped with a
+      unit test.

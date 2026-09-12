@@ -377,17 +377,12 @@ impl Browse {
         self.last_h = 0;
     }
 
-    /// The renderer's layout sync (sections 4.6 and 4.7): when the
-    /// total or the height changes under a held cursor, the cursor
-    /// clamps to the new total and the view re-centers on it with
-    /// the scrolloff margins. A pending entry resolves here instead.
-    /// A pure tail growth (a rendered event landed, `grew = true`)
-    /// keeps the view put: no auto-follow (section 4.6). A growth
-    /// without a new event is a pane rewrap and re-centers
-    /// (section 4.7).
+    /// Renderer layout sync (sections 4.6, 4.7). A pure tail growth
+    /// pins the view. A rewrap re-centers it.
     pub fn sync(&mut self, total: usize, h: usize, scroll: &mut usize, grew: bool) {
+        let grew_by = total.saturating_sub(self.last_total);
         let changed = total != self.last_total || h != self.last_h;
-        let pure_growth = total > self.last_total && grew && h == self.last_h;
+        let pure_growth = grew_by > 0 && grew && h == self.last_h;
         self.last_total = total;
         self.last_h = h;
         if total == 0 {
@@ -397,24 +392,25 @@ impl Browse {
             self.pending_entry = false;
             return;
         }
-        // The cursor pins to its line number (section 4.6): a cap
-        // drop shifts the lines, the number keeps pointing, the
-        // fold / thinking toggle clamps to the new total.
         let clamped = self.line >= total;
         self.line = self.line.min(total - 1);
         if self.pending_entry {
-            // Entry: the cursor is the first visible line, col 0,
-            // and the view does not move (section 4.2).
             let start = total.saturating_sub(*scroll + h);
             *scroll = (*scroll).min(total.saturating_sub(h));
             self.line = start.min(total - 1);
             self.col = 0;
             self.pending_entry = false;
-        } else if changed && (!pure_growth || clamped) {
-            // A shrink, a height change, a rewrap growth, or a
-            // clamped cursor re-centers with the scrolloff margins
-            // (section 4.7).
-            *scroll = follow_view(total, h, self.line, *scroll);
+        } else if changed {
+            if pure_growth && !clamped {
+                // Pin the view on the same absolute lines: grow the
+                // scroll by the tail delta so the window does not
+                // slide. The view never auto-follows (section 4.6).
+                *scroll = (*scroll).saturating_add(grew_by).min(total.saturating_sub(h));
+            } else {
+                // A shrink, height change, rewrap, or clamped cursor
+                // re-centers with the scrolloff margins (section 4.7).
+                *scroll = follow_view(total, h, self.line, *scroll);
+            }
         }
     }
 

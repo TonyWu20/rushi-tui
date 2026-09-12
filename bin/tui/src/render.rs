@@ -427,7 +427,15 @@ fn event_lines<'a>(
                         );
                         let n = wrapped.len();
                         out.extend(guttered(&wrapped, " "));
-                        owns.extend(std::iter::repeat_n(None, n));
+                        // The first reasoning body line owns the full raw
+                        // thinking text, so a yank of the block returns
+                        // the source, not the wrapped display.
+                        if n == 0 {
+                            owns.push(None);
+                        } else {
+                            owns.push(Some(text.clone()));
+                            owns.extend(std::iter::repeat_n(None, n - 1));
+                        }
                     } else {
                         // The collapsed row: a one-line pi-style label with
                         // the expand hint, not the full reasoning text.
@@ -3217,7 +3225,11 @@ pub fn draw(
     app.set_transcript_top_row(t_area.y);
     let mut scroll = scroll0;
     if browse_active {
-        let grew = app.take_events_grew();
+        // A settled event landing or a live stream tail growth both
+        // count as tail growth. The browse view pins on either
+        // instead of re-centering (docs/tui-conversation-browsing.md
+        // section 4.6).
+        let grew = app.take_events_grew() || app.note_stream_grew(stream_len);
         app.browse().sync(total, h, &mut scroll, grew);
         app.set_scroll(scroll);
     }
@@ -4234,6 +4246,56 @@ mod user_box_tests {
             );
             assert!(l.trim_start().starts_with(text), "{l:?}");
         }
+    }
+
+    /// An expanded thinking block owns the raw reasoning text on its
+    /// first body line. A yank that includes that line returns the
+    /// source text, not the wrapped display.
+    #[test]
+    fn thinking_block_line_raw_owns_full_text() {
+        use crate::event::Event;
+        use std::collections::{HashMap, HashSet};
+
+        let palette = Palette::builtin(Level::Rgb);
+        let tool_display = crate::tool_display::ToolDisplay::preset(
+            crate::tool_display::Preset::OpenCode,
+        );
+        let fracs: HashMap<String, f64> = HashMap::new();
+        let state = RenderState {
+            palette: &palette,
+            tool_display: &tool_display,
+            tool_expanded: false,
+            thinking_shown: true,
+            thinking_expanded: true,
+            expand_fracs: &fracs,
+        };
+        let details: HashMap<String, (String, serde_json::Value)> = HashMap::new();
+        let result_ids: HashSet<String> = HashSet::new();
+        let ev = Event::parse_line(
+            r#"{"v":1,"type":"assistant_message","ts":"t","id":"a1","content":"","tool_calls":[],"stop_reason":"stop","usage":{"input_tokens":1,"output_tokens":1},"reasoning":[{"content":[{"type":"reasoning_text","text":"think step one"}]}]}"#,
+        )
+        .unwrap();
+        let (_, raws) = event_lines()
+            .e(&ev)
+            .pending(false)
+            .call_details(&details)
+            .result_ids(&result_ids)
+            .width(80)
+            .event_id(0)
+            .state(&state)
+            .loop_running(false)
+            .compaction_last_open(false)
+            .call();
+        // Layout: label row, one reasoning body line, the empty body
+        // header line.
+        assert!(raws.get(0).as_deref() == None, "label is chrome");
+        assert_eq!(
+            raws.get(1).cloned(),
+            Some(Some("think step one".to_string())),
+            "first reasoning line owns the raw text: {raws:?}"
+        );
+        assert!(raws.get(2).as_deref() == None, "body line owns nothing");
+        assert_eq!(raws.iter().filter(|o| o.is_some()).count(), 1);
     }
 }
 

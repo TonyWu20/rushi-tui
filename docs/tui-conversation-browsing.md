@@ -278,6 +278,13 @@ mode. The bar's tail marker shows the live position moving
 past the view. Leaving browse mode lands the view on the
 grown tail.
 
+Live streaming growth follows the same rule. While the model
+streams, the live tail extends the transcript every frame.
+The stream-grew flag is ORed into the grew flag. A pure
+stream growth therefore pins the view: the cursor keeps its
+line number and screen position. New stream lines land below
+the view. They do not flush or re-center the viewport.
+
 The fold and thinking toggles keep their host roles in
 browse mode. They change the line count. The cursor clamps
 to the new total, the numbers recompute, and the bar
@@ -417,6 +424,10 @@ prompt, `docs/tui.md` section 7.1):
   pattern types into the box title. `Enter` commits,
   `Esc` cancels and clears the highlight (section 6.2),
   and a backspace on the empty input cancels.
+- While the command line is open, plain characters type
+  into the query. `s` is a query character, so the
+  double-`s` exit arm is suppressed while typing. It
+  re-arms once the line commits or clears.
 - patterns are Rust `regex` syntax (the `magic` match).
   The `tui` crate gains the `regex` dependency (stage 2
   only; `bin/tui/Cargo.toml` holds none today).
@@ -596,6 +607,12 @@ on top of it, with three points:
   `transcript_lines` output of `bin/tui/src/render.rs`),
   not the source event JSON. The deviation D1 of section
   6.4 holds: the line unit is the wrapped visual line.
+- Raw source yank was requested for message bodies.
+  The 2026-09-13 decision keeps message yank rendered.
+  The renderer exposes no line level source mapping.
+  Thinking blocks are the exception. The first expanded
+  reasoning line owns the raw text, so a yank that
+  includes it returns the source. See the feature log.
 
 ### 11.3 The shared register store
 

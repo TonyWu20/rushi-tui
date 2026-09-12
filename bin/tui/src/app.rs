@@ -288,6 +288,7 @@ pub struct App {
     /// (section 4.6): the transcript growth is event growth, not a
     /// pane rewrap, so the browse view does not follow.
     events_grew: bool,
+    last_stream_len: usize,
     /// The transcript pane height set by the last draw, in lines.
     /// Drives the half-page distance of Ctrl+U / Ctrl+D.
     viewport: usize,
@@ -552,6 +553,7 @@ impl App {
             ss_arm: None,
             browse_layout: None,
             events_grew: false,
+            last_stream_len: 0,
             ext_status_values: HashMap::new(),
             ext_status_order: VecDeque::new(),
             ext_status_ts: HashMap::new(),
@@ -1216,6 +1218,17 @@ impl App {
         f
     }
 
+    /// Record the live stream length, in rendered lines, at each
+    /// draw. Report whether it grew since the previous draw. The
+    /// browse sync treats stream-tail growth like settled-event
+    /// growth and pins the view in place
+    /// (docs/tui-conversation-browsing.md section 4.6).
+    pub fn note_stream_grew(&mut self, stream_len: usize) -> bool {
+        let grew = stream_len > self.last_stream_len;
+        self.last_stream_len = stream_len;
+        grew
+    }
+
     /// Set the transcript pane height (the renderer does this every
     /// frame). Used by the half-page keys Ctrl+U / Ctrl+D.
     pub fn set_viewport_height(&mut self, h: usize) {
@@ -1483,20 +1496,25 @@ impl App {
     /// layout, so a key before the first frame is a no-op.
     fn browse_key(&mut self, key: Key) {
         // The double-`s` exit arm (section 4.2): the shared arm
-        // window, the FT-012 mirror.
+        // window, the FT-012 mirror. It is suppressed while the
+        // command line is open (a `/` or `?` search, a `:N`
+        // goto): there `s` is a query character and must reach
+        // the typing handler, not the exit arm.
         if let Key::Char('s') = key {
-            match self.ss_arm {
-                Some(at) if at.elapsed() < SS_ARM_TTL => {
-                    self.ss_arm = None;
-                    self.browse.exit();
-                    self.flash("browse left — view kept");
+            if !self.browse.typing() {
+                match self.ss_arm {
+                    Some(at) if at.elapsed() < SS_ARM_TTL => {
+                        self.ss_arm = None;
+                        self.browse.exit();
+                        self.flash("browse left — view kept");
+                    }
+                    _ => {
+                        self.ss_arm = Some(std::time::Instant::now());
+                        self.flash("ss: press s again to leave browse");
+                    }
                 }
-                _ => {
-                    self.ss_arm = Some(std::time::Instant::now());
-                    self.flash("ss: press s again to leave browse");
-                }
+                return;
             }
-            return;
         }
         let (total, h, texts, line_raw) = match &self.browse_layout {
             Some((total, h, _w, texts, line_raw)) => (
@@ -1686,12 +1704,12 @@ impl App {
         self.flash(scope.hint());
     }
 
-    /// Commit the picker: replace the `@query` token with the chosen
-    /// item's value prefixed with `@` (the model sees `@path` as an
-    /// explicit file reference). Zero results: keep the `@` and query
-    /// text as-is in the draft — no stripping. The caller already
-    /// closed the state; this drops the matcher. The caret stays at
-    /// the replacement end.
+    /// Commit the picker. The chosen item's value replaces the
+    /// `@query` token, prefixed with `@`. The model sees `@path` as
+    /// an explicit file reference. With zero results the `@` token
+    /// and query text stay in the draft, so no stripping happens.
+    /// The caller closed the state already, so this drops the
+    /// matcher. The caret stays at the replacement end.
     fn commit_picker(&mut self, sel: Option<usize>) {
         match sel {
             Some(idx) => {
