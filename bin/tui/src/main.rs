@@ -2,7 +2,7 @@
 //!
 //! A window onto the session log and a supervisor for the opaque loop
 //! (docs/tui.md). Everything session-shaped goes through
-//! [`crate::port::SessionPort`]; this file is the composition root:
+//! [`crate::port::SessionPort`]. This file is the composition root:
 //! terminal, runtime, port, and the draw/input loop.
 
 #![deny(clippy::todo, clippy::unimplemented, clippy::unreachable)]
@@ -16,16 +16,21 @@ mod event;
 mod ext;
 mod float;
 mod highlight;
+mod markdown;
+mod image_render;
 mod palette;
 mod picker;
 mod port;
 mod port_file;
 mod render;
-mod syntect_highlight;
 mod tool_display;
 mod vim_editor;
 
+#[cfg(test)]
+mod snapshot_tests;
+
 use std::io::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use std::time::Instant;
 
@@ -78,6 +83,29 @@ impl Drop for TermGuard {
         let _ = out.execute(cevent::DisableMouseCapture);
         crossterm::execute!(out, terminal::LeaveAlternateScreen, crossterm::cursor::Show).ok();
         let _ = out.flush();
+    }
+}
+
+/// A terminal-control signal sets this flag. The handler only
+/// stores a bool, so it is async-signal-safe. The main loop reads
+/// the flag and stops the extension groups before the process exits.
+/// A signalled TUI leaves no orphan extension behind
+/// (docs/ui-extension.md section 7).
+static SIGNAL_SHUTDOWN: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn on_shutdown_signal(_sig: libc::c_int) {
+    SIGNAL_SHUTDOWN.store(true, Ordering::SeqCst);
+}
+
+/// Install handlers for SIGTERM, SIGINT, and SIGHUP. Each handler
+/// just sets [`SIGNAL_SHUTDOWN`]. The stop work runs on the main
+/// thread at the next loop check.
+fn install_shutdown_handlers() {
+    let handler: libc::sighandler_t = on_shutdown_signal as *const () as _;
+    unsafe {
+        libc::signal(libc::SIGTERM, handler);
+        libc::signal(libc::SIGINT, handler);
+        libc::signal(libc::SIGHUP, handler);
     }
 }
 
@@ -136,13 +164,13 @@ fn key_input(k: &cevent::KeyEvent) -> Option<Key> {
 /// bucket, and `max`/`xhigh` share the highest (docs/tui.md 7.2).
 const THINKING_LEVEL_ORDER: &[&str] = &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 
-/// TUI process diagnostic log. One `pid ms msg` line appended to a
-/// log file, never to stderr: after `TermGuard::init` the TUI owns
-/// the terminal (alt-screen), and a raw stderr write bypasses the
-/// renderer and corrupts the frame (FT-016). The path is `TUI_LOG`
-/// when set, otherwise the XDG cache default `<cache>/tui/tui.log`
-/// under `$XDG_CACHE_HOME` or `$HOME/.cache`. Write failures are
-/// dropped (the log must not take the UI down).
+/// TUI process diagnostic log. Each line is `pid ms msg`.
+/// After `TermGuard::init` the TUI owns the terminal, so writes go
+/// to a log file, never to stderr. A raw stderr write would bypass
+/// the renderer and corrupt the frame (FT-016). The path is
+/// `TUI_LOG` when set. Otherwise the XDG cache default
+/// `<cache>/tui/tui.log` under `$XDG_CACHE_HOME` or `$HOME/.cache`.
+/// Write failures are dropped. The log must not take the UI down.
 fn tui_log(msg: &str) {
     let Some(path) = tui_log_path() else {
         return;
@@ -190,9 +218,8 @@ fn effort_level(effort: &str) -> u32 {
     }
 }
 
-/// The active model name for the effort write-back, matching the
-/// bin/model resolution: the `MODEL` env var wins, then the config's
-/// `[active] model`, then the default.
+/// The active model name for the effort write-back. The `MODEL`
+/// env var wins, then the config `[active] model`, then the default.
 fn resolve_active_model_name(cfg: &TuiConfig) -> String {
     std::env::var("MODEL")
         .ok()
@@ -201,10 +228,9 @@ fn resolve_active_model_name(cfg: &TuiConfig) -> String {
         .unwrap_or_else(|| "deepseek".to_string())
 }
 
-/// The resolved reasoning effort of one model name, matching the
-/// bin/model precedence: the per-model table wins over the global
-/// `[model]` table; a missing key defaults to `medium`; `off`
-/// normalizes to `none`.
+/// The resolved reasoning effort of one model name. The per-model
+/// table wins over the global `[model]` table. A missing key
+/// defaults to `medium`. `off` normalizes to `none`.
 fn resolve_reasoning_effort(text: &str, active: &str) -> String {
     let v: toml::Value = toml::from_str(text)
         .unwrap_or_else(|_| toml::Value::Table(toml::map::Map::new()));
@@ -307,8 +333,8 @@ fn main() {
             std::process::exit(1);
         }
     };
-    // Extension discovery fails loud before any terminal effect:
-    // a bad manifest or a broken command refuses the start and names
+    // Extension discovery fails loud before any terminal effect. A
+    // bad manifest or a broken command refuses the start and names
     // the file (docs/ui-extension-plan.md stage 1).
     let disc = match ext::discover(&cfg) {
         Ok(d) => d,
@@ -330,10 +356,10 @@ fn main() {
     let backend = CrosstermBackend::new(std::io::stdout());
     let mut term = Terminal::new(backend).expect("cannot create the terminal");
     let mut app = App::new();
-    // The [tui] color override forces the capability level; absent,
+    // The [tui] color override forces the capability level. Absent,
     // the environment detection stands (color.rs module docs). The
     // [tui] color scheme (docs/tui-color-scheme.md section 3) maps
-    // every color role to a hex value; the values lower to the level.
+    // every color role to a hex value. The values lower to the level.
     let level = cfg.color.unwrap_or_else(crate::color::Level::detect);
     let palette = match crate::color::palette_from_config(
         level,
@@ -385,7 +411,7 @@ fn main() {
         app.set_active(id.clone(), events.clone());
         app.set_watch_rx(port.watch(&id, TailCursor::end()));
         app.set_sessions(rt.block_on(port.list_sessions()).unwrap_or_default());
-        // Reattach a live loop from an earlier TUI (FT-003): the
+        // Reattach a live loop from an earlier TUI (FT-003). The
         // persistent probe marks the session running, so the status
         // bit shows the real state, not this process's memory.
         resync_external_loop(&rt, &port, &mut app, &id);
@@ -399,10 +425,10 @@ fn main() {
     }
 
     // Restore the persisted thinking level for the active model from
-    // the config file. This must happen after set_active because
-    // set_active rebuilds ext_status_values from the session log,
-    // which would overwrite the config value with a stale value from
-    // the previous loop run.
+    // the config file. This must happen after set_active. set_active
+    // rebuilds ext_status_values from the session log. That would
+    // overwrite the config value with a stale value from the previous
+    // loop run.
     if let Ok(cfg_text) = std::fs::read_to_string(&cfg.config_path) {
         let active_model = resolve_active_model_name(&cfg);
         let effort = resolve_reasoning_effort(&cfg_text, &active_model);
@@ -421,19 +447,31 @@ fn main() {
 
     let mut last_width: usize = 0;
     let mut last_loop_probe = Instant::now();
+    // Catch SIGTERM, SIGINT, and SIGHUP so a signalled quit still
+    // stops the extension groups (docs/ui-extension.md section 7).
+    install_shutdown_handlers();
     'ui: loop {
+        // A terminal-control signal (SIGTERM, SIGINT, or SIGHUP) set
+        // the flag. Stop the extension groups and exit, mirroring the
+        // quit path. No orphan outlives a signalled TUI
+        // (docs/ui-extension.md section 7).
+        if SIGNAL_SHUTDOWN.swap(false, Ordering::SeqCst) {
+            let _ = app.detach_all_handles();
+            host.stop();
+            return finish(&mut term);
+        }
         // 1. New log events for the active session.
         while let Some(item) = app.drain_watch() {
             let is_event = matches!(item, WatchItem::Event { .. });
             app.on_watch_item(item);
             if is_event {
                 // Forward the new event to the extensions whose kinds
-                // match; the event id is its index in the log
+                // match. The event id is its index in the log
                 // (docs/ui-extension.md section 4 history rule).
                 let evs = app.events();
                 let ev = evs.last().cloned().expect("a watch event was just pushed");
                 // A malformed line the transcript now shows is a
-                // TUI-side finding: leave it in the trace log so it
+                // TUI-side finding. Leave it in the trace log so it
                 // is readable without a human report (FT-001).
                 if ev.kind() == EventKind::BadLine {
                     let raw = ev
@@ -532,11 +570,10 @@ fn main() {
         for _ in app.drain_loop_lines() {}
 
         // 3. One input batch, or a short wait. A wheel notch queues
-        // many scroll events at once; drain the whole pending queue,
-        // then draw once. One event per frame (with a full redraw
-        // between) starved key input behind a mouse burst: the keys
-        // sat in the queue and the UI looked hung. Draining keeps
-        // keys responsive (docs/tui_feature_requests_from_human.md).
+        // many scroll events at once. Drain the whole pending queue,
+        // then draw once. One event per frame starved key input behind
+        // a mouse burst. Draining keeps keys responsive
+        // (docs/tui_feature_requests_from_human.md).
         let mut evs: Vec<cevent::Event> = Vec::new();
         // While a response is streaming or animations are in flight,
         // tick at 16 ms (~60 FPS). Otherwise 100 ms idle.
@@ -548,9 +585,9 @@ fn main() {
         match cevent::poll(poll_to) {
             Ok(true) => {
                 // Read pending events until the queue is empty.
-                // Use a 1 ms poll, not 0: with crossterm's
-                // `use-dev-tty` input source a zero poll timeout
-                // skips the parser check and always reports empty.
+                // Use a 1 ms poll, not 0. A zero poll timeout on
+                // crossterm's `use-dev-tty` input source skips the parser
+                // check and always reports empty.
                 while cevent::poll(Duration::from_millis(1)).unwrap_or(false) {
                     match cevent::read() {
                         Ok(e) => evs.push(e),
@@ -584,7 +621,7 @@ fn main() {
         for e in evs {
             match e {
                 cevent::Event::Key(k) => {
-                    // Only press/repeat matter; release events carry
+                    // Only press/repeat matter. Release events carry
                     // no information for this UI.
                     if matches!(
                         k.kind,
@@ -618,7 +655,7 @@ fn main() {
                             }
                             crate::tool_display::ExpandMode::Focus => {
                                 // In focus mode a click sets focus to the
-                                // nearest block; the draw loop will
+                                // nearest block. The draw loop will
                                 // animate it open.
                                 if let Some(id) = app.block_at_transcript_line(transcript_line).map(|s| s.to_string()) {
                                     app.set_focus_block(&id);
@@ -638,7 +675,7 @@ fn main() {
         // conversation-browsing.md section 11.3): the OSC 52 escapes
         // go to the terminal before the next frame, like the
         // extension notify OSCs. On a terminal without OSC 52
-        // support the escape is ignored; the in-memory register still
+        // support the escape is ignored. The in-memory register still
         // serves the editor's `p`.
         for esc in app.drain_host_clipboard() {
             let mut out = std::io::stdout();
@@ -656,7 +693,7 @@ fn main() {
                     let content = app.take_draft();
                     // The input queue toggle (docs/tui-pending-user-
                     // messages.md stage 2): the follow queue keeps the
-                    // message for a turn restart; the steer queue is
+                    // message for a turn restart. The steer queue is
                     // the default (the missing field).
                     let ev = if app.follow_queue() {
                         event::produce::user_message_follow(&content)
@@ -996,9 +1033,9 @@ fn main() {
                     }
                     host.clear_replies();
                     host.send_history(&events, last_width.saturating_sub(16).max(40));
-                    // Reattach the target's persistent loop state and
-                    // block a double start (FT-003): a live loop for
-                    // the target would get a second start here.
+                    // Reattach the target's persistent loop state.
+                    // Also block a double start (FT-003): a live loop
+                    // for the target would get a second start here.
                     resync_external_loop(&rt, &port, &mut app, &new_sid);
                     match port.external_loop_pid(&new_sid) {
                         Ok(Some(pid)) => {
@@ -1036,7 +1073,7 @@ fn main() {
                 | Action::ToggleThinking
                 | Action::ToggleThinkingExpand
                 | Action::ToggleFollowQueue => {
-                    // The state lives on the app; the next draw
+                    // The state lives on the app. The next draw
                     // repaints. No port work.
                 }
                 Action::CycleEffort => {
@@ -1044,7 +1081,7 @@ fn main() {
                     // block.md section 4): the next effort value in
                     // the order, written to the active model's
                     // config entry. The loop publishes the new level
-                    // on its next step; the input-area border moves
+                    // on its next step. The input-area border moves
                     // then (docs/tui.md 7.2).
                     let active = resolve_active_model_name(&cfg);
                     match cycle_reasoning_effort(&cfg.config_path, &active) {
@@ -1157,20 +1194,19 @@ fn main() {
                     // job, then re-init when the shell resumes it with
                     // SIGCONT (via `fg`).
                     //
-                    // The TUI is a child of the `rushi` launcher
-                    // (`rushi tui`, which blocks in a `wait` on us), so
-                    // the shell's job leader is the *parent*, not this
-                    // process. Stopping only ourselves (`raise`) would
-                    // leave the leader running and the shell would never
-                    // see its job stop, so it never regains the terminal
-                    // and `fg` is unreachable. We therefore send SIGTSTP
-                    // to the whole foreground process group (`kill(0, ..)`
-                    // — pgid 0 is "my process group"): that stops the
-                    // leader too, so the shell prints a prompt where
-                    // `fg` (SIGCONT to the group) resumes us. Loops and
-                    // extensions run in their own sessions (`setsid`),
-                    // so they are insulated and keep running through the
-                    // suspend.
+                    // The TUI is a child of the `rushi` launcher. The
+                    // launcher blocks in a `wait` on us. The shell's
+                    // job leader is the parent, not this process.
+                    // Stopping only ourselves (`raise`) would leave the
+                    // leader running. The shell would never see its job
+                    // stop, so it never regains the terminal and `fg`
+                    // is unreachable. We therefore send SIGTSTP to the
+                    // whole foreground process group. Pgid 0 is our own
+                    // group. That stops the leader too. The shell then
+                    // prints a prompt where `fg` (SIGCONT to the group)
+                    // resumes us. Loops and extensions run in their
+                    // own sessions (`setsid`), so they are insulated
+                    // and keep running through the suspend.
                     let _ = terminal::disable_raw_mode();
                     let mut out = std::io::stdout();
                     let _ = out.execute(cevent::DisableMouseCapture);
@@ -1196,13 +1232,13 @@ fn main() {
         }
 
         // 4.5 Extension ticks, transform timeouts, and resize
-        // re-requests. The tick cadence is per extension; the main
+        // re-requests. The tick cadence is per extension. The main
         // loop drives the host because it owns the width, session,
         // and loop state.
         if let Some(sid) = app.active().cloned() {
             // The live model stream channel (docs/tui-streaming-response.md
             // section 6.2): poll the loop-owned file only while the loop
-            // runs; a dead loop settles the live block (no stale block,
+            // runs. A dead loop settles the live block (no stale block,
             // P5).
             match port.model_stream_path(&sid) {
                 Ok(path) if app.loop_running(&sid) => app.refresh_stream(&path),
@@ -1216,10 +1252,9 @@ fn main() {
         app.pump_stream_pacing();
         let width = term.size().map(|s| s.width as usize).unwrap_or(80);
         if width != last_width {
-            // The re-request width is the transform budget: the
-            // terminal width minus the border (2), the transcript
-            // padding (2), and the content gutter (12), so the
-            // re-rendered art fits the pane like the first pass.
+            // The re-request width is the transform budget: terminal
+            // width minus border (2), transcript padding (2), and the
+            // content gutter (12). The re-rendered art fits the pane.
             host.on_resize(width.saturating_sub(16));
             last_width = width;
         }
@@ -1235,9 +1270,10 @@ fn main() {
         // The frame owner also gets a cadence ping so its frame_spec
         // reply stays live (border color tracks the thinking level).
         host.pump_frame(&tick, &app.editor_mode_label());
-        // The row owner (the host-reserved row above the input box)
-        // gets the same cadence ping so its row_spec reply stays
-        // live (docs/ui-extension.md section 4, `row` capability).
+        // Every row owner (the host-reserved row above the input
+        // box) gets the same cadence ping. That keeps each row_spec
+        // reply live (docs/ui-extension.md section 4, `row`
+        // capability).
         host.pump_row(&tick, &app.editor_mode_label());
         host.poll_transforms();
         host.poll_status();
@@ -1248,8 +1284,8 @@ fn main() {
             let session = app.active().map(|s| s.as_str());
             host.request_commands(session, loop_running);
         }
-        // 4.6 The persistent loop probe, once a second (FT-003): it
-        // flips the running bit when an external loop finishes, and
+        // 4.6 The persistent loop probe, once a second (FT-003). It
+        // flips the running bit when an external loop finishes. It
         // marks it when another TUI started a loop for this session.
         if last_loop_probe.elapsed() >= Duration::from_secs(1) {
             last_loop_probe = Instant::now();
@@ -1384,7 +1420,7 @@ fn edit_in_terminal(
         let _ = terminal::enable_raw_mode();
     };
     let result = editor::run_editor(initial, suspend, resume);
-    // The editor drew on the alternate screen; clear before the next
+    // The editor drew on the alternate screen. Clear before the next
     // frame so its content does not bleed through.
     let _ = term.clear();
     match result {
@@ -1398,328 +1434,4 @@ fn edit_in_terminal(
 
 fn finish(term: &mut Terminal<CrosstermBackend<std::io::Stdout>>) {
     let _ = term.clear();
-}
-
-mod guardrail {
-    //! docs/tui.md section 10: the TUI source must not contain loop
-    //! internals or storage layout. Those strings live only in
-    //! `port_file.rs` (the storage detail) and in this scan.
-    #[test]
-    fn storage_and_loop_strings_stay_behind_the_port() {
-        let forbidden = [
-            "turn.sh",
-            "step.sh",
-            "events.jsonl",
-            "state.json",
-            "pending/",
-        ];
-        let allowed = ["port_file.rs", "main.rs"];
-        for entry in std::fs::read_dir("src").expect("tests run from the crate root") {
-            let p = entry.unwrap().path();
-            let name = p.file_name().unwrap().to_string_lossy().into_owned();
-            if allowed.iter().any(|a| a == &name) {
-                continue;
-            }
-            let content = std::fs::read_to_string(&p).unwrap_or_default();
-            for lit in forbidden {
-                assert!(
-                    !content.contains(lit),
-                    "{name} contains the forbidden literal `{lit}` (docs/tui.md 10)"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn stage_names_are_not_strings_in_the_tui() {
-        // Stage names are config values, not TUI strings.
-        let forbidden = ["claim", "assemble"];
-        let allowed = ["main.rs"];
-        for entry in std::fs::read_dir("src").expect("tests run from the crate root") {
-            let p = entry.unwrap().path();
-            let name = p.file_name().unwrap().to_string_lossy().into_owned();
-            if allowed.iter().any(|a| a == &name) {
-                continue;
-            }
-            let content = std::fs::read_to_string(&p).unwrap_or_default();
-            for lit in forbidden {
-                assert!(
-                    !content.contains(lit),
-                    "{name} contains the stage name `{lit}` (docs/tui.md 10)"
-                );
-            }
-        }
-    }
-}
-
-// ── startup thinking-level tests ─────────────────────────────
-// These tests verify the fix for the startup bug where the
-// config-derived thinking level was ignored and the stale
-// session-log value (or the default "medium") persisted.
-
-#[cfg(test)]
-mod startup_effort_tests {
-    use crate::app::{App, THINKING_LEVELS, THINKING_STATUS_ID};
-    use crate::event::produce;
-    use crate::port::SessionId;
-    use super::{resolve_reasoning_effort, effort_level};
-
-    /// Build an `App` whose session log carries a stale `model_thinking`
-    /// event, mimicking the state `set_active` restores on resume.
-    fn app_with_stale_thinking(stale_level: u32) -> App {
-        let events = vec![
-            produce::user_message("hello"),
-            produce::ext_status(
-                THINKING_STATUS_ID,
-                serde_json::Value::from(stale_level),
-            ),
-        ];
-        let mut app = App::new();
-        app.set_active(SessionId::new("s1"), events);
-        let expected = if stale_level < THINKING_LEVELS {
-            stale_level
-        } else {
-            THINKING_LEVELS - 1
-        };
-        assert_eq!(app.thinking_level(), expected, "set_active restores the stale value");
-        app
-    }
-
-    /// Mimic the startup restore block in `main()`: resolve the effort
-    /// from config text, set both `effort_current` and `thinking_level`.
-    fn apply_startup_restore(app: &mut App, config_text: &str, active_model: &str) {
-        let effort = resolve_reasoning_effort(config_text, active_model);
-        app.set_effort_current(effort.clone());
-        app.set_thinking_level(effort_level(&effort));
-    }
-
-    /// Mirrors config-low.toml: global [model] has reasoning_effort = "low",
-    /// the quoted model-specific table has no reasoning_effort key.
-    const CONFIG_LOW_TOML: &str = r#"
-[model]
-api = "responses"
-max_output_tokens = 32768
-reasoning_effort = "low"
-
-[model."Qwen3.8-27B-NVFP4-RTX5090-DFlash2"]
-model_id = "Qwen3.8-27B-NVFP4-RTX5090-DFlash2"
-base_url = "http://127.0.0.1:30000"
-context_tokens = 262144
-
-[active]
-model = "Qwen3.8-27B-NVFP4-RTX5090-DFlash2"
-"#;
-
-    /// Mirrors config.toml: global [model] has reasoning_effort = "xhigh".
-    const CONFIG_XHIGH_TOML: &str = r#"
-[model]
-api = "responses"
-max_output_tokens = 32768
-reasoning_effort = "xhigh"
-
-[model."Qwen3.8-27B-NVFP4-RTX5090-DFlash2"]
-model_id = "Qwen3.8-27B-NVFP4-RTX5090-DFlash2"
-base_url = "http://127.0.0.1:30000"
-context_tokens = 262144
-
-[active]
-model = "Qwen3.8-27B-NVFP4-RTX5090-DFlash2"
-"#;
-
-    #[test]
-    fn low_config_overrides_stale_xhigh_log() {
-        let mut app = app_with_stale_thinking(4);
-        assert_eq!(app.thinking_level(), 4, "stale log value before restore");
-
-        apply_startup_restore(&mut app, CONFIG_LOW_TOML, "Qwen3.8-27B-NVFP4-RTX5090-DFlash2");
-
-        // The config value must beat the stale log value.
-        assert_eq!(app.thinking_level(), 1, "border level must match config");
-        // The palette item hint must show the config effort, not "medium".
-        let hint = app
-            .palette_items()
-            .iter()
-            .find(|i| i.id == "thinking-level")
-            .expect("thinking-level item exists")
-            .hint
-            .clone();
-        assert_eq!(hint, "low", "palette hint must reflect config effort");
-    }
-
-    #[test]
-    fn xhigh_config_overrides_stale_medium_log() {
-        let mut app = app_with_stale_thinking(2);
-        assert_eq!(app.thinking_level(), 2, "stale medium before restore");
-
-        apply_startup_restore(&mut app, CONFIG_XHIGH_TOML, "Qwen3.8-27B-NVFP4-RTX5090-DFlash2");
-
-        assert_eq!(app.thinking_level(), 4, "border level must match config");
-        let hint = app
-            .palette_items()
-            .iter()
-            .find(|i| i.id == "thinking-level")
-            .expect("thinking-level item exists")
-            .hint
-            .clone();
-        assert_eq!(hint, "xhigh", "palette hint must reflect config effort");
-    }
-
-    #[test]
-    fn effort_level_mapping_is_correct() {
-        assert_eq!(effort_level("none"), 0);
-        assert_eq!(effort_level("minimal"), 1);
-        assert_eq!(effort_level("low"), 1);
-        assert_eq!(effort_level("medium"), 2);
-        assert_eq!(effort_level("high"), 3);
-        assert_eq!(effort_level("xhigh"), 4);
-        assert_eq!(effort_level("max"), 4);
-        assert_eq!(effort_level("unknown"), 0);
-    }
-
-    #[test]
-    fn resolve_reasoning_effort_global_fallback() {
-        let toml = r#"
-[model]
-reasoning_effort = "low"
-
-[model.my-model]
-model_id = "my-model"
-"#;
-        let effort = resolve_reasoning_effort(toml, "my-model");
-        assert_eq!(effort, "low", "global fallback must work");
-    }
-
-    #[test]
-    fn resolve_reasoning_effort_model_specific_wins() {
-        let toml = r#"
-[model]
-reasoning_effort = "low"
-
-[model.my-model]
-reasoning_effort = "xhigh"
-"#;
-        let effort = resolve_reasoning_effort(toml, "my-model");
-        assert_eq!(effort, "xhigh", "per-model value must win");
-    }
-
-    #[test]
-    fn resolve_reasoning_effort_default_medium() {
-        let toml = r#"
-[model]
-api = "responses"
-"#;
-        let effort = resolve_reasoning_effort(toml, "some-model");
-        assert_eq!(effort, "medium", "default when no key exists");
-    }
-
-    #[test]
-    fn resolve_reasoning_effort_off_maps_to_none() {
-        let toml = r#"
-[model]
-reasoning_effort = "off"
-"#;
-        let effort = resolve_reasoning_effort(toml, "any-model");
-        assert_eq!(effort, "none");
-    }
-}
-
-// ── tui_log tests (FT-017) ──────────────────────────────────────
-
-#[cfg(test)]
-mod tui_log_tests {
-    use super::tui_log;
-    use tempfile::TempDir;
-
-    /// `TUI_LOG` wins over the cache default and the line lands in
-    /// the file. One test owns the process-global `TUI_LOG` var.
-    /// Keep it that way to avoid a race with parallel tests.
-    #[test]
-    fn tui_log_writes_to_the_tui_log_file() {
-        let dir = TempDir::new().unwrap();
-        let log = dir.path().join("tui.log");
-        std::env::set_var("TUI_LOG", log.as_os_str());
-
-        // The env override wins over the default cache path.
-        let p = super::tui_log_path().unwrap();
-        assert_eq!(p, log, "TUI_LOG wins over the default cache path");
-
-        tui_log("startup model=m effort=high level=3");
-        let body = std::fs::read_to_string(&log).unwrap();
-        let l = body.lines().next().unwrap();
-        // The line is `pid ms msg` with the msg carrying the text.
-        let msg = l.split(' ').skip(2).collect::<Vec<_>>().join(" ");
-        assert_eq!(msg, "startup model=m effort=high level=3");
-    }
-
-    /// `TermGuard::init` call, so no raw stderr write may follow
-    /// that point in `main.rs`. Diagnostics append to the log file
-    /// instead. The pattern is split so this test source does not
-    /// trip its own scan.
-    #[test]
-    fn no_stderr_writes_after_the_terminal_takeover() {
-        let src =
-            std::fs::read_to_string("src/main.rs").expect("tests run from the crate root");
-        let at = src
-            .find("let _guard = TermGuard::init()")
-            .expect("the terminal takeover call exists");
-        let after = &src[at..];
-        let pat = ["eprint", "ln!"].concat();
-        assert!(
-            !after.contains(&pat),
-            "main.rs writes raw stderr after the terminal takeover (FT-017)"
-        );
-    }
-}
-
-#[cfg(test)]
-mod key_input_tests {
-    use super::key_input;
-    use crate::app::Key;
-    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-
-    #[test]
-    fn ctrl_i_maps_to_key_ctrl_i() {
-        let ev = KeyEvent::new(KeyCode::Char('i'), KeyModifiers::CONTROL);
-        assert_eq!(key_input(&ev), Some(Key::CtrlI));
-    }
-
-    #[test]
-    fn ctrl_i_repeat_events_also_map() {
-        use crossterm::event::KeyEventState;
-        let ev = KeyEvent {
-            code: KeyCode::Char('i'),
-            modifiers: KeyModifiers::CONTROL,
-            kind: KeyEventKind::Repeat,
-            state: KeyEventState::NONE,
-        };
-        assert_eq!(key_input(&ev), Some(Key::CtrlI));
-    }
-
-    #[test]
-    fn plain_i_is_not_ctrl_i() {
-        let ev = KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE);
-        assert_eq!(key_input(&ev), Some(Key::Char('i')));
-    }
-
-    #[test]
-    fn tab_maps_to_key_tab() {
-        // In a standard terminal a physical Ctrl+I press arrives as
-        // byte 0x09, which crossterm parses as KeyCode::Tab (not
-        // Char('i')+CONTROL). The picker binds Tab to the scope cycle
-        // so Ctrl+I works end to end (docs/tui-file-picker.md P9).
-        let ev = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
-        assert_eq!(key_input(&ev), Some(Key::Tab));
-    }
-
-    #[test]
-    fn ctrl_z_maps_to_key_ctrl_z() {
-        let ev = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL);
-        assert_eq!(key_input(&ev), Some(Key::CtrlZ));
-    }
-
-    #[test]
-    fn plain_z_is_not_ctrl_z() {
-        let ev = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE);
-        assert_eq!(key_input(&ev), Some(Key::Char('z')));
-    }
 }

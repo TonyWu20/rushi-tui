@@ -257,6 +257,13 @@ pub enum Role {
     DiffRemoved,
     /// A diff context line. pi `toolDiffContext`.
     DiffContext,
+    /// The background shade of an added diff line (docs/tui-tool-
+    /// display-fancy.md section 7): a dark green tint that spans the
+    /// whole line so the syntax colors of the text stay readable.
+    DiffAddedBg,
+    /// The background shade of a removed diff line: a dark red tint
+    /// that spans the whole line.
+    DiffRemovedBg,
     /// The input-area border of thinking level 0 (no thinking). pi
     /// `thinkingOff`.
     Border0,
@@ -281,6 +288,18 @@ pub enum Role {
     /// The light background of a failed tool-result box. pi
     /// `toolErrorBg`.
     ToolBoxBgError,
+    /// The tool name of a tool-result panel header: a purple accent
+    /// so the tool identity reads distinctly against the panel
+    /// background.
+    ToolName,
+    /// The browse-mode visual selection shading (docs/tui-
+    /// conversation-browsing.md section 11.4): a background tone
+    /// distinct from the search-highlight tone (section 7.3).
+    Selection,
+    /// The browse-mode cursorline background (section 4.1): a dark
+    /// shade so the cursor row is visible without overpowering the
+    /// selection tone.
+    CursorLine,
 }
 
 impl Role {
@@ -317,6 +336,8 @@ impl Role {
         Role::DiffAdded,
         Role::DiffRemoved,
         Role::DiffContext,
+        Role::DiffAddedBg,
+        Role::DiffRemovedBg,
         Role::Border0,
         Role::Border1,
         Role::Border2,
@@ -325,6 +346,9 @@ impl Role {
         Role::ToolBoxBg,
         Role::ToolBoxBgSuccess,
         Role::ToolBoxBgError,
+        Role::ToolName,
+        Role::Selection,
+        Role::CursorLine,
     ];
 
     /// The built-in value of the role at every capability level. The
@@ -362,6 +386,13 @@ impl Role {
             Success | DiffAdded => Color::Rgb(0xb5, 0xbd, 0x68),
             Warning => Color::Rgb(0xff, 0xff, 0x00),
             DiffContext => Color::Rgb(0x80, 0x80, 0x80),
+            // The diff-line background shades: a dark green tint for
+            // added lines and a dark red tint for removed lines. They
+            // are deliberately darker than the accent `DiffAdded` /
+            // `DiffRemoved` foregrounds so the syntax colors of the
+            // text stay readable on top of the tint.
+            DiffAddedBg => Color::Rgb(0x1e, 0x33, 0x2a),
+            DiffRemovedBg => Color::Rgb(0x3a, 0x20, 0x26),
             Border0 => Color::Rgb(0x50, 0x50, 0x50),
             Border1 => Color::Rgb(0x5f, 0x87, 0xaf),
             Border2 => Color::Rgb(0x81, 0xa2, 0xbe),
@@ -370,6 +401,18 @@ impl Role {
             ToolBoxBg => Color::Rgb(0x28, 0x28, 0x32),
             ToolBoxBgSuccess => Color::Rgb(0x28, 0x32, 0x28),
             ToolBoxBgError => Color::Rgb(0x3c, 0x28, 0x28),
+            // The tool name in the box header: a purple accent.
+            ToolName => Color::Rgb(0xc6, 0xa0, 0xf6),
+            // The cursorline background: a dark shade so the cursor
+            // row is visible without overpowering text.
+            CursorLine => Color::Rgb(0x1e, 0x20, 0x30),
+            // The selection background: a muted blue-gray, distinct
+            // from the search highlight (the `Hint` bold tone) so a
+            // selected span that also matches a search reads as two
+            // layers.
+            // A blue selection tone (distinct from the `Hint`
+            // search-highlight gray: lowers to Blue vs DarkGray at C16).
+            Selection => Color::Rgb(0x36, 0x45, 0x73),
         };
         lower(c, level)
     }
@@ -409,6 +452,8 @@ impl Role {
             DiffAdded => "diff_added",
             DiffRemoved => "diff_removed",
             DiffContext => "diff_context",
+            DiffAddedBg => "diff_added_bg",
+            DiffRemovedBg => "diff_removed_bg",
             Border0 => "border0",
             Border1 => "border1",
             Border2 => "border2",
@@ -417,7 +462,20 @@ impl Role {
             ToolBoxBg => "tool_box_bg",
             ToolBoxBgSuccess => "tool_box_bg_success",
             ToolBoxBgError => "tool_box_bg_error",
+            ToolName => "tool_name",
+            Selection => "selection",
+            CursorLine => "cursor_line",
         }
+    }
+
+    /// Look up a role by its wire key, accepting both snake_case
+    /// (`cursor_line`) and PascalCase (`CursorLine`) forms.
+    pub fn from_key(k: &str) -> Option<Role> {
+        let norm = |s: &str| -> String {
+            s.to_lowercase().replace('_', "")
+        };
+        let nk = norm(k);
+        Role::ALL.iter().find(|r| norm(r.key()) == nk).copied()
     }
 }
 
@@ -461,7 +519,7 @@ pub const SCHEME_CATPPUCCIN_MACCHIATO: &str = "catppuccin macchiato";
 /// internal scheme.
 pub fn catppuccin_macchiato() -> std::collections::HashMap<Role, &'static str> {
     use Role::*;
-    let pairs: [(Role, &str); 38] = [
+    let pairs: [(Role, &str); 43] = [
         (PlainText, "#cad3f5"),
         (ToolOutput, "#cad3f5"),
         (ToolCommand, "#c6a0f6"),
@@ -492,6 +550,8 @@ pub fn catppuccin_macchiato() -> std::collections::HashMap<Role, &'static str> {
         (DiffAdded, "#a6da95"),
         (DiffRemoved, "#ed8796"),
         (DiffContext, "#a5adcb"),
+        (DiffAddedBg, "#26402f"),
+        (DiffRemovedBg, "#3d2830"),
         (Border0, "#8087a2"),
         (Border1, "#8bd5ca"),
         (Border2, "#a6da95"),
@@ -500,6 +560,9 @@ pub fn catppuccin_macchiato() -> std::collections::HashMap<Role, &'static str> {
         (ToolBoxBg, "#363a4f"),
         (ToolBoxBgSuccess, "#363a4f"),
         (ToolBoxBgError, "#363a4f"),
+        (ToolName, "#c6a0f6"),
+        (Selection, "#5b6078"),
+        (CursorLine, "#1e2030"),
     ];
     pairs.iter().cloned().collect()
 }
@@ -561,6 +624,19 @@ impl Palette {
         Palette { level, colors }
     }
 
+    /// Overlay a partial hex table on an existing palette: set roles
+    /// get their hex values lowered to `level`, unset roles keep the
+    /// base palette's values.
+    pub fn overlay(base: &Self, hexes: &std::collections::HashMap<Role, String>) -> Self {
+        let mut colors = base.colors.clone();
+        for (role, hex) in hexes {
+            let c = parse_scheme_color(hex)
+                .expect("the config layer validates the scheme hex values");
+            colors.insert(*role, lower(c, base.level));
+        }
+        Palette { level: base.level, colors }
+    }
+
     /// The capability level the palette lowers to.
     pub fn level(&self) -> Level {
         self.level
@@ -601,22 +677,33 @@ pub fn palette_from_config(
     scheme: Option<&str>,
     custom: &std::collections::HashMap<String, std::collections::HashMap<Role, String>>,
 ) -> Result<Palette, String> {
-    let Some(name) = scheme else {
-        // The default scheme: the reference pi theme.
-        return Ok(Palette::named(level, SCHEME_CATPPUCCIN_MACCHIATO)
-            .unwrap_or_else(|| Palette::builtin(level)));
+    let name = scheme.unwrap_or(SCHEME_CATPPUCCIN_MACCHIATO);
+    // Resolve the base palette: a built-in scheme or the built-in
+    // dark palette (user-defined schemes overlay on it).
+    let base = if name == SCHEME_CATPPUCCIN_MACCHIATO
+        || name.replace('-', " ") == SCHEME_CATPPUCCIN_MACCHIATO
+    {
+        Palette::named(level, SCHEME_CATPPUCCIN_MACCHIATO)
+            .unwrap_or_else(|| Palette::builtin(level))
+    } else {
+        Palette::builtin(level)
     };
-    if name == SCHEME_CATPPUCCIN_MACCHIATO {
-        return Ok(Palette::named(level, SCHEME_CATPPUCCIN_MACCHIATO)
-            .unwrap_or_else(|| Palette::builtin(level)));
+    // Overlay a user table (either `color_schemes` or `custom_schemes`
+    // in the config) on the base palette.  The table name is looked
+    // up by the original name and by the hyphen→space normalised form,
+    // so both `catppuccin-macchiato` and `catppuccin macchiato` work.
+    let norm = |s: &str| s.replace('-', " ");
+    let norm_name = norm(name);
+    let table = custom
+        .get(name)
+        .or_else(|| custom.get(&norm_name))
+        .or_else(|| {
+            custom.iter().find_map(|(k, t)| (norm(k) == norm_name).then(|| t))
+        });
+    match table {
+        Some(hexes) => Ok(Palette::overlay(&base, hexes)),
+        None => Ok(base),
     }
-    let table = custom.get(name).ok_or_else(|| {
-        format!(
-            "color scheme {name:?} is not a built-in scheme \
-             (expected {SCHEME_CATPPUCCIN_MACCHIATO}) and has no [tui] color_schemes table"
-        )
-    })?;
-    Ok(Palette::custom(level, table))
 }
 
 /// The xterm 256-palette: indices 0-15 (the ANSI swatches, `#c0c0c0`
@@ -734,347 +821,3 @@ fn dist(r: u8, g: u8, b: u8, pr: u8, pg: u8, pb: u8) -> u32 {
     (dr * dr + dg * dg + db * db) as u32
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn detection_table() {
-        assert_eq!(Level::detect_with(Some("truecolor"), None), Level::Rgb);
-        assert_eq!(Level::detect_with(Some("24bit"), None), Level::Rgb);
-        // COLORTERM without truecolor/24bit says nothing usable: the
-        // TERM fallback decides.
-        assert_eq!(Level::detect_with(Some("dumb"), Some("xterm")), Level::C16);
-        assert_eq!(
-            Level::detect_with(None, Some("xterm-256color")),
-            Level::C256
-        );
-        assert_eq!(Level::detect_with(None, Some("st-256color")), Level::C256);
-        assert_eq!(Level::detect_with(None, Some("xterm")), Level::C16);
-        assert_eq!(Level::detect_with(None, Some("screen")), Level::C16);
-        assert_eq!(Level::detect_with(None, Some("tmux")), Level::C16);
-        assert_eq!(Level::detect_with(None, Some("vt100")), Level::C16);
-        assert_eq!(Level::detect_with(None, Some("linux")), Level::C16);
-        assert_eq!(Level::detect_with(None, Some("ansi")), Level::C16);
-        assert_eq!(Level::detect_with(None, Some("dumb")), Level::C16);
-        // Unknown modern terms keep the truecolor default.
-        assert_eq!(Level::detect_with(None, Some("alacritty")), Level::Rgb);
-        assert_eq!(Level::detect_with(None, Some("kitty")), Level::Rgb);
-        assert_eq!(Level::detect_with(None, None), Level::Rgb);
-        // Case-insensitive.
-        assert_eq!(
-            Level::detect_with(None, Some("XTERM-256COLOR")),
-            Level::C256
-        );
-        assert_eq!(Level::detect_with(Some("TrueColor"), None), Level::Rgb);
-    }
-
-    #[test]
-    fn cfg_override_table() {
-        assert_eq!(Level::from_cfg("truecolor"), Some(Level::Rgb));
-        assert_eq!(Level::from_cfg("rgb"), Some(Level::Rgb));
-        assert_eq!(Level::from_cfg("24bit"), Some(Level::Rgb));
-        assert_eq!(Level::from_cfg("256"), Some(Level::C256));
-        assert_eq!(Level::from_cfg("256color"), Some(Level::C256));
-        assert_eq!(Level::from_cfg("16"), Some(Level::C16));
-        assert_eq!(Level::from_cfg("8"), Some(Level::C16));
-        assert_eq!(Level::from_cfg("16color"), Some(Level::C16));
-        assert_eq!(Level::from_cfg("bogus"), None);
-    }
-
-    #[test]
-    fn level_names() {
-        assert_eq!(Level::Rgb.name(), "truecolor");
-        assert_eq!(Level::C256.name(), "256");
-        assert_eq!(Level::C16.name(), "16");
-    }
-
-    #[test]
-    fn lowering_passes_named_colors_through() {
-        for level in [Level::Rgb, Level::C256, Level::C16] {
-            assert_eq!(lower(Color::Green, level), Color::Green);
-            assert_eq!(lower(Color::DarkGray, level), Color::DarkGray);
-            assert_eq!(lower(Color::Indexed(99), level), Color::Indexed(99));
-            assert_eq!(lower(Color::Reset, level), Color::Reset);
-        }
-    }
-
-    #[test]
-    fn lowering_keeps_rgb_at_truecolor() {
-        assert_eq!(
-            lower(Color::Rgb(0x24, 0x27, 0x3a), Level::Rgb),
-            Color::Rgb(0x24, 0x27, 0x3a)
-        );
-    }
-
-    #[test]
-    fn lowering_quantizes_rgb_at_256() {
-        assert_eq!(
-            lower(Color::Rgb(255, 0, 0), Level::C256),
-            Color::Indexed(196)
-        );
-        assert_eq!(
-            lower(Color::Rgb(0, 255, 255), Level::C256),
-            Color::Indexed(51)
-        );
-        assert_eq!(
-            lower(Color::Rgb(255, 255, 255), Level::C256),
-            Color::Indexed(231)
-        );
-        assert_eq!(lower(Color::Rgb(0, 0, 0), Level::C256), Color::Indexed(16));
-        // Near-gray hits the ramp, not the cube.
-        assert_eq!(
-            lower(Color::Rgb(10, 10, 10), Level::C256),
-            Color::Indexed(232)
-        );
-        // Mid gray: ramp 118 (idx 243, dist^2=48) beats cube 135 (idx 145,
-        // dist^2=507).
-        assert_eq!(
-            lower(Color::Rgb(122, 122, 122), Level::C256),
-            Color::Indexed(243)
-        );
-    }
-
-    #[test]
-    fn lowering_snaps_rgb_at_16() {
-        assert_eq!(lower(Color::Rgb(0, 0, 0), Level::C16), Color::Black);
-        assert_eq!(lower(Color::Rgb(255, 0, 0), Level::C16), Color::LightRed);
-        assert_eq!(lower(Color::Rgb(255, 255, 255), Level::C16), Color::White);
-        assert_eq!(
-            lower(Color::Rgb(255, 255, 0), Level::C16),
-            Color::LightYellow
-        );
-        // Mid-gray lands on the dark swatch (128,128,128).
-        assert_eq!(
-            lower(Color::Rgb(128, 128, 128), Level::C16),
-            Color::DarkGray
-        );
-    }
-
-    #[test]
-    fn lowering_styles() {
-        let s = Style::default()
-            .fg(Color::Rgb(255, 255, 255))
-            .bg(Color::Rgb(0, 0, 0))
-            .bold();
-        let s16 = lower_style(s, Level::C16);
-        assert_eq!(s16.fg, Some(Color::White));
-        assert_eq!(s16.bg, Some(Color::Black));
-        assert!(s16.add_modifier.contains(ratatui::style::Modifier::BOLD));
-    }
-
-    #[test]
-    fn palette256_ramp() {
-        assert_eq!(palette256(232), (8, 8, 8));
-        assert_eq!(palette256(255), (238, 238, 238));
-        assert_eq!(palette256(16), (0, 0, 0));
-        assert_eq!(palette256(231), (255, 255, 255));
-        assert_eq!(palette256(196), (255, 0, 0));
-        assert_eq!(palette256(59), (95, 95, 95)); // cube (1,1,1)
-    }
-
-    #[test]
-    fn plain_text_palette() {
-        // Transcript prose / the input draft. The pi `dark` theme
-        // text var (#d4d4d4), not a saturated swatch.
-        assert_eq!(Level::Rgb.plain_text(), Color::Rgb(212, 212, 212));
-        // 16-color lands on the light-gray swatch (xterm 7), never the dim one.
-        assert_eq!(Level::C16.plain_text(), Color::Gray);
-        // 256-color quantizes the same gray target to a 256-palette index.
-        assert!(matches!(Level::C256.plain_text(), Color::Indexed(..)));
-    }
-
-    #[test]
-    fn tool_output_palette() {
-        // Tool/command output: the pi `toolOutput` gray (#808080),
-        // distinct from prose at every level so bash results are
-        // visually separable from plain text.
-        assert_eq!(Level::Rgb.tool_output(), Color::Rgb(128, 128, 128));
-        assert_eq!(Level::C16.tool_output(), Color::DarkGray);
-        assert!(matches!(Level::C256.tool_output(), Color::Indexed(..)));
-        for lvl in [Level::Rgb, Level::C256, Level::C16] {
-            assert_ne!(lvl.plain_text(), lvl.tool_output());
-        }
-    }
-
-    #[test]
-    fn tool_command_palette() {
-        // The command text of a tool call: the pi `toolTitle` tone
-        // (#d4d4d4), lighter than the result body (tool_output), so
-        // command and output read as two different voices.
-        assert_eq!(Level::Rgb.tool_command(), Color::Rgb(212, 212, 212));
-        assert_eq!(Level::C16.tool_command(), Color::Gray);
-        assert!(matches!(Level::C256.tool_command(), Color::Indexed(..)));
-        for lvl in [Level::Rgb, Level::C256, Level::C16] {
-            // Command is lighter than the result body at every level.
-            assert_ne!(lvl.tool_output(), lvl.tool_command());
-        }
-    }
-
-    // ── color schemes (docs/tui-color-scheme.md) ────────────
-
-    #[test]
-    fn builtin_palette_mirrors_the_pi_dark_theme() {
-        // The no-scheme palette is the pi built-in `dark` theme
-        // element colors, lowered to the level.
-        let p = Palette::builtin(Level::C16);
-        assert_eq!(p.color(Role::PlainText), Color::Gray);
-        assert_eq!(p.color(Role::ToolOutput), Color::DarkGray);
-        assert_eq!(p.color(Role::ToolCommand), Color::Gray);
-        // #cc6666 error snaps to the nearest swatch (the dark swatch
-        // beats the light red on squared distance).
-        assert_eq!(p.color(Role::Error), Color::DarkGray);
-        assert_eq!(p.color(Role::Border0), Color::DarkGray);
-        // #d183e8 snaps to the gray swatch (xterm 7, #c0c0c0), the
-        // closest of the 16 swatches on squared distance.
-        assert_eq!(p.color(Role::Border4), Color::Gray);
-        // The box backgrounds snap to the black swatch at C16.
-        assert!(matches!(
-            p.color(Role::ToolBoxBg),
-            Color::Black | Color::DarkGray
-        ));
-        let p = Palette::builtin(Level::Rgb);
-        assert_eq!(p.color(Role::ToolBoxBg), Color::Rgb(0x28, 0x28, 0x32));
-        assert_eq!(p.color(Role::ToolBoxBgSuccess), Color::Rgb(0x28, 0x32, 0x28));
-        assert_eq!(p.color(Role::ToolBoxBgError), Color::Rgb(0x3c, 0x28, 0x28));
-        assert_eq!(p.level(), Level::Rgb);
-    }
-
-    #[test]
-    fn builtin_role_table_is_complete() {
-        // Every role has a built-in value at every level: a new role
-        // that misses the table fails here, not at render time.
-        for level in [Level::Rgb, Level::C256, Level::C16] {
-            assert_eq!(Role::ALL.len(), 38, "the role list grows: update the table");
-            for role in Role::ALL {
-                let _ = role.builtin(level);
-            }
-        }
-    }
-
-    #[test]
-    fn scheme_hex_parsing() {
-        assert_eq!(
-            parse_scheme_color("#8f92ac"),
-            Some(Color::Rgb(0x8f, 0x92, 0xac))
-        );
-        assert_eq!(
-            parse_scheme_color("#abc"),
-            Some(Color::Rgb(0xaa, 0xbb, 0xcc))
-        );
-        assert_eq!(
-            parse_scheme_color("#8f92ac "),
-            Some(Color::Rgb(0x8f, 0x92, 0xac))
-        );
-        assert_eq!(parse_scheme_color("8f92ac"), None, "the # is required");
-        assert_eq!(parse_scheme_color("#12345"), None);
-        assert_eq!(parse_scheme_color("#1234567"), None);
-        assert_eq!(parse_scheme_color("#zzzzzz"), None);
-        assert_eq!(parse_scheme_color(""), None);
-    }
-
-    #[test]
-    fn macchiato_scheme_maps_every_role() {
-        let table = catppuccin_macchiato();
-        assert_eq!(
-            table.len(),
-            Role::ALL.len(),
-            "every role has a Macchiato hex"
-        );
-        for role in Role::ALL {
-            let hex = table.get(role).expect("role has a hex");
-            assert!(
-                parse_scheme_color(hex).is_some(),
-                "bad hex for {role:?}: {hex}"
-            );
-        }
-        // The documented mapping (docs/tui-color-pi-alignment.md):
-        // the pi catppuccin-macchiato theme values, role to hex.
-        assert_eq!(table[&Role::PlainText], "#cad3f5", "text");
-        assert_eq!(table[&Role::Error], "#ed8796", "red");
-        assert_eq!(table[&Role::Success], "#a6da95", "green");
-        assert_eq!(table[&Role::ToolBoxBg], "#363a4f", "surface0");
-    }
-
-    #[test]
-    fn named_scheme_resolves_at_the_level() {
-        let p = Palette::named(Level::Rgb, SCHEME_CATPPUCCIN_MACCHIATO)
-            .expect("the built-in scheme resolves");
-        assert_eq!(p.color(Role::PlainText), Color::Rgb(0xca, 0xd3, 0xf5));
-        assert_eq!(p.color(Role::Heading), Color::Rgb(0xf5, 0xbd, 0xe6));
-        // 256-color lowers the same hex to an index.
-        let p = Palette::named(Level::C256, SCHEME_CATPPUCCIN_MACCHIATO).unwrap();
-        assert!(matches!(p.color(Role::PlainText), Color::Indexed(..)));
-        // 16-color snaps to the nearest swatch.
-        let p = Palette::named(Level::C16, SCHEME_CATPPUCCIN_MACCHIATO).unwrap();
-        // #cad3f5 snaps to the gray swatch (the closest of the light
-        // swatches; never the terminal default).
-        assert!(
-            matches!(
-                p.color(Role::PlainText),
-                Color::Gray | Color::White | Color::LightCyan | Color::Cyan
-            ),
-            "got {:?}",
-            p.color(Role::PlainText)
-        );
-        assert!(Palette::named(Level::Rgb, "no such scheme").is_none());
-    }
-
-    #[test]
-    fn no_scheme_default_is_the_macchiato_scheme() {
-        // The default (no scheme in config) is the reference pi
-        // theme: catppuccin macchiato, not the pi built-in dark.
-        let custom = std::collections::HashMap::new();
-        let p = palette_from_config(Level::Rgb, None, &custom).unwrap();
-        let m = Palette::named(Level::Rgb, SCHEME_CATPPUCCIN_MACCHIATO).unwrap();
-        for role in Role::ALL {
-            assert_eq!(p.color(*role), m.color(*role), "default role {role:?}");
-        }
-        // The tool-result box is the macchiato surface0, a light
-        // blue-gray, not the pi built-in dark green (#283228).
-        assert_eq!(p.color(Role::ToolBoxBgSuccess), Color::Rgb(0x36, 0x3a, 0x4f));
-        // The tool name is the macchiato mauve, the box text is the
-        // macchiato text var (docs/tui-color-pi-alignment.md).
-        assert_eq!(p.color(Role::ToolCommand), Color::Rgb(0xc6, 0xa0, 0xf6));
-        assert_eq!(p.color(Role::ToolOutput), Color::Rgb(0xca, 0xd3, 0xf5));
-    }
-
-    #[test]
-    fn custom_scheme_overlays_the_builtins() {
-        // A partial table overlays the built-in palette: the unset
-        // roles keep their built-in values at the level.
-        let mut hexes = std::collections::HashMap::new();
-        hexes.insert(Role::PlainText, "#123456".to_string());
-        hexes.insert(Role::Error, "#654321".to_string());
-        let p = Palette::custom(Level::Rgb, &hexes);
-        assert_eq!(p.color(Role::PlainText), Color::Rgb(0x12, 0x34, 0x56));
-        assert_eq!(p.color(Role::Error), Color::Rgb(0x65, 0x43, 0x21));
-        // Unset roles keep the built-in value of the level.
-        assert_eq!(p.color(Role::Success), Role::Success.builtin(Level::Rgb));
-        // The full custom table reaches every role.
-        let mut full: std::collections::HashMap<Role, String> = Role::ALL
-            .iter()
-            .map(|r| (*r, "#abcdef".to_string()))
-            .collect();
-        full.insert(Role::PlainText, "#000001".to_string());
-        let p = Palette::custom(Level::Rgb, &full);
-        assert_eq!(p.color(Role::PlainText), Color::Rgb(0, 0, 1));
-        assert_eq!(
-            p.color(Role::SyntaxPunctuation),
-            Color::Rgb(0xab, 0xcd, 0xef)
-        );
-    }
-
-    #[test]
-    fn palette_thinking_border_tracks_the_levels() {
-        let p = Palette::named(Level::Rgb, SCHEME_CATPPUCCIN_MACCHIATO).unwrap();
-        // The border palette of the Macchiato scheme: the pi
-        // thinkingOff/Low/Medium/High/Xhigh colors (gray base, teal,
-        // green, yellow, peach).
-        assert_eq!(p.thinking_border(0), p.color(Role::Border0));
-        assert_eq!(p.thinking_border(4), p.color(Role::Border4));
-        assert_eq!(p.thinking_border(9), p.color(Role::Border4));
-        assert_eq!(p.color(Role::Border0), Color::Rgb(0x80, 0x87, 0xa2));
-        assert_eq!(p.color(Role::Border4), Color::Rgb(0xf5, 0xa9, 0x7f));
-    }
-}

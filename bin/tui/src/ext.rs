@@ -255,11 +255,14 @@ pub struct Discovery {
     /// the input-area rendering (border style, border color, the
     /// label); one owner across the whole sequence, like `status`.
     pub frame_owner: Option<usize>,
-    /// The single `row` owner index, if one exists. The row owner
-    /// owns the host-reserved content row above the input box
-    /// (between the working row and the input area); one owner
-    /// across the whole sequence, like `status` and `frame`.
-    pub row_owner: Option<usize>,
+    /// All `row` owner indices, in sequence order. The row slot
+    /// allows several owners, unlike `status` and `frame` (one
+    /// surface, one owner). The reserved content row above the
+    /// input box is a composition surface. Every owner's live
+    /// `row_spec` lines stack in sequence order, one layout cell
+    /// per line. An owner with no content contributes nothing.
+    /// When every owner is empty, the slot collapses to zero rows.
+    pub row_owners: Vec<usize>,
 }
 
 impl Discovery {
@@ -271,13 +274,29 @@ impl Discovery {
 /// Scan the global dir, then the project dir (docs/ui-extension.md
 /// sections 3 and 6). A malformed manifest or a broken command
 /// refuses the start and names the file.
+///
+/// `cfg.ext_dirs` may list several global directories; they are
+/// scanned in order and later directories override earlier ones by
+/// extension name. An entry is either an extension directory that
+/// holds its own `ext.toml` or a layer directory holding one
+/// `<name>/ext.toml` subdir per extension (see [`load_layer`]). An
+/// empty list falls back to the built-in default
+/// `<config_dir>/ui_extensions`.
 pub fn discover(cfg: &TuiConfig) -> Result<Discovery, ExtError> {
-    let global_dir = cfg
-        .ext_dir
-        .clone()
-        .unwrap_or_else(|| cfg.config_dir.join("ui_extensions"));
+    let global_dirs: Vec<PathBuf> = if cfg.ext_dirs.is_empty() {
+        vec![cfg.config_dir.join("ui_extensions")]
+    } else {
+        cfg.ext_dirs.clone()
+    };
     let project_dir = cfg.config_dir.join(".pi").join("ui_extensions");
-    let mut globals = load_layer(&global_dir, Layer::Global)?;
+    let mut globals: Vec<LoadedExt> = Vec::new();
+    for dir in &global_dirs {
+        let layer = load_layer(dir, Layer::Global)?;
+        let layer_names: std::collections::HashSet<&str> =
+            layer.iter().map(|e| e.manifest.name.as_str()).collect();
+        globals.retain(|e| !layer_names.contains(e.manifest.name.as_str()));
+        globals.extend(layer);
+    }
     let mut projects = load_layer(&project_dir, Layer::Project)?;
     let project_names: std::collections::HashSet<&str> =
         projects.iter().map(|e| e.manifest.name.as_str()).collect();
@@ -326,26 +345,13 @@ pub fn discover(cfg: &TuiConfig) -> Result<Discovery, ExtError> {
     }
     let frame_owner = frames.into_iter().next();
 
-    // The row slot allows one owner across the whole sequence, like
-    // the status and frame slots: one surface (the host-reserved
-    // content row above the input box), one owner.
-    let rows: Vec<usize> = (0..exts.len())
+    // The row slot allows several owners, unlike the status and
+    // frame slots (one surface, one owner). The reserved content
+    // row above the input box composes the owners' live lines in
+    // sequence order, one layout cell per line.
+    let row_owners: Vec<usize> = (0..exts.len())
         .filter(|&i| exts[i].manifest.caps.iter().any(|c| c == "row"))
         .collect();
-    if rows.len() > 1 {
-        let names = rows
-            .iter()
-            .map(|&i| exts[i].manifest.manifest_path.display().to_string())
-            .collect::<Vec<_>>()
-            .join(" and ");
-        return Err(ExtError {
-            message: format!(
-                "two or more extensions own the `row` slot: {names}. \
-                 The host allows one owner across the whole sequence."
-            ),
-        });
-    }
-    let row_owner = rows.into_iter().next();
 
     let mut kind_owners = HashMap::new();
     let mut transform_owners = HashMap::new();
@@ -367,7 +373,7 @@ pub fn discover(cfg: &TuiConfig) -> Result<Discovery, ExtError> {
         exts,
         status_owner,
         frame_owner,
-        row_owner,
+        row_owners,
         kind_owners,
         transform_owners,
         index_by_name,
@@ -376,7 +382,22 @@ pub fn discover(cfg: &TuiConfig) -> Result<Discovery, ExtError> {
 
 /// Load one layer directory. A missing directory is an empty layer.
 /// An entry directory without an `ext.toml` refuses the start.
+///
+/// Two layouts are accepted. An entry that is itself an extension dir
+/// (holds `ext.toml` directly, e.g. a crate dir such as
+/// `ext-rs/statusline-rs`) loads as a single extension. An entry that
+/// is a layer dir holds one `<name>/ext.toml` subdir per extension
+/// (the `ui_extensions/` layout); each subdir must have its own
+/// `ext.toml` or loading fails. The self-manifest check runs first; when
+/// both a top-level `ext.toml` and subdirectory manifests exist, only the
+/// top-level one loads.
 fn load_layer(dir: &Path, layer: Layer) -> Result<Vec<LoadedExt>, ExtError> {
+    if dir.join("ext.toml").is_file() {
+        return Ok(vec![LoadedExt {
+            manifest: load_manifest(dir)?,
+            layer,
+        }]);
+    }
     let read = match std::fs::read_dir(dir) {
         Ok(r) => r,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -1314,7 +1335,7 @@ impl ExtHost {
 
     /// Forward one new log event to the extensions whose `kinds`
     /// list matches (an empty list means all).
-    pub fn forward_event(&self, id: u64, e: &Event) {
+    pub fn forward_event(&self, id: u64, e: &Event, width: usize) {
         let Some(obj) = e.obj() else {
             return;
         };
@@ -1333,7 +1354,7 @@ impl ExtHost {
                     continue;
                 }
             }
-            self.send_op(i, &json!({ "v": 1, "op": "event", "id": id, "event": obj }));
+            self.send_op(i, &json!({ "v": 1, "op": "event", "id": id, "event": obj, "width": width }));
         }
     }
 
@@ -1342,7 +1363,7 @@ impl ExtHost {
     /// transcript for their kinds. Status extensions see every
     /// `assistant_message` that carries `usage`, uncapped, so
     /// cumulative stats survive a restart from the log alone.
-    pub fn send_history(&self, events: &[Event]) {
+    pub fn send_history(&self, events: &[Event], width: usize) {
         let cap = crate::render::TRANSCRIPT_EVENT_CAP;
         let base = events.len().saturating_sub(cap);
         for (i, s) in self.inner.slots.iter().enumerate() {
@@ -1351,12 +1372,6 @@ impl ExtHost {
             }
             let m = s.manifest.clone();
             if m.caps.iter().any(|c| c == "status") {
-                // The re-send set (docs/auto-compact-plan.md
-                // section 4.6): every usage-bearing assistant
-                // message, plus the compaction markers that carry
-                // the summary call's usage. The summary usage joins
-                // the cumulative totals; the marker without a usage
-                // object is not resent.
                 for (gi, e) in events.iter().enumerate() {
                     let is_usage_msg =
                         e.kind() == EventKind::AssistantMessage && e.get("usage").is_some();
@@ -1366,7 +1381,7 @@ impl ExtHost {
                         if let Some(obj) = e.obj() {
                             self.send_op(
                                 i,
-                                &json!({ "v": 1, "op": "event", "id": gi as u64, "event": obj }),
+                                &json!({ "v": 1, "op": "event", "id": gi as u64, "event": obj, "width": width }),
                             );
                         }
                     }
@@ -1387,7 +1402,7 @@ impl ExtHost {
                     if let Some(obj) = e.obj() {
                         self.send_op(
                             i,
-                            &json!({ "v": 1, "op": "event", "id": gi as u64, "event": obj }),
+                            &json!({ "v": 1, "op": "event", "id": gi as u64, "event": obj, "width": width }),
                         );
                     }
                 }
@@ -1489,47 +1504,47 @@ impl ExtHost {
         self.send_op(i, &obj);
     }
 
-    /// Send a `row` op to the row owner on its tick cadence. The row
-    /// extension replies `row_spec` with the content of the
-    /// host-reserved row above the input box (between the working
-    /// row and the input area): the goal extension uses it for the
-    /// goal status line and the armed hint. A missing or dead owner
-    /// sends nothing; the row shows nothing (the bare TUI has no
-    /// row, docs/ui-extension.md section 4).
+    /// Send a `row` op to every row owner on its tick cadence. Each
+    /// owner replies `row_spec` with the content of its share of
+    /// the host-reserved row above the input box. A skipped or dead
+    /// owner contributes nothing. With no row owners the bare TUI
+    /// shows no row (docs/ui-extension.md section 4).
     pub fn pump_row(&self, p: &TickPayload, mode: &str) {
-        let Some(i) = self.disc.row_owner else {
-            return;
-        };
-        let s = &self.inner.slots[i];
-        if *s.state.lock().unwrap() == SlotState::Skipped {
-            return;
-        }
-        let now = Instant::now();
-        let seq = {
-            let mut t = s.row_tick.lock().unwrap();
-            if now < t.next_at {
-                return;
+        for &i in &self.disc.row_owners {
+            let s = &self.inner.slots[i];
+            if *s.state.lock().unwrap() == SlotState::Skipped {
+                continue;
             }
-            t.seq += 1;
-            t.next_at = now + Duration::from_millis(s.manifest.tick_ms);
-            t.seq
-        };
-        let mut obj = json!({
-            "v": 1,
-            "op": "row",
-            "seq": seq,
-            "width": p.width,
-            "thinking": p.thinking,
-            "mode": mode,
-            "loop_running": p.loop_running,
-        });
-        if let Some(ses) = p.session {
-            obj["session"] = json!(ses);
+            let now = Instant::now();
+            let Some(seq) = ({
+                let mut t = s.row_tick.lock().unwrap();
+                if now < t.next_at {
+                    None
+                } else {
+                    t.seq += 1;
+                    t.next_at = now + Duration::from_millis(s.manifest.tick_ms);
+                    Some(t.seq)
+                }
+            }) else {
+                continue;
+            };
+            let mut obj = json!({
+                "v": 1,
+                "op": "row",
+                "seq": seq,
+                "width": p.width,
+                "thinking": p.thinking,
+                "mode": mode,
+                "loop_running": p.loop_running,
+            });
+            if let Some(ses) = p.session {
+                obj["session"] = json!(ses);
+            }
+            if let Some(m) = p.model {
+                obj["model"] = json!(m);
+            }
+            self.send_op(i, &obj);
         }
-        if let Some(m) = p.model {
-            obj["model"] = json!(m);
-        }
-        self.send_op(i, &obj);
     }
 
     /// Mark a status extension stale: no valid `status` reply for
@@ -1926,25 +1941,40 @@ impl ExtHost {
         s.last_frame.lock().unwrap().clone()
     }
 
-    /// The host-reserved row content above the input box (the `row`
-    /// owner's last valid `row_spec` reply, docs/ui-extension.md
-    /// section 4). `None` when no row extension is installed, when
-    /// its reply is still missing, or when it died: the row is
-    /// transient content, so a dead or absent owner clears it —
-    /// unlike `status`, which keeps its last valid row with a dead
-    /// hint. An empty `lines` array is a live "no row" from the
-    /// owner (the goal extension hides the row when no goal is open
-    /// and nothing is armed).
+    /// The host-reserved row content above the input box. It stacks
+    /// the live owners' last valid `row_spec` replies in sequence
+    /// order (docs/ui-extension.md section 4). Each live owner
+    /// reserves its slot. Owners with content show that content.
+    /// Owners with no content pin one blank row in their slot.
+    /// Siblings never shift position. An owner that hides and later
+    /// reappears returns to its own slot. A dead or skipped owner
+    /// holds no slot for this session. `None` when no owner is
+    /// live.
     pub fn row_spec(&self) -> Option<Vec<ExtLine>> {
-        let i = self.disc.row_owner?;
-        let s = &self.inner.slots[i];
-        if !matches!(
-            *s.state.lock().unwrap(),
-            SlotState::Running | SlotState::Restarting
-        ) {
-            return None;
+        let mut stacked: Vec<ExtLine> = Vec::new();
+        for &i in &self.disc.row_owners {
+            let s = &self.inner.slots[i];
+            if !matches!(
+                *s.state.lock().unwrap(),
+                SlotState::Running | SlotState::Restarting
+            ) {
+                continue;
+            }
+            let lines = s.last_row.lock().unwrap().clone().unwrap_or_default();
+            if lines.is_empty() {
+                // Reserve this owner's slot with one blank row. Its
+                // position stays pinned and siblings never shift
+                // into it.
+                stacked.push(ExtLine::plain(""));
+            } else {
+                stacked.extend(lines);
+            }
         }
-        s.last_row.lock().unwrap().clone()
+        if stacked.is_empty() {
+            None
+        } else {
+            Some(stacked)
+        }
     }
 
     /// The statusline row content (docs/ui-extension-plan stage 1
@@ -2555,8 +2585,21 @@ fn spawn_gen(
                     let _ = libc::dup2(devnull, 2);
                     let _ = libc::close(devnull);
                 }
-                for fd in [in_pipe[0], in_pipe[1], out_pipe[0], out_pipe[1]] {
-                    let _ = libc::close(fd);
+                // Close every inherited fd >= 3. The fork copied the whole
+                // host fd table, which includes the pipe fds the host
+                // holds for previously-spawned extensions. Leaving those
+                // open keeps each sibling's stdin pipe (and stdout pipe)
+                // alive after the host dies, so no extension ever sees
+                // EOF on its stdin and none can self-terminate. Closing
+                // them here makes every extension self-terminate when its
+                // host exits (docs/ui-extension.md section 7). The loop
+                // is libc-only: no heap, no locks (a post-fork allocation
+                // could deadlock on a copied futex).
+                let max_fd = libc::sysconf(libc::_SC_OPEN_MAX);
+                if max_fd > 0 {
+                    for fd in 3..max_fd {
+                        let _ = libc::close(fd as libc::c_int);
+                    }
                 }
                 let _ = libc::chdir(cwd_c.as_ptr());
                 libc::setenv(c"CONFIG".as_ptr(), config_c.as_ptr(), 1);
@@ -2739,12 +2782,13 @@ mod tests {
 
     fn cfg_for(root: &Path) -> TuiConfig {
         TuiConfig {
+            clipboard_unnamed: false,
             sessions_root: root.join("sessions"),
             schemas_dir: None,
             loop_cmd: None,
             config_dir: root.to_path_buf(),
             config_path: root.join("config.toml"),
-            ext_dir: None,
+            ext_dirs: Vec::new(),
             active_model: None,
             color: None,
             color_scheme: None,
@@ -2942,7 +2986,7 @@ protocol_v = 1
         write_ext(&project, "alpha", "[ext]\ncommand = \"bash\"\ncaps = [\"status\"]\nkinds = [\"tool_result\"]\nprotocol_v = 1\n");
 
         let mut cfg = cfg_for(dir.path());
-        cfg.ext_dir = Some(global.clone());
+        cfg.ext_dirs = vec![global.clone()];
         let d = discover(&cfg).unwrap();
         // Global layer first (alpha replaced by the project entry, so
         // only beta remains), then the project layer.
@@ -2963,6 +3007,61 @@ protocol_v = 1
     }
 
     #[test]
+    fn discovery_scans_multiple_global_dirs_later_overrides_earlier() {
+        let dir = TempDir::new().unwrap();
+        let global_a = dir.path().join("exts-a");
+        let global_b = dir.path().join("exts-b");
+        // First global dir has `shared` and `only_a`.
+        write_ext(
+            &global_a,
+            "shared",
+            "[ext]\ncommand = \"bash\"\nprotocol_v = 1\n",
+        );
+        write_ext(
+            &global_a,
+            "only_a",
+            "[ext]\ncommand = \"bash\"\nprotocol_v = 1\n",
+        );
+        // Second global dir has `shared` (override) and `only_b`.
+        write_ext(
+            &global_b,
+            "shared",
+            "[ext]\ncommand = \"bash\"\nkinds = [\"tool_result\"]\nprotocol_v = 1\n",
+        );
+        write_ext(
+            &global_b,
+            "only_b",
+            "[ext]\ncommand = \"bash\"\nprotocol_v = 1\n",
+        );
+
+        let mut cfg = cfg_for(dir.path());
+        cfg.ext_dirs = vec![global_a.clone(), global_b.clone()];
+        let d = discover(&cfg).unwrap();
+
+        // `only_a` from the first dir survives; `shared` is the later
+        // (second-dir) entry; `only_b` from the second dir is present.
+        let names: Vec<String> = d
+            .exts
+            .iter()
+            .map(|e| e.manifest.name.clone())
+            .collect();
+        assert!(names.contains(&"only_a".to_string()), "{names:?}");
+        assert!(names.contains(&"only_b".to_string()), "{names:?}");
+        assert_eq!(
+            d.index_by_name["shared"],
+            d.exts
+                .iter()
+                .position(|e| e.manifest.name == "shared")
+                .expect("shared present"),
+            "shared is a single entry (later dir wins)"
+        );
+        // The surviving `shared` entry comes from the later directory.
+        let shared = &d.exts[d.index_by_name["shared"]];
+        assert!(shared.manifest.manifest_path.starts_with(&global_b), "later dir wins");
+        assert_eq!(d.kind_owners.get(&EventKind::ToolResult), Some(&d.index_by_name["shared"]));
+    }
+
+    #[test]
     fn discovery_kind_owner_is_first_in_sequence() {
         let dir = TempDir::new().unwrap();
         let global = dir.path().join("ui_extensions");
@@ -2977,7 +3076,7 @@ protocol_v = 1
             "[ext]\ncommand = \"bash\"\nkinds = [\"tool_result\", \"error\"]\nprotocol_v = 1\n",
         );
         let mut cfg = cfg_for(dir.path());
-        cfg.ext_dir = Some(global);
+        cfg.ext_dirs = vec![global];
         let d = discover(&cfg).unwrap();
         assert_eq!(
             d.kind_owners.get(&EventKind::ToolResult),
@@ -2988,12 +3087,49 @@ protocol_v = 1
     }
 
     #[test]
+    fn discovery_self_manifest_dir_is_single_ext() {
+        let dir = TempDir::new().unwrap();
+        let self_dir = dir.path().join("statusline-rs");
+        std::fs::create_dir_all(&self_dir).unwrap();
+        std::fs::write(
+            self_dir.join("ext.toml"),
+            "[ext]\ncommand = \"bash\"\nprotocol_v = 1\n",
+        )
+        .unwrap();
+        // A subdirectory without a manifest must not cause a hard error
+        // when the parent dir holds its own ext.toml (self-manifest wins).
+        std::fs::create_dir_all(self_dir.join("src")).unwrap();
+
+        let mut cfg = cfg_for(dir.path());
+        cfg.ext_dirs = vec![self_dir.clone()];
+        let d = discover(&cfg).unwrap();
+        assert_eq!(d.exts.len(), 1, "self-manifest dir loads as one ext");
+        assert_eq!(d.exts[0].manifest.name, "statusline-rs");
+        assert_eq!(d.exts[0].manifest.manifest_path, self_dir.join("ext.toml"));
+    }
+
+    #[test]
+    fn discovery_self_manifest_dir_empty_dir_is_empty_layer() {
+        let dir = TempDir::new().unwrap();
+        let empty = dir.path().join("empty-ext");
+        std::fs::create_dir_all(&empty).unwrap();
+
+        let mut cfg = cfg_for(dir.path());
+        cfg.ext_dirs = vec![empty.clone()];
+        let d = discover(&cfg).unwrap();
+        assert!(
+            d.exts.is_empty(),
+            "dir without ext.toml and without subdirs is an empty layer"
+        );
+    }
+
+    #[test]
     fn discovery_entry_without_manifest_refuses() {
         let dir = TempDir::new().unwrap();
         let global = dir.path().join("ui_extensions");
         std::fs::create_dir_all(global.join("empty-entry")).unwrap();
         let mut cfg = cfg_for(dir.path());
-        cfg.ext_dir = Some(global.clone());
+        cfg.ext_dirs = vec![global.clone()];
         let err = discover(&cfg).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("empty-entry"), "{msg}");
@@ -3015,7 +3151,7 @@ protocol_v = 1
             "[ext]\ncommand = \"bash\"\ncaps = [\"status\"]\nprotocol_v = 1\n",
         );
         let mut cfg = cfg_for(dir.path());
-        cfg.ext_dir = Some(global);
+        cfg.ext_dirs = vec![global];
         let err = discover(&cfg).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("s1/ext.toml"), "{msg}");
@@ -3034,7 +3170,7 @@ protocol_v = 1
             "[ext]\ncommand = \"bash\"\ncaps = [\"frame\"]\nprotocol_v = 1\n",
         );
         let mut cfg = cfg_for(dir.path());
-        cfg.ext_dir = Some(global.clone());
+        cfg.ext_dirs = vec![global.clone()];
         let disc = discover(&cfg).unwrap();
         assert_eq!(disc.frame_owner, Some(0), "a single frame owner resolves");
         // A second frame owner refuses the start, like the status row.
@@ -3052,7 +3188,7 @@ protocol_v = 1
     // ── row capability ─────────────────────────────────────────
 
     #[test]
-    fn discovery_row_owner_resolves_and_conflict_refuses() {
+    fn discovery_row_owners_stack_in_sequence() {
         let dir = TempDir::new().unwrap();
         let global = dir.path().join("ui_extensions");
         write_ext(
@@ -3060,20 +3196,74 @@ protocol_v = 1
             "r1",
             "[ext]\ncommand = \"bash\"\ncaps = [\"row\"]\nprotocol_v = 1\n",
         );
-        let mut cfg = cfg_for(dir.path());
-        cfg.ext_dir = Some(global.clone());
-        let disc = discover(&cfg).unwrap();
-        assert_eq!(disc.row_owner, Some(0), "a single row owner resolves");
-        // A second row owner refuses the start, like the status row.
         write_ext(
             &global,
             "r2",
             "[ext]\ncommand = \"bash\"\ncaps = [\"row\"]\nprotocol_v = 1\n",
         );
-        let err = discover(&cfg).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("r1/ext.toml"), "{msg}");
-        assert!(msg.contains("r2/ext.toml"), "{msg}");
+        let mut cfg = cfg_for(dir.path());
+        cfg.ext_dirs = vec![global.clone()];
+        // Two row owners are allowed. They keep sequence order
+        // instead of refusing the start (docs/ui-extension.md P8).
+        let disc = discover(&cfg).unwrap();
+        assert_eq!(
+            disc.row_owners,
+            vec![0, 1],
+            "two row owners keep their sequence order"
+        );
+    }
+
+    #[test]
+    fn row_owner_reserves_its_slot_when_hidden() {
+        // Two row owners: `ra` emits a content row on the row tick,
+        // `rb` never replies (hidden by design). Both stay live, so
+        // each reserves a slot: `ra` shows its line, `rb` a blank
+        // row, in sequence order. A hidden owner never yields its
+        // slot to a sibling (docs/ui-extension.md section 4).
+        let tmp = TempDir::new().unwrap();
+        let host = host_with_two(
+            &tmp,
+            "ra",
+            "[ext]\ncommand = \"bash\"\nargs = [\"ra.sh\"]\ncaps = [\"row\"]\ntick_ms = 100\nprotocol_v = 1\n",
+            r#"while IFS= read -r line; do
+  case "$line" in
+    *'"op":"row"'*)
+      printf '{"v":1,"op":"row_spec","lines":[["goal line",{"bold":true}]]}\n'
+      ;;
+  esac
+done
+"#,
+            "rb",
+            "[ext]\ncommand = \"bash\"\nargs = [\"rb.sh\"]\ncaps = [\"row\"]\ntick_ms = 100\nprotocol_v = 1\n",
+            "#!/usr/bin/env bash\nwhile IFS= read -r _; do :; done\n",
+        );
+        host.start();
+        let statuses = HashMap::new();
+        let deadline = Instant::now() + Duration::from_secs(6);
+        loop {
+            let p = TickPayload {
+                width: 80,
+                session: Some("s1"),
+                model: Some("m"),
+                thinking: 0,
+                loop_running: false,
+                statuses: &statuses,
+            };
+            host.pump_row(&p, "compose");
+            if let Some(lines) = host.row_spec() {
+                if lines.len() == 2 && !lines[0].text.is_empty() {
+                    break;
+                }
+            }
+            if Instant::now() >= deadline {
+                panic!("row_spec never filled both slots: {:?}", host.row_spec());
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let lines = host.row_spec().unwrap();
+        assert_eq!(lines.len(), 2, "both live owners keep a slot");
+        assert_eq!(lines[0].text, "goal line", "owner ra's content is first");
+        assert_eq!(lines[1].text, "", "owner rb reserves a blank slot");
     }
 
     #[test]
@@ -3088,7 +3278,7 @@ protocol_v = 1
             "[ext]\ncommand = \"bash\"\ncaps = [\"row\"]\nprotocol_v = 1\n",
         );
         let mut cfg = cfg_for(dir.path());
-        cfg.ext_dir = Some(global);
+        cfg.ext_dirs = vec![global];
         discover(&cfg).expect("a `row` manifest is valid");
     }
 
@@ -3133,7 +3323,7 @@ protocol_v = 1
             "[ext]\ncommand = \"cat\"\ncaps = [\"frame\"]\nprotocol_v = 1\n",
         );
         let mut cfg = cfg_for(dir.path());
-        cfg.ext_dir = Some(global);
+        cfg.ext_dirs = vec![global];
         let disc = discover(&cfg).unwrap();
         let host = ExtHost::new(&disc, &cfg);
         let i = disc.frame_owner.expect("a frame owner");
@@ -3324,7 +3514,39 @@ done
         .unwrap();
         std::fs::write(entry.join("ext.toml"), manifest).unwrap();
         let mut cfg = cfg_for(&root);
-        cfg.ext_dir = Some(global);
+        cfg.ext_dirs = vec![global];
+        let disc = discover(&cfg).unwrap();
+        ExtHost::new(&disc, &cfg)
+    }
+
+    /// Like [`host_with`] but with two extension entries in the same
+    /// global layer, for tests that exercise multi-owner behavior.
+    fn host_with_two(
+        tmp: &TempDir,
+        a_name: &str,
+        a_manifest: &str,
+        a_script: &str,
+        b_name: &str,
+        b_manifest: &str,
+        b_script: &str,
+    ) -> ExtHost {
+        let root = tmp.path().to_path_buf();
+        let global = root.join("ui_extensions");
+        for (name, manifest, script) in [
+            (a_name, a_manifest, a_script),
+            (b_name, b_manifest, b_script),
+        ] {
+            let entry = global.join(name);
+            std::fs::create_dir_all(&entry).unwrap();
+            std::fs::write(
+                entry.join(format!("{name}.sh")),
+                format!("#!/usr/bin/env bash\n{script}\n"),
+            )
+            .unwrap();
+            std::fs::write(entry.join("ext.toml"), manifest).unwrap();
+        }
+        let mut cfg = cfg_for(&root);
+        cfg.ext_dirs = vec![global];
         let disc = discover(&cfg).unwrap();
         ExtHost::new(&disc, &cfg)
     }
@@ -3364,10 +3586,13 @@ done
         let host = host_with(&tmp, "renderer", manifest, script);
         host.start();
         // History resend of one tool_result event (log index 0).
-        host.send_history(&[Event::parse_line(
-            r#"{"v":1,"type":"tool_result","ts":"t","id":"c1","value":{"exit_code":0},"is_error":false}"#,
-        )
-        .unwrap()]);
+        host.send_history(
+            &[Event::parse_line(
+                r#"{"v":1,"type":"tool_result","ts":"t","id":"c1","value":{"exit_code":0},"is_error":false}"#,
+            )
+            .unwrap()],
+            80,
+        );
         assert!(
             wait_item(&host, "lines reply", |i| matches!(
                 i,
@@ -3768,11 +3993,11 @@ exec sleep 30
         let manifest = "[ext]\ncommand = \"bash\"\nargs = [\"stale.sh\"]\ncaps = [\"status\"]\ntick_ms = 100\nprotocol_v = 1\n";
         let host = host_with(&tmp, "stale", manifest, script);
         host.start();
-        // Drive the ticks: the script answers the first one, then
-        // stays silent. Two 100 ms ticks: the reply lands, and the
-        // staleness clock (3 x tick_ms = 300 ms) is not yet past.
+        // Drive ticks until the first reply lands (poll with a 5 s
+        // deadline so the test is resilient to slow process startup).
         let empty = std::collections::HashMap::new();
-        for _ in 0..2 {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
             let p = crate::ext::TickPayload {
                 width: 80,
                 session: Some("s"),
@@ -3782,14 +4007,15 @@ exec sleep 30
                 statuses: &empty,
             };
             host.pump_ticks(&p);
-            std::thread::sleep(Duration::from_millis(100));
+            std::thread::sleep(Duration::from_millis(50));
+            host.poll_status();
+            if matches!(host.status_row(), StatusRow::Lines(_)) {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!("first reply never arrived within 5 s");
+            }
         }
-        host.poll_status();
-        assert!(
-            matches!(host.status_row(), StatusRow::Lines(_)),
-            "the first reply shows: {:?}",
-            host.status_row()
-        );
         // Four more missed ticks cross the 300 ms bound: the row
         // drops to the stale hint.
         for _ in 0..4 {
@@ -3944,7 +4170,7 @@ done
         )
         .unwrap();
         let mut cfg = cfg_for(root);
-        cfg.ext_dir = Some(global);
+        cfg.ext_dirs = vec![global];
         let disc = discover(&cfg).unwrap();
         let host = ExtHost::new(&disc, &cfg);
         host.start();
@@ -3960,7 +4186,7 @@ done
         let user = produce::user_message("hi");
         // The status extension gets only the usage-bearing assistant
         // messages, not the user message.
-        host.send_history(&[user.clone(), usage.clone(), no_usage.clone()]);
+        host.send_history(&[user.clone(), usage.clone(), no_usage.clone()], 80);
         // A long deadline: the extension is a real bash process, and
         // the spawn can be slow under a loaded, parallel test suite.
         let deadline = Instant::now() + Duration::from_millis(15000);
@@ -3998,7 +4224,7 @@ done
         )
         .unwrap();
         let mut cfg = cfg_for(root);
-        cfg.ext_dir = Some(global);
+        cfg.ext_dirs = vec![global];
         let disc = discover(&cfg).unwrap();
         let host = ExtHost::new(&disc, &cfg);
         host.start();
@@ -4007,8 +4233,8 @@ done
         )
         .unwrap();
         let um = produce::user_message("no forward for me");
-        host.forward_event(5, &um);
-        host.forward_event(6, &tr);
+        host.forward_event(5, &um, 80);
+        host.forward_event(6, &tr, 80);
         // A long deadline: the extension is a real bash process, and
         // the spawn can be slow under a loaded, parallel test suite.
         let deadline = Instant::now() + Duration::from_millis(15000);

@@ -33,9 +33,8 @@ v0.5.0, pinned rev `91cef758`), installed via
   `expandedPreviewMaxLines` (4000).
 - Per-tool limits: `previewLines` 8 for read,
   `bashCollapsedLines` 10, `diffCollapsedLines` 24. Output
-  modes: `hidden` / `summary` / `preview` for read and bash,
-  `hidden` / `count` / `preview` for search. Presets
-  `opencode`, `balanced`, `verbose`.
+  modes: `hidden` / `summary` / `preview` for read and bash.
+  Presets `opencode`, `balanced`, `verbose`.
 - Config: `config.json` plus a settings modal, like the
   extension.
 
@@ -53,14 +52,25 @@ full port of the extension.
 The port lives in `bin/tui/src/tool_display.rs` plus the
 `ToolResult` render pass in `bin/tui/src/render.rs`:
 
-- **Box**: each result sits in a rounded box with the box-state
+- **Box**: each result sits in a lighter panel with the box-state
   background role (`tool_box_bg_success` on success, the
   `tool_box_bg_error` role on failure; docs/tui-color-pi-
-  alignment.md: the pi `toolSuccessBg` / `toolErrorBg` values),
-  one cell of padding, the command header row with the exit
-  status. The top border carries the `tool:<name>  <status>`
-  title (the red bold accent on an error), so no separate header
-  line sits above the box.
+  alignment.md: the pi `toolSuccessBg` / `toolErrorBg` values).
+  No border lines: the 2026-09-14 user pass dropped the white
+  rounded-corner border. The panel is the lighter background only.
+  The two freed border rows became one margin row above the header
+  and one below the last body row. These margin rows are
+  background-filled, so the panel reads as a band with breathing
+  room. The header row names the tool in the purple `tool_name`
+  accent, bold. A `read` result adds the file it read as a dim label
+  after the name. Other tools keep the bare name. The
+  status is the red bold accent on an error. A success shows no
+  status word, the panel background already signals the outcome.
+  No separate header line sits above the panel.
+- **Full width**: the panel spans the full transcript width. The
+  2026-09-14 follow-up dropped a stale two-column right reservation,
+  so the band reaches the right edge. The position bar still owns
+  its own rightmost column when shown.
 - **Call/result merge**: a bash tool_call whose result follows
   drops its own line: the result box body opens with the
   `$ <command>` line, so the separate call line would repeat the
@@ -71,12 +81,11 @@ The port lives in `bin/tui/src/tool_display.rs` plus the
   Ctrl+O to expand)`.
 - **Expand**: `Ctrl+O` toggles every collapsed block to the
   full output, capped at `expanded_max_lines` (4000).
-- **Per-tool limits**: `preview_lines` 8 (read, search, the
+- **Per-tool limits**: `preview_lines` 8 (read, the
   generic tool), `bash_collapsed_lines` 10, `diff_collapsed_lines`
   24. Output modes, the extension names: `hidden` / `summary` /
-  `preview` for read and bash, `hidden` / `count` / `preview`
-  for search. `hidden` shows no body; `summary` keeps the line or
-  count summary line.
+  `preview` for read and bash. `hidden` shows no body. `summary`
+  keeps the line summary line.
 - **Presets**: `opencode`, `balanced`, `verbose`, the extension
   values. An override switches the effective preset to
   `custom`.
@@ -98,21 +107,25 @@ The port lives in `bin/tui/src/tool_display.rs` plus the
 
 Lean-style invariants for this spec (see `lean-driven-development.md`).
 
-P1. result-box: given a finished tool result, observe a rounded box with the success or error background role, one cell of padding, and the `tool:<name> <status>` title on the top border.
+P1. result-box: given a finished tool result, observe a lighter panel with no border lines and the success or error background role. The header row names the tool in the purple `tool_name` accent (bold) with the status. The top and bottom margin rows are background-filled. The panel spans the full transcript width.
 P2. call-merge: given a bash `tool_call` whose result follows, observe the call line drop and the box open with the `$ <command>` line. A call with no result keeps its own line.
 P3. fold: given a result longer than the tool preview cap, observe a collapsed preview with a muted `N more lines` hint naming `Ctrl+O`.
 P4. expand: given a collapsed block, observe `Ctrl+O` open every block to the full output capped at `expanded_max_lines`.
 P5. preset-override: given a per-tool override in `[tui.tool_display]`, observe the effective preset become `custom` and the named per-tool limits apply.
+P6. external-call: given an external `tool_call` such as a goal tool, the call line shows only the bare name. It has no `tool:` prefix and no arguments. The kernel does not special-case extension tools, so the call line keeps its own row and the result panel renders on its own.
+P7. result-header: given a tool result, the panel header shows the tool name. A `read` result adds the file it read as a dim label after the name. A success shows no status word, the panel background signals the outcome.
 
 ## Verification
 
 | P# | Property | Proof | Status |
 |----|----------|-------|--------|
-| P1 | result-box | `box_rows_draw_the_rounded_panel` in `bin/tui/src/tool_display.rs`; `tool_result_box_carries_the_title_in_the_border` in `bin/tui/src/render.rs` | proven |
+| P1 | result-box | `panel_has_no_border_lines` / `header_names_the_tool_in_purple_bold` in `bin/tui/src/tool_display.rs`; `snap_tool_result_collapsed` in `bin/tui/src/snapshot_tests.rs` | proven |
 | P2 | call-merge | `bash_call_merges_into_the_result_box` in `bin/tui/src/render.rs` | proven |
 | P3 | fold | `read_preview_folds_to_the_preview_lines` in `bin/tui/src/tool_display.rs`; `long_tool_result_folds_to_the_preview_cap` in `bin/tui/src/render.rs` | proven |
 | P4 | expand | `expand_overrides_the_hidden_and_summary_modes` in `bin/tui/src/tool_display.rs` | proven |
 | P5 | preset-override | `preset_and_mode_parsing`, `preset_value_tables` in `bin/tui/src/tool_display.rs` | proven |
+| P6 | external-call | `snap_pending_approval_banner` in `bin/tui/src/snapshot_tests.rs` | proven |
+| P7 | result-header | `snap_tool_result_read_bare_name_header` in `bin/tui/src/snapshot_tests.rs` and `result_status` in `bin/tui/src/render.rs` | proven |
 
 ## Gate
 

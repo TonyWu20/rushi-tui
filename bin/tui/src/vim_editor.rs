@@ -110,21 +110,21 @@ pub(crate) enum SearchKind {
 
 /// A motion result (the pi-vim `MotionResult`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct MotionResult {
-    pos: (usize, usize),
+pub(crate) struct MotionResult {
+    pub(crate) pos: (usize, usize),
     /// Whether the motion operates on whole lines (for operators).
-    linewise: bool,
+    pub(crate) linewise: bool,
     /// Whether the end position is included in operator ranges.
-    inclusive: bool,
+    pub(crate) inclusive: bool,
 }
 
 /// An operator range (the pi-vim `OperatorRange`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct OpRange {
-    start: (usize, usize),
-    end: (usize, usize),
-    linewise: bool,
-    inclusive: bool,
+pub(crate) struct OpRange {
+    pub(crate) start: (usize, usize),
+    pub(crate) end: (usize, usize),
+    pub(crate) linewise: bool,
+    pub(crate) inclusive: bool,
 }
 
 /// The multi-line textarea plus the vim modal state. The invariant
@@ -178,8 +178,10 @@ pub struct Editor {
     current_recording: Option<RecordedChange>,
     is_recording_insert: bool,
     is_replaying: bool,
-    // ── registers and undo / redo ──
-    registers: HashMap<char, RegContent>,
+    // ── undo / redo ──
+    /// The register store is shared with the browse overlay: it lives
+    /// on `App` (docs/tui-conversation-browsing.md section 11.3) and
+    /// is passed into [`Editor::press`] as the shared store.
     undo_stack: Vec<Snapshot>,
     redo_stack: Vec<Snapshot>,
 }
@@ -350,7 +352,6 @@ impl Editor {
             current_recording: None,
             is_recording_insert: false,
             is_replaying: false,
-            registers: HashMap::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
         }
@@ -365,7 +366,8 @@ impl Editor {
 
     /// Load a whole draft. The cursor is clamped to the new text.
     /// External text resets the vim command state and the undo
-    /// stacks; the registers survive (like vim across buffers).
+    /// stacks; the register store is shared and out of scope here
+    /// (docs/tui-conversation-browsing.md section 11.3).
     pub fn set_text(&mut self, text: &str) {
         let mut ls: Vec<String> = text.lines().map(str::to_string).collect();
         if ls.is_empty() {
@@ -647,7 +649,15 @@ impl Editor {
     /// changed nothing the user should know (a cancelled operator,
     /// an unhandled key in an editing mode). Unknown keys in
     /// normal mode are silently ignored, like vim.
-    pub fn press(&mut self, key_in: Key) -> Option<String> {
+    ///
+    /// `registers` is the shared register store: it lives on the
+    /// host (`App`, docs/tui-conversation-browsing.md section 11.3)
+    /// so a browse-mode yank lands where the editor's `p` reads.
+    pub fn press(
+        &mut self,
+        key_in: Key,
+        registers: &mut std::collections::HashMap<char, RegContent>,
+    ) -> Option<String> {
         // `CtrlJ` is the multi-line newline key: the host maps it
         // here so every mode's `Enter` arm applies (insert splits
         // the line, normal moves down, command-line confirms).
@@ -658,9 +668,9 @@ impl Editor {
         match self.mode {
             Mode::Insert => self.insert_press(key),
             Mode::Replace => self.replace_press(key),
-            Mode::Visual | Mode::VisualLine => self.visual_press(key),
+            Mode::Visual | Mode::VisualLine => self.visual_press(key, registers),
             Mode::CommandLine => self.command_line_press(key),
-            Mode::Normal => self.normal_press(key),
+            Mode::Normal => self.normal_press(key, registers),
         }
     }
 }
@@ -984,7 +994,11 @@ impl Editor {
     /// Normal mode. The pending states are resolved first (register
     /// selection, text object key, char motion, `g`), then the
     /// count prefix, then the command keys.
-    fn normal_press(&mut self, key: Key) -> Option<String> {
+    fn normal_press(
+        &mut self,
+        key: Key,
+        registers: &mut std::collections::HashMap<char, RegContent>,
+    ) -> Option<String> {
         // --- pending register selection (after `"`) ---
         if self.pending_register {
             self.pending_register = false;
@@ -1019,7 +1033,7 @@ impl Editor {
                                 self.record_key(c);
                             }
                             let obj_range = text_object_to_range(&range);
-                            self.apply_operator_to_range(op, &obj_range);
+                            self.apply_operator_to_range(op, &obj_range, registers);
                         } else {
                             // Text objects without an operator do
                             // nothing in normal mode.
@@ -1066,7 +1080,7 @@ impl Editor {
                                 c,
                                 &mut self.last_char_search,
                             );
-                            self.run_motion(res);
+                            self.run_motion(res, registers);
                         }
                         'F' => {
                             let res = find_char_backward(
@@ -1076,7 +1090,7 @@ impl Editor {
                                 c,
                                 &mut self.last_char_search,
                             );
-                            self.run_motion(res);
+                            self.run_motion(res, registers);
                         }
                         't' => {
                             let res = till_char_forward(
@@ -1086,7 +1100,7 @@ impl Editor {
                                 c,
                                 &mut self.last_char_search,
                             );
-                            self.run_motion(res);
+                            self.run_motion(res, registers);
                         }
                         _ => {
                             let res = till_char_backward(
@@ -1096,7 +1110,7 @@ impl Editor {
                                 c,
                                 &mut self.last_char_search,
                             );
-                            self.run_motion(res);
+                            self.run_motion(res, registers);
                         }
                     }
                     if self.is_recording() {
@@ -1127,7 +1141,7 @@ impl Editor {
                     self.record_key('g');
                 }
                 let res = go_to_first_line(&self.lines, (self.row, self.col), n);
-                self.run_motion(res);
+                self.run_motion(res, registers);
                 if self.pending_operator.is_none() {
                     self.reset_operator_state();
                 }
@@ -1165,7 +1179,7 @@ impl Editor {
             }
             // --- dot repeat (the pi-vim `.`) ---
             Key::Char('.') => {
-                self.replay_last_change(if count_explicit { count } else { 0 });
+                self.replay_last_change(if count_explicit { count } else { 0 }, registers);
                 self.reset_operator_state();
                 return None;
             }
@@ -1178,7 +1192,7 @@ impl Editor {
                         self.record_key(c);
                     }
                     let n = self.pending_operator_count * count;
-                    self.apply_linewise_operator(c, n);
+                    self.apply_linewise_operator(c, n, registers);
                     return None;
                 }
                 if self.pending_operator.is_some() {
@@ -1212,7 +1226,7 @@ impl Editor {
                 self.begin_change_recording('D', count);
                 let res = line_end(&self.lines, (self.row, self.col), 1);
                 let range = motion_to_range((self.row, self.col), &res);
-                self.apply_operator_to_range('d', &range);
+                self.apply_operator_to_range('d', &range, registers);
                 return None;
             }
             Key::Char('C') => {
@@ -1220,20 +1234,20 @@ impl Editor {
                 self.begin_change_recording('C', count);
                 let res = line_end(&self.lines, (self.row, self.col), 1);
                 let range = motion_to_range((self.row, self.col), &res);
-                self.apply_operator_to_range('c', &range);
+                self.apply_operator_to_range('c', &range, registers);
                 // No finalize: it enters insert, finalized on Esc.
                 return None;
             }
             Key::Char('Y') => {
                 // Y = yy (yank the whole line).
-                self.apply_linewise_operator('y', count);
+                self.apply_linewise_operator('y', count, registers);
                 return None;
             }
             // --- paste commands ---
             Key::Char('p') | Key::Char('P') => {
                 let before = key == Key::Char('P');
                 self.begin_change_recording(if before { 'P' } else { 'p' }, count);
-                if let Some(reg) = get_register(&self.registers, self.register) {
+                if let Some(reg) = get_register(registers, self.register) {
                     self.paste(&reg, before, count as usize);
                 }
                 self.finalize_change_recording();
@@ -1249,7 +1263,7 @@ impl Editor {
             _ => {}
         }
 
-        self.normal_motion(key, count, motion_count, count_explicit)
+        self.normal_motion(key, count, motion_count, count_explicit, registers)
     }
 
     /// The motion and command keys of normal mode (the pi-vim
@@ -1263,6 +1277,7 @@ impl Editor {
         count: u32,
         motion_count: u32,
         count_explicit: bool,
+        registers: &mut std::collections::HashMap<char, RegContent>,
     ) -> Option<String> {
         let cursor = (self.row, self.col);
         let ch: Option<char> = match key {
@@ -1288,7 +1303,7 @@ impl Editor {
                 // Vim: h stops at column 0; it never wraps to the
                 // previous line (the compat fix).
                 let res = char_left(&self.lines, cursor, motion_count);
-                self.run_motion(res);
+                self.run_motion(res, registers);
                 if self.pending_operator.is_none() {
                     self.reset_operator_state();
                 }
@@ -1317,7 +1332,7 @@ impl Editor {
                 } else {
                     char_right(&self.lines, cursor, motion_count)
                 };
-                self.run_motion(res);
+                self.run_motion(res, registers);
                 if self.pending_operator.is_none() {
                     self.reset_operator_state();
                 }
@@ -1338,7 +1353,7 @@ impl Editor {
                         inclusive: true,
                     };
                     if let Some(op) = self.pending_operator {
-                        self.apply_operator_to_range(op, &range);
+                        self.apply_operator_to_range(op, &range, registers);
                     }
                 } else {
                     let mut r = cursor.0;
@@ -1365,7 +1380,7 @@ impl Editor {
                         inclusive: true,
                     };
                     if let Some(op) = self.pending_operator {
-                        self.apply_operator_to_range(op, &range);
+                        self.apply_operator_to_range(op, &range, registers);
                     }
                 } else {
                     let mut r = cursor.0;
@@ -1383,7 +1398,7 @@ impl Editor {
                     self.record_key('0');
                 }
                 let res = line_start(&self.lines, cursor, 1);
-                self.run_motion(res);
+                self.run_motion(res, registers);
                 if self.pending_operator.is_none() {
                     self.reset_operator_state();
                 }
@@ -1394,7 +1409,7 @@ impl Editor {
                     self.record_key('$');
                 }
                 let res = line_end(&self.lines, cursor, count);
-                self.run_motion(res);
+                self.run_motion(res, registers);
                 if self.pending_operator.is_none() {
                     self.reset_operator_state();
                 }
@@ -1405,7 +1420,7 @@ impl Editor {
                     self.record_key('^');
                 }
                 let res = first_nonblank_motion(&self.lines, cursor, 1);
-                self.run_motion(res);
+                self.run_motion(res, registers);
                 if self.pending_operator.is_none() {
                     self.reset_operator_state();
                 }
@@ -1415,7 +1430,7 @@ impl Editor {
                 if self.is_recording() && self.pending_operator.is_some() {
                     self.record_key('w');
                 }
-                self.execute_word_forward(motion_count);
+                self.execute_word_forward(motion_count, registers);
                 if self.pending_operator.is_none() {
                     self.reset_operator_state();
                 }
@@ -1435,7 +1450,7 @@ impl Editor {
                 if c == 'W' && self.pending_operator.is_some() {
                     res = extend_w_eol(&self.lines, cursor, res);
                 }
-                self.run_motion(res);
+                self.run_motion(res, registers);
                 if self.pending_operator.is_none() {
                     self.reset_operator_state();
                 }
@@ -1454,7 +1469,7 @@ impl Editor {
                 } else {
                     reverse_char_search(&self.lines, cursor, count, &self.last_char_search)
                 };
-                self.run_motion(res);
+                self.run_motion(res, registers);
                 if self.pending_operator.is_none() {
                     self.reset_operator_state();
                 }
@@ -1476,7 +1491,7 @@ impl Editor {
                     self.lines.len() as u32
                 };
                 let res = go_to_last_line(&self.lines, cursor, n.max(1));
-                self.run_motion(res);
+                self.run_motion(res, registers);
                 if self.pending_operator.is_none() {
                     self.reset_operator_state();
                 }
@@ -1491,7 +1506,7 @@ impl Editor {
                 } else {
                     paragraph_forward(&self.lines, cursor, count)
                 };
-                self.run_motion(res);
+                self.run_motion(res, registers);
                 if self.pending_operator.is_none() {
                     self.reset_operator_state();
                 }
@@ -1502,7 +1517,7 @@ impl Editor {
                     self.record_key('%');
                 }
                 let res = matching_bracket(&self.lines, cursor, 1);
-                self.run_motion(res);
+                self.run_motion(res, registers);
                 if self.pending_operator.is_none() {
                     self.reset_operator_state();
                 }
@@ -1517,7 +1532,7 @@ impl Editor {
                 } else {
                     self.search_repeat(count, !self.last_search_forward)
                 };
-                self.run_motion(res);
+                self.run_motion(res, registers);
                 if self.pending_operator.is_none() {
                     self.reset_operator_state();
                 }
@@ -1528,7 +1543,7 @@ impl Editor {
                     self.record_key(c);
                 }
                 let res = self.search_word_under_cursor(c == '*');
-                self.run_motion(res);
+                self.run_motion(res, registers);
                 self.reset_operator_state();
                 None
             }
@@ -1549,7 +1564,7 @@ impl Editor {
                     linewise: false,
                     inclusive: true,
                 };
-                self.apply_operator_to_range('c', &range);
+                self.apply_operator_to_range('c', &range, registers);
                 self.reset_operator_state();
                 None
             }
@@ -1565,7 +1580,7 @@ impl Editor {
                     linewise: true,
                     inclusive: true,
                 };
-                self.apply_operator_to_range('c', &range);
+                self.apply_operator_to_range('c', &range, registers);
                 self.reset_operator_state();
                 None
             }
@@ -1635,11 +1650,11 @@ impl Editor {
             }
             // --- basic editing ---
             Some('x') => {
-                self.delete_forward_compat(count);
+                self.delete_forward_compat(count, registers);
                 None
             }
             Some('X') => {
-                self.delete_backward_compat(count);
+                self.delete_backward_compat(count, registers);
                 None
             }
             Some('r') => {
@@ -1704,11 +1719,15 @@ impl Editor {
     /// Run a motion: with a pending operator it applies the
     /// operator to the motion range; otherwise it moves the cursor
     /// (the pi-vim `executeMotion`).
-    fn run_motion(&mut self, res: MotionResult) {
+    fn run_motion(
+        &mut self,
+        res: MotionResult,
+        registers: &mut std::collections::HashMap<char, RegContent>,
+    ) {
         if let Some(op) = self.pending_operator {
             let cursor = (self.row, self.col);
             let range = motion_to_range(cursor, &res);
-            self.apply_operator_to_range(op, &range);
+            self.apply_operator_to_range(op, &range, registers);
         } else {
             self.go_to(res.pos);
         }
@@ -1718,7 +1737,11 @@ impl Editor {
     /// `executeWordForward`): `cw` behaves as `ce` off a blank; a
     /// single `dw` on the last word of a line does not consume the
     /// newline, but bigger counts do.
-    fn execute_word_forward(&mut self, n: u32) {
+    fn execute_word_forward(
+        &mut self,
+        n: u32,
+        registers: &mut std::collections::HashMap<char, RegContent>,
+    ) {
         let cursor = (self.row, self.col);
         let op = self.pending_operator;
         let current = chars_of(&self.lines, cursor.0).get(cursor.1).copied();
@@ -1747,7 +1770,7 @@ impl Editor {
         };
         if let Some(op) = self.pending_operator {
             let range = motion_to_range(cursor, &res);
-            self.apply_operator_to_range(op, &range);
+            self.apply_operator_to_range(op, &range, registers);
         } else {
             self.go_to(res.pos);
         }
@@ -1755,11 +1778,16 @@ impl Editor {
 
     /// Apply a pending operator to a range (the pi-vim
     /// `applyOperatorToRange`).
-    fn apply_operator_to_range(&mut self, op: char, range: &OpRange) {
+    fn apply_operator_to_range(
+        &mut self,
+        op: char,
+        range: &OpRange,
+        registers: &mut std::collections::HashMap<char, RegContent>,
+    ) {
         let lines = self.lines.clone();
         let reg = self.register;
         let (new_lines, cursor, enter_insert) =
-            apply_operator(op, &lines, range, &mut self.registers, reg);
+            apply_operator(op, &lines, range, registers, reg);
         self.push_undo();
         self.lines = new_lines;
         self.row = clamp_line(self.lines.len(), cursor.0);
@@ -1777,7 +1805,12 @@ impl Editor {
 
     /// Apply a linewise operator to the doubled form
     /// (`dd`, `cc`, `3dd`, the pi-vim `applyLinewiseOperator`).
-    fn apply_linewise_operator(&mut self, op: char, n: u32) {
+    fn apply_linewise_operator(
+        &mut self,
+        op: char,
+        n: u32,
+        registers: &mut std::collections::HashMap<char, RegContent>,
+    ) {
         let n = n.max(1) as usize;
         let end_line = (self.row + n - 1).min(self.lines.len().saturating_sub(1));
         let range = OpRange {
@@ -1786,7 +1819,7 @@ impl Editor {
             linewise: true,
             inclusive: true,
         };
-        self.apply_operator_to_range(op, &range);
+        self.apply_operator_to_range(op, &range, registers);
     }
 
     // ── counted char deletes (the compat fixes) ────────────────
@@ -1794,7 +1827,11 @@ impl Editor {
     /// `x` with a count: delete up to `count` chars under the
     /// cursor, clamped to the line end. Vim never joins lines
     /// with `x` (the compat fix).
-    fn delete_forward_compat(&mut self, count: u32) {
+    fn delete_forward_compat(
+        &mut self,
+        count: u32,
+        registers: &mut std::collections::HashMap<char, RegContent>,
+    ) {
         self.begin_change_recording('x', count);
         let len = line_len(&self.lines, self.row);
         if self.col < len {
@@ -1805,7 +1842,7 @@ impl Editor {
                 linewise: false,
                 inclusive: true,
             };
-            self.apply_operator_to_range('d', &range);
+            self.apply_operator_to_range('d', &range, registers);
         } else {
             self.finalize_change_recording();
             self.reset_operator_state();
@@ -1814,7 +1851,11 @@ impl Editor {
 
     /// `X` with a count: delete up to `count` chars before the
     /// cursor, clamped to the line start (the compat fix).
-    fn delete_backward_compat(&mut self, count: u32) {
+    fn delete_backward_compat(
+        &mut self,
+        count: u32,
+        registers: &mut std::collections::HashMap<char, RegContent>,
+    ) {
         self.begin_change_recording('X', count);
         if self.col > 0 {
             let start = self.col.saturating_sub(count as usize);
@@ -1824,7 +1865,7 @@ impl Editor {
                 linewise: false,
                 inclusive: true,
             };
-            self.apply_operator_to_range('d', &range);
+            self.apply_operator_to_range('d', &range, registers);
         } else {
             self.finalize_change_recording();
             self.reset_operator_state();
@@ -1997,14 +2038,18 @@ impl Editor {
     /// and an insert-session text is typed once. A bare `N.`
     /// override does not multiply the replayed change (the reference
     /// ignores the override in the replay loop).
-    fn replay_last_change(&mut self, _count_override: u32) {
+    fn replay_last_change(
+        &mut self,
+        _count_override: u32,
+        registers: &mut std::collections::HashMap<char, RegContent>,
+    ) {
         let rec = match self.last_change.clone() {
             Some(r) => r,
             None => return,
         };
         self.is_replaying = true;
         for k in rec.keys.iter() {
-            self.normal_press(Key::Char(*k));
+            self.normal_press(Key::Char(*k), registers);
         }
         if rec.entered_insert {
             let was_replace = self.mode == Mode::Replace;
@@ -2142,7 +2187,11 @@ impl Editor {
     /// Char-wise (`v`) and line-wise (`V`) visual mode. The anchor
     /// and the cursor bound the selection; motions move the
     /// cursor against the anchor; operators act on the selection.
-    fn visual_press(&mut self, key: Key) -> Option<String> {
+    fn visual_press(
+        &mut self,
+        key: Key,
+        registers: &mut std::collections::HashMap<char, RegContent>,
+    ) -> Option<String> {
         // --- Escape / Ctrl+C: back to normal ---
         if key == Key::Esc || key == Key::CtrlC {
             self.visual_anchor = None;
@@ -2267,13 +2316,13 @@ impl Editor {
                 'y' | 'Y' => 'y',
                 _ => c,
             };
-            self.apply_visual_operator(op_norm);
+            self.apply_visual_operator(op_norm, registers);
             return None;
         }
 
         // --- paste replaces the selection with the register ---
         if key == Key::Char('p') || key == Key::Char('P') {
-            self.paste_visual(key == Key::Char('P'));
+            self.paste_visual(key == Key::Char('P'), registers);
             return None;
         }
 
@@ -2370,12 +2419,16 @@ impl Editor {
 
     /// Apply an operator to the visual selection and return to the
     /// insert or normal mode (the pi-vim `applyVisualOperator`).
-    fn apply_visual_operator(&mut self, op: char) {
+    fn apply_visual_operator(
+        &mut self,
+        op: char,
+        registers: &mut std::collections::HashMap<char, RegContent>,
+    ) {
         let cursor = (self.row, self.col);
         let lines = self.lines.clone();
         let range = self.visual_range(cursor);
         let (new_lines, cur, enter_insert) =
-            apply_operator(op, &lines, &range, &mut self.registers, self.register);
+            apply_operator(op, &lines, &range, registers, self.register);
         self.push_undo();
         self.lines = new_lines;
         self.row = clamp_line(self.lines.len(), cur.0);
@@ -2392,14 +2445,18 @@ impl Editor {
     /// `p` / `P` in visual: replace the selection with the register
     /// (the pi-vim visual paste); the deleted text goes to the
     /// unnamed register.
-    fn paste_visual(&mut self, before: bool) {
+    fn paste_visual(
+        &mut self,
+        before: bool,
+        registers: &mut std::collections::HashMap<char, RegContent>,
+    ) {
         let _ = before; // visual p and P paste alike (reference rule)
         let cursor = (self.row, self.col);
         let lines = self.lines.clone();
         let range = self.visual_range(cursor);
         let deleted_text = extract_text(&lines, &range);
         let (mut new_lines, pos) = delete_range(&lines, &range);
-        let reg = get_register(&self.registers, self.register);
+        let reg = get_register(registers, self.register);
         match reg {
             None => {
                 // No register: the selection is simply deleted.
@@ -2452,7 +2509,7 @@ impl Editor {
                         self.col = line_len(&self.lines, self.row).saturating_sub(1);
                     }
                 }
-                delete_to_register(&mut self.registers, '"', &deleted_text, range.linewise);
+                delete_to_register(registers, '"', &deleted_text, range.linewise);
             }
         }
         self.visual_anchor = None;
@@ -2741,7 +2798,7 @@ impl Editor {
 /// At the end of the file the cursor stays on the last character;
 /// a `w` on the last word of a line lands on that word's last
 /// char, or crosses to the next line.
-fn word_forward(lines: &[String], cursor: (usize, usize), count: u32) -> MotionResult {
+pub(crate) fn word_forward(lines: &[String], cursor: (usize, usize), count: u32) -> MotionResult {
     let mut pos = cursor;
     for _ in 0..count.max(1) {
         pos = next_word_start(lines, pos.0, pos.1);
@@ -2758,7 +2815,7 @@ fn word_forward(lines: &[String], cursor: (usize, usize), count: u32) -> MotionR
 /// motion did not move), an operator consumes to the end of the
 /// line. The pinned reference stops one char short. A plain
 /// movement ignores this: `go_to` clamps the column anyway.
-fn extend_w_eol(lines: &[String], cursor: (usize, usize), res: MotionResult) -> MotionResult {
+pub(crate) fn extend_w_eol(lines: &[String], cursor: (usize, usize), res: MotionResult) -> MotionResult {
     if res.pos.0 != cursor.0 {
         return res; // cross-line landing: the merge rule applies
     }
@@ -2833,7 +2890,7 @@ fn next_word_start(lines: &[String], line: usize, col: usize) -> (usize, usize) 
 }
 
 /// `b` — the start of the previous word.
-fn word_backward(lines: &[String], cursor: (usize, usize), count: u32) -> MotionResult {
+pub(crate) fn word_backward(lines: &[String], cursor: (usize, usize), count: u32) -> MotionResult {
     let mut pos = cursor;
     for _ in 0..count.max(1) {
         pos = prev_word_start(lines, pos.0, pos.1);
@@ -2881,7 +2938,7 @@ fn prev_word_start(lines: &[String], line: usize, col: usize) -> (usize, usize) 
 }
 
 /// `e` — the end of the current / next word (inclusive motion).
-fn word_end(lines: &[String], cursor: (usize, usize), count: u32) -> MotionResult {
+pub(crate) fn word_end(lines: &[String], cursor: (usize, usize), count: u32) -> MotionResult {
     let mut pos = cursor;
     for _ in 0..count.max(1) {
         pos = next_word_end(lines, pos.0, pos.1);
@@ -3088,7 +3145,7 @@ fn go_to_first_line(lines: &[String], _cursor: (usize, usize), count: u32) -> Mo
 }
 
 /// `G` — to the last line, or line N with a count (linewise).
-fn go_to_last_line(lines: &[String], _cursor: (usize, usize), count: u32) -> MotionResult {
+pub(crate) fn go_to_last_line(lines: &[String], _cursor: (usize, usize), count: u32) -> MotionResult {
     let target = clamp_line(lines.len(), (count.max(1) as usize).saturating_sub(1));
     MotionResult {
         pos: (target, first_nonblank(&lines[target])),
@@ -3098,7 +3155,7 @@ fn go_to_last_line(lines: &[String], _cursor: (usize, usize), count: u32) -> Mot
 }
 
 /// `^` — the first non-blank char of the line.
-fn first_nonblank_motion(lines: &[String], cursor: (usize, usize), _count: u32) -> MotionResult {
+pub(crate) fn first_nonblank_motion(lines: &[String], cursor: (usize, usize), _count: u32) -> MotionResult {
     MotionResult {
         pos: (cursor.0, first_nonblank(&lines[cursor.0])),
         linewise: false,
@@ -3107,7 +3164,7 @@ fn first_nonblank_motion(lines: &[String], cursor: (usize, usize), _count: u32) 
 }
 
 /// `0` — the start of the line.
-fn line_start(_lines: &[String], cursor: (usize, usize), _count: u32) -> MotionResult {
+pub(crate) fn line_start(_lines: &[String], cursor: (usize, usize), _count: u32) -> MotionResult {
     MotionResult {
         pos: (cursor.0, 0),
         linewise: false,
@@ -3117,7 +3174,7 @@ fn line_start(_lines: &[String], cursor: (usize, usize), _count: u32) -> MotionR
 
 /// `$` — the end of the line (the last char; a count moves down
 /// first). Inclusive motion.
-fn line_end(lines: &[String], cursor: (usize, usize), count: u32) -> MotionResult {
+pub(crate) fn line_end(lines: &[String], cursor: (usize, usize), count: u32) -> MotionResult {
     let target = clamp_line(
         lines.len(),
         cursor.0 + (count.max(1) as usize).saturating_sub(1),
@@ -3131,7 +3188,7 @@ fn line_end(lines: &[String], cursor: (usize, usize), count: u32) -> MotionResul
 
 /// `h` — left within the line; it never crosses the line start
 /// (the compat fix).
-fn char_left(_lines: &[String], cursor: (usize, usize), count: u32) -> MotionResult {
+pub(crate) fn char_left(_lines: &[String], cursor: (usize, usize), count: u32) -> MotionResult {
     MotionResult {
         pos: (cursor.0, cursor.1.saturating_sub(count as usize)),
         linewise: false,
@@ -3142,7 +3199,7 @@ fn char_left(_lines: &[String], cursor: (usize, usize), count: u32) -> MotionRes
 /// `l` — right within the line; it never crosses the line end,
 /// and the cursor cannot rest past the last character in normal
 /// mode (the compat fix).
-fn char_right(lines: &[String], cursor: (usize, usize), count: u32) -> MotionResult {
+pub(crate) fn char_right(lines: &[String], cursor: (usize, usize), count: u32) -> MotionResult {
     let cap = line_len(lines, cursor.0).saturating_sub(1);
     let col = if cap == 0 && line_len(lines, cursor.0) == 0 {
         0
@@ -3439,7 +3496,7 @@ fn matching_bracket(lines: &[String], cursor: (usize, usize), _count: u32) -> Mo
 
 /// Convert a motion result (from the cursor) into an operator
 /// range.
-fn motion_to_range(cursor: (usize, usize), motion: &MotionResult) -> OpRange {
+pub(crate) fn motion_to_range(cursor: (usize, usize), motion: &MotionResult) -> OpRange {
     let p = motion.pos;
     let (start, end) = if p < cursor { (p, cursor) } else { (cursor, p) };
     OpRange {
@@ -3452,7 +3509,7 @@ fn motion_to_range(cursor: (usize, usize), motion: &MotionResult) -> OpRange {
 
 /// Convert a text object range into an operator range (text
 /// objects are always inclusive).
-fn text_object_to_range(range: &OpRange) -> OpRange {
+pub(crate) fn text_object_to_range(range: &OpRange) -> OpRange {
     OpRange {
         start: range.start,
         end: range.end,
@@ -3462,7 +3519,7 @@ fn text_object_to_range(range: &OpRange) -> OpRange {
 }
 
 /// Extract the text of a range within the buffer lines.
-fn extract_text(lines: &[String], r: &OpRange) -> String {
+pub(crate) fn extract_text(lines: &[String], r: &OpRange) -> String {
     if r.linewise {
         return lines[r.start.0..=r.end.0].join("\n");
     }
@@ -3617,7 +3674,7 @@ fn toggle_case_line(line: &str) -> String {
 
 /// The valid register names: `"` default, `_` black hole, `0-9`
 /// numbered, `a-z` named, `A-Z` append, `+` / `*` clipboard.
-fn is_valid_register(name: char) -> bool {
+pub(crate) fn is_valid_register(name: char) -> bool {
     matches!(
         name,
         '"' | '_' | '0'..='9' | 'a'..='z' | 'A'..='Z' | '+' | '*'
@@ -3625,7 +3682,7 @@ fn is_valid_register(name: char) -> bool {
 }
 
 /// Read a register (the pi-vim `getRegister`).
-fn get_register(registers: &HashMap<char, RegContent>, name: char) -> Option<RegContent> {
+pub(crate) fn get_register(registers: &HashMap<char, RegContent>, name: char) -> Option<RegContent> {
     registers.get(&name).cloned()
 }
 
@@ -3633,7 +3690,7 @@ fn get_register(registers: &HashMap<char, RegContent>, name: char) -> Option<Reg
 /// `yankToRegister`): unnamed + `0` on yanks, named reads and
 /// writes, `A-Z` append to lowercase, `_` discards, `+` / `*`
 /// alias the clipboard.
-fn yank_to_register(
+pub(crate) fn yank_to_register(
     registers: &mut HashMap<char, RegContent>,
     name: char,
     text: &str,
@@ -3750,7 +3807,7 @@ fn is_obj_word_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
 }
 
-type TextObjectFn = fn(&[String], (usize, usize)) -> Option<OpRange>;
+pub(crate) type TextObjectFn = fn(&[String], (usize, usize)) -> Option<OpRange>;
 
 fn range_on_line(row: usize, start: usize, end: usize) -> OpRange {
     OpRange {
@@ -3958,7 +4015,7 @@ fn a_backtick(lines: &[String], cursor: (usize, usize)) -> Option<OpRange> {
 
 /// Resolve a text object key sequence (`iw`, `a(`, ...). The
 /// prefix is `i` or `a`; the key is the object.
-fn resolve_text_object(prefix: char, key: char) -> Option<TextObjectFn> {
+pub(crate) fn resolve_text_object(prefix: char, key: char) -> Option<TextObjectFn> {
     let inner = prefix == 'i';
     match key {
         'w' => Some(if inner { inner_word } else { a_word }),
@@ -4183,1080 +4240,5 @@ fn find_next_match(
             }
         }
         Some(*matches.last()?)
-    }
-}
-
-// ── tests ───────────────────────────────────────────────────────
-
-#[cfg(test)]
-#[allow(non_snake_case)]
-mod tests {
-    use super::*;
-
-    /// A new editor with `text` loaded, in insert mode.
-    fn ed(text: &str) -> Editor {
-        let mut e = Editor::new();
-        e.set_text(text);
-        e
-    }
-
-    /// Press key strings. Single chars become `Key::Char`; the
-    /// known names map onto their host keys.
-    fn press(e: &mut Editor, keys: &[&str]) {
-        for k in keys {
-            match *k {
-                "esc" => {
-                    e.press(Key::Esc);
-                }
-                "enter" => {
-                    e.press(Key::Enter);
-                }
-                "bs" => {
-                    e.press(Key::Backspace);
-                }
-                "tab" => {
-                    e.press(Key::Tab);
-                }
-                "ctrl-c" => {
-                    e.press(Key::CtrlC);
-                }
-                "ctrl-d" => {
-                    e.press(Key::CtrlD);
-                }
-                "ctrl-u" => {
-                    e.press(Key::CtrlU);
-                }
-                "ctrl-j" => {
-                    e.press(Key::CtrlJ);
-                }
-                "left" => {
-                    e.press(Key::Left);
-                }
-                "right" => {
-                    e.press(Key::Right);
-                }
-                "up" => {
-                    e.press(Key::Up);
-                }
-                "down" => {
-                    e.press(Key::Down);
-                }
-                "home" => {
-                    e.press(Key::Home);
-                }
-                "end" => {
-                    e.press(Key::End);
-                }
-                "delete" => {
-                    e.press(Key::Delete);
-                }
-                s => {
-                    // A plain string: one key press per char.
-                    // `"a` selects register a; `ab` types two chars
-                    // in insert mode.
-                    for c in s.chars() {
-                        e.press(Key::Char(c));
-                    }
-                }
-            }
-        }
-    }
-
-    /// Normal-mode edits on `text` starting at `(row, col)`.
-    fn norm(text: &str, row: usize, col: usize, keys: &[&str]) -> Editor {
-        let mut e = ed(text);
-        e.mode = Mode::Normal;
-        e.row = row;
-        e.col = col;
-        press(&mut e, keys);
-        e
-    }
-
-    // ── bug 1: `w` on the last word ────────────────────────────
-
-    /// The reported bug: `w` on a single-word draft must move onto
-    /// the last char of the word, like neovim.
-    #[test]
-    fn w_on_last_word_of_single_word_draft() {
-        let e = norm("hi", 0, 0, &["w"]);
-        assert_eq!(e.cursor(), (0, 1), "w lands on the last char");
-    }
-
-    #[test]
-    fn w_on_last_char_of_last_word_stays_put() {
-        let e = norm("hi", 0, 0, &["w", "w"]);
-        assert_eq!(e.cursor(), (0, 1));
-    }
-
-    #[test]
-    fn w_crosses_to_the_next_line() {
-        let e = norm("a b\nc d", 0, 2, &["w"]);
-        assert_eq!(e.cursor(), (1, 0));
-    }
-
-    #[test]
-    fn w_skips_blanks_and_lands_on_next_word() {
-        let e = norm("a    b", 0, 0, &["w"]);
-        assert_eq!(e.cursor(), (0, 5));
-    }
-
-    #[test]
-    fn w_on_word_followed_by_blank_lands_on_last_char() {
-        // "word " — the reference clamps to the last line column,
-        // which is the trailing blank (col 4).
-        let e = norm("word ", 0, 0, &["w"]);
-        assert_eq!(e.cursor(), (0, 4));
-    }
-
-    #[test]
-    fn e_lands_on_word_end() {
-        let e = norm("this", 0, 0, &["e"]);
-        assert_eq!(e.cursor(), (0, 3));
-    }
-
-    #[test]
-    fn w_and_b_round_trip() {
-        let mut e = norm("a b c", 0, 0, &["w", "w"]);
-        assert_eq!(e.cursor(), (0, 4));
-        e.press(Key::Char('b'));
-        assert_eq!(e.cursor(), (0, 2));
-        e.press(Key::Char('b'));
-        assert_eq!(e.cursor(), (0, 0));
-    }
-
-    #[test]
-    fn W_is_blank_delimited() {
-        // `W` skips the whole non-blank run `a.b` to the `c`.
-        let e = norm("a.b c", 0, 0, &["W"]);
-        assert_eq!(e.cursor(), (0, 4));
-        // `w` skips the word run only: it lands on the punct.
-        let e = norm("a.b c", 0, 0, &["w"]);
-        assert_eq!(e.cursor(), (0, 1));
-    }
-
-    #[test]
-    fn B_backward_blank_delimited() {
-        // `B` lands on the start of the previous blank-delimited
-        // WORD: from the end of `c` it reaches `c`, then `b`,
-        // then `a`.
-        let e = norm("a b c", 0, 6, &["B", "B", "B"]);
-        assert_eq!(e.cursor(), (0, 0));
-        let e = norm("a b c", 0, 6, &["B", "B"]);
-        assert_eq!(e.cursor(), (0, 2));
-    }
-
-    // ── bug 3: `dw` then `p` ───────────────────────────────────
-
-    /// The reported bug: `dw` on `b` of `a b c d` deletes the word
-    /// (plus the following blank); `p` pastes it back inline. No
-    /// line is opened by the char-wise paste.
-    #[test]
-    fn dw_then_p_pastes_inline_after_cursor() {
-        // The reference `p` inserts after the char under the
-        // cursor: `dw` leaves the cursor on `c`; the register `b
-        // ` lands between `c` and the rest, inline. No new line.
-        let e = norm("a b c d", 0, 2, &["d", "w", "p"]);
-        assert_eq!(e.text(), "a cb  d");
-    }
-
-    #[test]
-    fn dw_then_double_p_stays_inline() {
-        // Repeated `p` pastes another copy after the cursor
-        // char, inline. It never opens a new line.
-        let e = norm("a b c d", 0, 2, &["d", "w", "p", "p"]);
-        assert_eq!(e.text(), "a cb b  d");
-    }
-
-    #[test]
-    fn dw_registers_word_with_trailing_blank() {
-        let e = norm("a b c d", 0, 2, &["d", "w"]);
-        assert_eq!(e.text(), "a c d");
-        assert_eq!(e.cursor(), (0, 2), "cursor stays on `c`");
-        assert_eq!(e.registers.get(&'"').unwrap().text, "b ");
-    }
-
-    #[test]
-    fn dd_then_p_pastes_line_below() {
-        // `dd` on the last line deletes it; `p` pastes the line
-        // back below.
-        let e = norm("one\ntwo", 1, 0, &["d", "d", "p"]);
-        assert_eq!(e.text(), "one\ntwo");
-        assert_eq!(e.cursor(), (1, 0));
-    }
-
-    #[test]
-    fn yy_then_p_pastes_line_below_and_P_pastes_above() {
-        let mut e = norm("one\ntwo", 1, 0, &["y", "y", "p"]);
-        assert_eq!(e.text(), "one\ntwo\ntwo");
-        assert_eq!(e.cursor(), (2, 0));
-        e.press(Key::Char('P'));
-        assert_eq!(e.text(), "one\ntwo\ntwo\ntwo");
-        assert_eq!(e.cursor(), (2, 0), "P keeps the cursor row index");
-    }
-
-    #[test]
-    fn dd_on_last_line_keeps_one_line() {
-        let e = norm("x", 0, 0, &["d", "d"]);
-        assert_eq!(e.text(), "");
-        assert_eq!(e.n_lines(), 1);
-    }
-
-    // ── operators and motions ──────────────────────────────────
-
-    #[test]
-    fn D_deletes_to_line_end() {
-        let e = norm("abc def", 0, 3, &["D"]);
-        assert_eq!(e.text(), "abc");
-        let e = norm("abc def", 0, 4, &["D"]);
-        assert_eq!(e.text(), "abc ");
-    }
-
-    #[test]
-    fn c_w_changes_word_and_enters_insert() {
-        let mut e = norm("foo bar", 0, 0, &["c", "w"]);
-        assert_eq!(e.text(), " bar");
-        assert_eq!(e.mode(), Mode::Insert);
-        press(&mut e, &["baz", "esc"]);
-        assert_eq!(e.text(), "baz bar");
-        assert_eq!(e.mode(), Mode::Normal);
-    }
-
-    #[test]
-    fn x_deletes_under_cursor() {
-        let e = norm("abcd", 0, 1, &["x"]);
-        assert_eq!(e.text(), "acd");
-    }
-
-    #[test]
-    fn r_replaces_char_under_cursor() {
-        let e = norm("abcd", 0, 1, &["r", "Z"]);
-        assert_eq!(e.text(), "aZcd");
-    }
-
-    #[test]
-    fn dl_deletes_two_chars() {
-        let e = norm("abcd", 0, 0, &["d", "l"]);
-        assert_eq!(e.text(), "cd");
-    }
-
-    #[test]
-    fn dw_with_count_deletes_two_words() {
-        let e = norm("a b c d", 0, 0, &["2", "d", "w"]);
-        assert_eq!(e.text(), "c d");
-    }
-
-    #[test]
-    fn gg_and_G_move_lines() {
-        let mut e = norm("l1\nl2\nl3\nl4", 0, 5, &["g", "g"]);
-        assert_eq!(e.cursor(), (0, 0));
-        press(&mut e, &["G"]);
-        assert_eq!(e.cursor(), (3, 0));
-        press(&mut e, &["2", "g", "g"]);
-        assert_eq!(e.cursor(), (1, 0));
-    }
-
-    #[test]
-    fn h_l_k_j_moves() {
-        // `l` stops on the last char of the line (col 3).
-        let mut e = norm("aaaa\nbbbb", 0, 2, &["j", "l", "l"]);
-        assert_eq!(e.cursor(), (1, 3));
-        press(&mut e, &["k", "h"]);
-        assert_eq!(e.cursor(), (0, 2));
-    }
-
-    #[test]
-    fn h_at_col_zero_stays() {
-        let e = norm("aaaa\nbbbb", 0, 0, &["h"]);
-        assert_eq!(e.cursor(), (0, 0));
-    }
-
-    #[test]
-    fn count_prefix_moves() {
-        let e = norm("aaaaaaaaaa", 0, 0, &["5", "l"]);
-        assert_eq!(e.cursor(), (0, 5));
-    }
-
-    #[test]
-    fn zero_and_dollar() {
-        let mut e = norm("  abc", 0, 3, &["0"]);
-        assert_eq!(e.cursor(), (0, 0));
-        press(&mut e, &["$"]);
-        assert_eq!(e.cursor(), (0, 4), "`$` rests on the last char");
-    }
-
-    #[test]
-    fn caret_goes_to_first_nonblank() {
-        let e = norm("  abc", 0, 0, &["^"]);
-        assert_eq!(e.cursor(), (0, 2));
-    }
-
-    #[test]
-    fn f_and_t_and_repeat() {
-        let mut e = norm("abcde", 0, 0, &["f", "d"]);
-        assert_eq!(e.cursor(), (0, 3));
-        press(&mut e, &[";"]);
-        assert_eq!(e.cursor(), (0, 3), "no second `d`: stays put");
-        press(&mut e, &["t", "b"]);
-        assert_eq!(e.cursor(), (0, 3), "no `b` ahead of col 3: stays put");
-        press(&mut e, &[","]);
-        assert_eq!(e.cursor(), (0, 2), "`T` lands one after the `b`");
-    }
-
-    #[test]
-    fn matching_bracket_jumps() {
-        // `%` lands on the matching bracket itself.
-        let e = norm("f(x)", 0, 1, &["%"]);
-        assert_eq!(e.cursor(), (0, 3));
-        let e = norm("f(x)", 0, 3, &["%"]);
-        assert_eq!(e.cursor(), (0, 1));
-    }
-
-    // ── insert / replace modes ─────────────────────────────────
-
-    #[test]
-    fn i_inserts_at_cursor() {
-        let mut e = norm("ab", 0, 1, &["i"]);
-        press(&mut e, &["X", "esc"]);
-        assert_eq!(e.text(), "aXb");
-        assert_eq!(e.mode(), Mode::Normal);
-    }
-
-    #[test]
-    fn a_appends_after_cursor() {
-        let mut e = norm("ab", 0, 0, &["a"]);
-        press(&mut e, &["X", "esc"]);
-        assert_eq!(e.text(), "aXb");
-    }
-
-    #[test]
-    fn I_inserts_at_first_nonblank() {
-        // The first non-blank of "  ab" is col 2.
-        let mut e = norm("  ab", 0, 2, &["I"]);
-        assert_eq!(e.cursor(), (0, 2));
-        press(&mut e, &["X", "esc"]);
-        assert_eq!(e.text(), "  Xab");
-    }
-
-    #[test]
-    fn A_appends_at_line_end() {
-        let mut e = norm("ab", 0, 0, &["A"]);
-        assert_eq!(e.cursor(), (0, 2));
-        press(&mut e, &["X", "esc"]);
-        assert_eq!(e.text(), "abX");
-    }
-
-    #[test]
-    fn o_opens_line_below() {
-        let mut e = norm("ab\ncd", 0, 0, &["o"]);
-        assert_eq!(e.mode(), Mode::Insert);
-        press(&mut e, &["x", "esc"]);
-        assert_eq!(e.text(), "ab\nx\ncd");
-    }
-
-    #[test]
-    fn O_opens_line_above_with_indent() {
-        let mut e = norm("ab\n  cd", 1, 0, &["O"]);
-        press(&mut e, &["x", "esc"]);
-        assert_eq!(e.text(), "ab\n  x\n  cd");
-    }
-
-    #[test]
-    fn R_overtypes_then_esc() {
-        let mut e = norm("abcd", 0, 1, &["R"]);
-        assert_eq!(e.mode(), Mode::Replace);
-        press(&mut e, &["Z"]);
-        assert_eq!(e.text(), "aZcd");
-        press(&mut e, &["esc"]);
-        assert_eq!(e.mode(), Mode::Normal);
-    }
-
-    #[test]
-    fn s_deletes_char_and_inserts() {
-        let mut e = norm("abcd", 0, 1, &["s"]);
-        assert_eq!(e.mode(), Mode::Insert);
-        assert_eq!(e.text(), "acd");
-        press(&mut e, &["Z", "esc"]);
-        assert_eq!(e.text(), "aZcd");
-    }
-
-    #[test]
-    fn S_replaces_whole_line() {
-        let mut e = norm("hello\nworld", 0, 0, &["S"]);
-        press(&mut e, &["bye", "esc"]);
-        assert_eq!(e.text(), "bye\nworld");
-    }
-
-    // ── dot repeat, undo, redo ──────────────────────────────────
-
-    #[test]
-    fn dot_repeats_insert_change() {
-        // `i` inserts before the cursor: `ab` lands before `x`.
-        // `.` replays the insert at the (stepped-back) cursor.
-        let mut e = norm("x", 0, 0, &["i"]);
-        press(&mut e, &["ab", "esc"]);
-        assert_eq!(e.text(), "abx");
-        press(&mut e, &["."]);
-        assert_eq!(e.text(), "aabbx");
-    }
-
-    #[test]
-    fn dot_replays_the_recorded_keys() {
-        // `.` replays the recorded key sequence once. The pinned
-        // reference ignores a bare `N.` override in the replay
-        // loop, so `2.` after `dw` deletes one word. The replayed
-        // `dw` now consumes the whole final line (the neovim
-        // end-of-line rule).
-        let mut e = norm("abc def", 0, 0, &["d", "w"]);
-        assert_eq!(e.text(), "def");
-        press(&mut e, &["2", "."]);
-        assert_eq!(e.text(), "");
-    }
-
-    #[test]
-    fn u_undoes() {
-        let mut e = norm("abc", 0, 0, &["i"]);
-        press(&mut e, &["X", "esc"]);
-        assert_eq!(e.text(), "Xabc");
-        press(&mut e, &["u"]);
-        assert_eq!(e.text(), "abc");
-    }
-
-    #[test]
-    fn redo_restores_after_undo() {
-        let mut e = norm("abc", 0, 0, &["i"]);
-        press(&mut e, &["X", "esc", "u"]);
-        assert_eq!(e.text(), "abc");
-        assert!(e.has_redo());
-        e.redo();
-        assert_eq!(e.text(), "Xabc");
-        assert!(!e.has_redo());
-    }
-
-    // ── search ──────────────────────────────────────────────────
-
-    #[test]
-    fn slash_search_jumps_and_n_repeats() {
-        let mut e = norm("baz bar baz", 0, 0, &["/", "b", "a", "z", "enter"]);
-        assert_eq!(e.mode(), Mode::Normal);
-        assert_eq!(
-            e.cursor(),
-            (0, 8),
-            "the search runs on Enter, after the caret"
-        );
-        press(&mut e, &["n"]);
-        assert_eq!(e.cursor(), (0, 0), "n wraps the buffer");
-    }
-
-    #[test]
-    fn slash_search_esc_cancel_keeps_text() {
-        let mut e = norm("abc", 0, 0, &["/", "z"]);
-        assert_eq!(e.command_line_label().as_deref(), Some("/z\u{2588}"));
-        press(&mut e, &["esc"]);
-        assert_eq!(e.mode(), Mode::Normal);
-        assert!(e.command_line_label().is_none());
-        assert_eq!(e.text(), "abc");
-    }
-
-    #[test]
-    fn star_searches_word_under_cursor() {
-        // The word under the cursor is `abc`; `*` jumps to the
-        // next occurrence after the cursor.
-        let e = norm("abc abc", 0, 0, &["*"]);
-        assert_eq!(e.cursor(), (0, 4));
-    }
-
-    #[test]
-    fn question_searches_backward() {
-        // `?` searches backward to the closest match before the
-        // cursor: the second `abc`.
-        let e = norm("abc abc", 0, 6, &["?", "a", "b", "c", "enter"]);
-        assert_eq!(e.cursor(), (0, 4));
-    }
-
-    // ── visual mode ─────────────────────────────────────────────
-
-    #[test]
-    fn visual_delete_selection() {
-        // `v` anchors at col 1; two `l` reach col 3; the visual
-        // range is inclusive: `bcd` is removed.
-        let e = norm("abcdef", 0, 1, &["v", "l", "l", "d"]);
-        assert_eq!(e.text(), "aef");
-    }
-
-    #[test]
-    fn visual_yank_then_paste() {
-        // The selection `bc` is yanked; after the operator the
-        // cursor returns to the anchor (col 1); `p` inserts the
-        // copy after that char, inline.
-        let e = norm("abcdef", 0, 1, &["v", "l", "y", "p"]);
-        assert_eq!(e.text(), "abbccdef");
-    }
-
-    #[test]
-    fn visual_change_selection() {
-        let mut e = norm("abcdef", 0, 1, &["v", "l", "c"]);
-        assert_eq!(e.mode(), Mode::Insert);
-        press(&mut e, &["X", "esc"]);
-        assert_eq!(e.text(), "aXdef");
-    }
-
-    #[test]
-    fn visual_line_delete_then_paste() {
-        // Lines 1-2 (`two`, `three`) are deleted; `p` pastes them
-        // back below the cursor line (the reference keeps the
-        // cursor on the same row index).
-        let e = norm("one\ntwo\nthree", 1, 0, &["V", "j", "d", "p"]);
-        assert_eq!(e.text(), "one\ntwo\nthree");
-        assert_eq!(e.cursor(), (1, 0));
-    }
-
-    #[test]
-    fn visual_toggle_case() {
-        // `v` then one `l` selects `ab`.
-        let e = norm("abc def", 0, 0, &["v", "l", "~"]);
-        assert_eq!(e.text(), "ABc def");
-    }
-
-    #[test]
-    fn visual_join() {
-        let e = norm("one\ntwo", 0, 0, &["V", "j", "J"]);
-        assert_eq!(e.text(), "one two");
-    }
-
-    // ── line commands ───────────────────────────────────────────
-
-    #[test]
-    fn J_joins_next_line() {
-        let e = norm("one\ntwo", 0, 0, &["J"]);
-        assert_eq!(e.text(), "one two");
-    }
-
-    #[test]
-    fn J_on_last_line_is_noop() {
-        let e = norm("one\n", 0, 0, &["J"]);
-        assert_eq!(e.text(), "one");
-    }
-
-    #[test]
-    fn indent_and_dedent() {
-        let mut e = norm("  a\nb", 0, 0, &["V", "j", ">"]);
-        assert_eq!(e.text(), "    a\n  b");
-        press(&mut e, &["V", "j", "<"]);
-        assert_eq!(e.text(), "  a\nb");
-    }
-
-    // ── registers ───────────────────────────────────────────────
-
-    #[test]
-    fn named_register_yank_and_paste() {
-        // `yw` on the last word consumes to the end of line (the
-        // neovim rule), so the yank covers `cd`. The paste lands
-        // after the cursor char, inline.
-        let e = norm("ab cd", 0, 3, &["\"a", "y", "w", "\"a", "p"]);
-        assert_eq!(e.text(), "ab ccdd");
-        assert_eq!(e.registers.get(&'a').unwrap().text, "cd");
-    }
-
-    #[test]
-    fn append_to_named_register() {
-        // The reference yank keeps the cursor on the range start,
-        // so the second `yw` yanks the same `aa ` word. Char-wise
-        // append joins without a separator.
-        let mut e = norm("aa bb", 0, 0, &["\"A", "y", "w", "\"A", "y", "w"]);
-        assert_eq!(e.registers.get(&'a').unwrap().text, "aa aa ");
-        press(&mut e, &["\"a", "p"]);
-        assert_eq!(e.text(), "aaa aa a bb");
-    }
-
-    #[test]
-    fn black_hole_register_discards() {
-        // `"_dw` deletes the word without touching any register;
-        // a following `p` pastes nothing. `dw` on the two-char
-        // line consumes to the end of line.
-        let mut e = norm("ab", 0, 0, &["\"_", "d", "w"]);
-        assert_eq!(e.text(), "");
-        press(&mut e, &["p"]);
-        assert_eq!(e.text(), "");
-    }
-
-    // ── host-key mappings in normal mode ───────────────────────
-
-    #[test]
-    fn arrows_map_to_vim_motions() {
-        // `down` clamps the column to the shorter second line.
-        let mut e = norm("ab\ncd", 0, 0, &["right", "right", "down"]);
-        assert_eq!(e.cursor(), (1, 1));
-        press(&mut e, &["up", "left"]);
-        assert_eq!(e.cursor(), (0, 0));
-    }
-
-    #[test]
-    fn backspace_moves_up_in_normal_mode() {
-        let e = norm("ab\ncd", 1, 0, &["bs"]);
-        assert_eq!(e.cursor(), (0, 0));
-    }
-
-    // ── the reported cursor duplication is a render concern ───
-
-    #[test]
-    fn insert_mode_ctrl_c_leaves_text_untouched() {
-        let mut e = ed("abc");
-        assert_eq!(e.mode(), Mode::Insert);
-        press(&mut e, &["ctrl-c"]);
-        assert_eq!(e.mode(), Mode::Normal);
-        assert_eq!(e.text(), "abc");
-    }
-
-    #[test]
-    fn esc_from_insert_is_a_noop_on_text() {
-        let mut e = ed("abc");
-        press(&mut e, &["esc"]);
-        assert_eq!(e.mode(), Mode::Normal);
-        assert_eq!(e.text(), "abc");
-    }
-
-    #[test]
-    fn dw_on_last_word_deletes_to_end_of_line() {
-        // Neovim rule: `dw` on the final word of a line (no
-        // trailing blank) consumes to the end of the line.
-        let e = norm("word", 0, 0, &["d", "w"]);
-        assert_eq!(e.text(), "");
-    }
-
-    #[test]
-    fn dw_from_last_char_deletes_that_char() {
-        // A no-op `w` at the last char: the operator deletes the
-        // single char under the cursor.
-        let e = norm("word", 0, 3, &["d", "w"]);
-        assert_eq!(e.text(), "wor");
-    }
-
-    #[test]
-    fn dw_with_trailing_blank_includes_the_blank() {
-        // Cursor on the word start: the whole word and the
-        // trailing blank die. The blank before the word stays.
-        let e = norm("a word ", 0, 2, &["d", "w"]);
-        assert_eq!(e.text(), "a ");
-    }
-
-    #[test]
-    fn dw_stops_before_a_real_next_word() {
-        // The last char of the line starts a real word: the range
-        // stays exclusive.
-        let e = norm("a b c", 0, 2, &["d", "w"]);
-        assert_eq!(e.text(), "a c");
-    }
-
-    #[test]
-    fn dw_on_a_single_char_line() {
-        let e = norm("x", 0, 0, &["d", "w"]);
-        assert_eq!(e.text(), "");
-    }
-
-    #[test]
-    fn dw_cross_line_keeps_the_compatibility_rule() {
-        let e = norm("foo\n  bar baz", 0, 0, &["d", "w"]);
-        assert_eq!(e.text(), "\n  bar baz");
-    }
-
-    #[test]
-    fn counted_dw_on_last_word() {
-        let e = norm("word", 0, 0, &["2", "d", "w"]);
-        assert_eq!(e.text(), "");
-    }
-
-    #[test]
-    fn dw_from_last_char_deletes_only_that_char() {
-        // `w` does not move at the last char, so the operator
-        // deletes the single char under the cursor. The trailing
-        // blank before it survives.
-        let e = norm("a b c d e", 0, 8, &["d", "w"]); // cursor on 'e'
-        assert_eq!(e.text(), "a b c d ");
-    }
-
-    #[test]
-    fn yw_on_last_word_yanks_to_end_of_line() {
-        let e = norm("word", 0, 0, &["y", "w", "P"]);
-        assert_eq!(e.text(), "wordword");
-    }
-
-    #[test]
-    fn cw_on_last_word_changes_to_end_of_line() {
-        let e = norm("word", 0, 0, &["c", "w", "x", "esc"]);
-        assert_eq!(e.text(), "x");
-    }
-
-    #[test]
-    fn dW_on_first_WORD_keeps_the_rest() {
-        // `W` lands on the start of a real word: the range stays
-        // exclusive, only the first WORD plus the blank dies.
-        let e = norm("foo bar-baz", 0, 0, &["d", "W"]);
-        assert_eq!(e.text(), "bar-baz");
-    }
-
-    #[test]
-    fn dW_on_last_WORD_consumes_the_line() {
-        // `dW` from the last char deletes the char to the end of
-        // line; the blank before it survives.
-        let e = norm("aa bb cc dd", 0, 9, &["d", "W"]); // cursor on 'd'
-        assert_eq!(e.text(), "aa bb cc ");
-    }
-
-    #[test]
-    fn esc_in_normal_cancels_a_stale_count() {
-        // `3` opens a count. `Esc` cancels it. The later `dw`
-        // deletes one word, not three.
-        let e = norm("a b c d e f", 0, 0, &["3", "esc", "d", "w"]);
-        assert_eq!(e.text(), "b c d e f");
-    }
-
-    #[test]
-    fn stale_count_cannot_make_db_eat_a_line() {
-        // The reported case: Esc into normal, a stray digit, then
-        // `db`. One word dies, the line survives.
-        let e = norm("one two three", 0, 8, &["3", "esc", "d", "b"]);
-        assert_eq!(e.text(), "one three");
-    }
-
-    #[test]
-    fn digit_count_still_works_when_not_cancelled() {
-        // Without the Esc in between, the count applies: `3dw`
-        // deletes three words.
-        let e = norm("a b c d e f", 0, 0, &["3", "d", "w"]);
-        assert_eq!(e.text(), "d e f");
-    }
-
-    #[test]
-    fn g_prefix_esc_cancels_the_pending_g() {
-        // `g`, Esc, `g` must not run `gg`.
-        let e = norm("l1\nl2\nl3", 2, 0, &["g", "esc", "g"]);
-        assert_eq!(e.cursor(), (2, 0));
-    }
-
-    #[test]
-    fn shift_a_types_uppercase_a_in_insert_mode() {
-        // Shift+a types `A` at the caret, like the reference base
-        // editor (the old host extension jumped the caret instead).
-        let mut e = ed("hello\nworld");
-        e.row = 0;
-        e.col = 2;
-        e.press(Key::Char('A'));
-        assert_eq!(e.mode(), Mode::Insert);
-        assert_eq!(e.text(), "heAllo\nworld");
-    }
-
-    #[test]
-    fn shift_a_at_line_end_appends_the_char() {
-        let mut e = ed("ab");
-        e.col = 2;
-        e.press(Key::Char('A'));
-        assert_eq!(e.text(), "abA");
-        assert_eq!(e.cursor(), (0, 3));
-    }
-
-    #[test]
-    fn shift_a_types_uppercase_a_in_replace_mode() {
-        // Shift+a types `A` at the caret, like the reference base
-        // editor (the old host extension jumped the caret instead).
-        let mut e = norm("abc", 0, 0, &["R"]);
-        assert_eq!(e.mode(), Mode::Replace);
-        press(&mut e, &["A"]);
-        assert_eq!(e.cursor(), (0, 1), "the overtype steps one char right");
-        press(&mut e, &["esc"]);
-        assert_eq!(e.text(), "Abc");
-    }
-
-    #[test]
-    fn clear_current_line_kills_the_line() {
-        // The host maps Ctrl-U to this in insert mode.
-        let mut e = ed("one\ntwo");
-        e.row = 1;
-        e.col = 1;
-        e.clear_current_line();
-        assert_eq!(e.text(), "one\n");
-        assert_eq!(e.cursor(), (1, 0));
-    }
-
-    // ── command line ────────────────────────────────────────────
-
-    #[test]
-    fn command_line_label_shows_prompt() {
-        let mut e = norm("abc abc", 0, 0, &["/"]);
-        assert_eq!(e.mode(), Mode::CommandLine);
-        press(&mut e, &["a", "b"]);
-        assert_eq!(e.command_line_label().as_deref(), Some("/ab\u{2588}"));
-        press(&mut e, &["bs"]);
-        assert_eq!(e.command_line_label().as_deref(), Some("/a\u{2588}"));
-    }
-
-    #[test]
-    fn command_line_enter_runs_search() {
-        let mut e = norm("abc abc", 0, 0, &["/", "a", "b", "c"]);
-        press(&mut e, &["enter"]);
-        assert_eq!(e.mode(), Mode::Normal);
-        assert_eq!(
-            e.cursor(),
-            (0, 4),
-            "forward search skips the match under the caret"
-        );
-        press(&mut e, &["n"]);
-        assert_eq!(e.cursor(), (0, 0), "n wraps the buffer");
-    }
-
-    // ── the pi-vim compat suite (test/vim-compat.test.ts) ─────
-
-    #[test]
-    fn compat_w_and_W_skip_indentation_after_crossing_a_line() {
-        // From the reference compat suite: `w` and `W` both skip
-        // the indentation of the next line.
-        let e = norm("foo\n  bar", 0, 0, &["w"]);
-        assert_eq!(e.cursor(), (1, 2));
-        let e = norm("foo\n  bar", 0, 0, &["W"]);
-        assert_eq!(e.cursor(), (1, 2));
-    }
-
-    #[test]
-    fn compat_word_movement_treats_unicode_letters_as_a_word() {
-        let e = norm("caf\u{e9} next", 0, 0, &["w"]);
-        assert_eq!(e.cursor(), (0, 5));
-    }
-
-    #[test]
-    fn compat_cw_behaves_as_ce_and_leaves_following_whitespace() {
-        let mut e = norm("foo bar", 0, 0, &["c", "w"]);
-        press(&mut e, &["X", "esc"]);
-        assert_eq!(e.text(), "X bar");
-    }
-
-    #[test]
-    fn compat_single_dw_at_end_of_line_preserves_newline() {
-        let e = norm("foo\n  bar baz", 0, 0, &["d", "w"]);
-        assert_eq!(e.text(), "\n  bar baz");
-    }
-
-    #[test]
-    fn compat_operator_and_motion_counts_multiply() {
-        let e = norm(
-            "one two three four five six seven",
-            0,
-            0,
-            &["2", "d", "3", "w"],
-        );
-        assert_eq!(e.text(), "seven");
-    }
-
-    #[test]
-    fn compat_O_opens_an_auto_indented_line_without_replacing_the_buffer() {
-        let mut e = norm("  foo\nbar", 0, 1, &["O"]);
-        press(&mut e, &["X", "esc"]);
-        assert_eq!(e.text(), "  X\n  foo\nbar");
-        assert_eq!(e.cursor(), (0, 2));
-    }
-
-    #[test]
-    fn compat_counted_O_repeats_the_inserted_line_like_vim() {
-        let mut e = norm("  foo\nbar", 0, 0, &["3", "O"]);
-        press(&mut e, &["X", "esc"]);
-        assert_eq!(e.text(), "  X\n  X\n  X\n  foo\nbar");
-        assert_eq!(e.cursor(), (2, 2));
-    }
-
-    #[test]
-    fn command_line_ctrl_u_clears_input() {
-        let mut e = norm("abc", 0, 0, &["/", "z", "z"]);
-        assert_eq!(e.command_line_label().as_deref(), Some("/zz\u{2588}"));
-        press(&mut e, &["ctrl-u"]);
-        assert_eq!(e.command_line_label().as_deref(), Some("/\u{2588}"));
-        press(&mut e, &["esc"]);
-        assert_eq!(e.mode(), Mode::Normal);
-    }
-
-    // ── line wrapping in the input area ────────────
-
-    /// The rendered text of each display row (for assertions).
-    fn row_texts(rows: &[EditorRow]) -> Vec<&str> {
-        rows.iter().map(|r| r.text.as_str()).collect()
-    }
-
-    #[test]
-    fn wrap_row_hard_breaks_at_the_width() {
-        assert_eq!(wrap_row("abcdefghij", 4), vec!["abcd", "efgh", "ij"]);
-        assert_eq!(wrap_row("abc", 4), vec!["abc"]);
-    }
-
-    #[test]
-    fn wrap_row_never_overflows_the_width() {
-        // No fragment is ever longer than the box, even for a long
-        // run of spaces or a long word: the line is sliced every
-        // `width` characters.
-        for piece in wrap_row("alpha beta gamma", 8) {
-            assert!(piece.chars().count() <= 8, "overflow `{piece}`");
-        }
-        assert_eq!(wrap_row(&"x".repeat(9), 8), vec!["xxxxxxxx", "x"]);
-        // Wrapping is lossless: joining the rows reproduces the line.
-        let joined: String = wrap_row("the quick brown fox jumps over the lazy dog", 12).join("");
-        assert_eq!(joined, "the quick brown fox jumps over the lazy dog");
-    }
-
-    #[test]
-    fn wrap_row_keeps_empty_lines_empty() {
-        assert_eq!(wrap_row("", 80), vec![""]);
-    }
-
-    #[test]
-    fn display_row_counts_wrapped_lines() {
-        let mut e = Editor::new();
-        e.set_text("hello world\nfoo");
-        // "hello world" is 11 chars: two rows at 10 columns, one at 80.
-        assert_eq!(e.display_row_count(10), 3); // 2 + 1
-        assert_eq!(e.display_row_count(80), 2); // 1 + 1
-    }
-
-    #[test]
-    fn display_rows_wrap_and_window_from_the_scroll_row() {
-        let mut e = Editor::new();
-        e.set_text("one two three four five\nx");
-        // At width 8 "one two three four five" (22 chars) slices into
-        // three rows; "x" is one more.
-        assert_eq!(e.display_row_count(8), 4);
-        assert_eq!(
-            row_texts(&e.display_rows(0, 4, 8)),
-            vec!["one two ", "three fo", "ur five", "x"]
-        );
-        // Scrolled two display rows down, a two-row window shows the tail.
-        assert_eq!(row_texts(&e.display_rows(2, 2, 8)), vec!["ur five", "x"]);
-    }
-
-    #[test]
-    fn cursor_display_maps_the_caret_to_the_wrapped_row() {
-        // "aaaa bbbb cccc" is 14 chars; it slices at 8 into
-        // "aaaa bbb" (0..=7) / "b cccc" (8..=13). "dddd" is a third row.
-        let e = norm("aaaa bbbb cccc\ndddd", 0, 0, &[]);
-        assert_eq!(e.display_row_count(8), 3); // 2 + 1
-
-        // Document col 4 is the 'b' of the 2nd "aaaa" run; it sits on the
-        // first display row (chars 0..=7), at display column 4.
-        let at = norm("aaaa bbbb cccc\ndddd", 0, 4, &[]);
-        assert_eq!(at.cursor(), (0, 4));
-        assert_eq!(at.cursor_display(8), (0, 4));
-
-        // Col 8 begins the 2nd display row; the caret sits at the start
-        // of that row, display column 0.
-        let at = norm("aaaa bbbb cccc\ndddd", 0, 8, &[]);
-        assert_eq!(at.cursor_display(8), (1, 0));
-
-        // Col 11 lands mid-second-row at display column 3.
-        let at = norm("aaaa bbbb cccc\ndddd", 0, 11, &[]);
-        assert_eq!(at.cursor_display(8), (1, 3));
-
-        // End-of-line (col 14, one past the last char, 14 total) sits just
-        // past the 2nd row's text: display column 6.
-        let at = norm("aaaa bbbb cccc\ndddd", 0, 14, &[]);
-        assert_eq!(at.cursor(), (0, 14));
-        assert_eq!(at.cursor_display(8), (1, 6));
-    }
-
-    // ── `@` token detection (docs/tui-file-picker.md section 5) ────
-
-    /// Insert-mode editor with the cursor at the end of the line.
-    fn ed_at_end(text: &str) -> Editor {
-        let mut e = ed(text);
-        e.col = e.lines[e.row].len();
-        e
-    }
-
-    #[test]
-    fn at_token_preceded_by_only_whitespace_is_detected() {
-        // "   @src/m" — the `@` at col 3 is preceded only by spaces,
-        // so it is a valid trigger. The query is the text up to the
-        // caret.
-        let e = ed_at_end("   @src/m");
-        assert_eq!(e.at_token_info(), Some((3, "src/m".into())));
-    }
-
-    #[test]
-    fn at_token_at_line_start_is_detected() {
-        let e = ed_at_end("@file.txt");
-        assert_eq!(e.at_token_info(), Some((0, "file.txt".into())));
-    }
-
-    #[test]
-    fn at_token_inside_a_word_is_not_a_token() {
-        // The `@` at col 3 follows a word char, so it is not at a
-        // word boundary: no token.
-        let e = ed_at_end("foo@bar");
-        assert_eq!(e.at_token_info(), None);
-    }
-
-    #[test]
-    fn at_token_after_word_chars_is_not_detected() {
-        // "hello@src/m" — the `@` at col 5 is glued to "hello" with no
-        // separator, so it is part of a larger token: no trigger.
-        let e = ed_at_end("hello@src/m");
-        assert_eq!(e.at_token_info(), None);
-    }
-
-    #[test]
-    fn at_token_needs_insert_mode() {
-        let mut e = ed_at_end("@src/main.rs");
-        e.mode = Mode::Normal;
-        assert_eq!(e.at_token_info(), None);
-    }
-
-    #[test]
-    fn at_token_query_is_the_text_between_at_and_caret() {
-        // The caret mid-token: the query stops at the caret, not the
-        // end of the line. "  @src/xyz tail" with caret at col 6:
-        // the @ is at col 2, the caret sits just past "src".
-        let mut e = ed("  @src/xyz tail");
-        e.col = 6;
-        assert_eq!(e.at_token_info(), Some((2, "src".into())));
-    }
-
-    #[test]
-    fn at_token_finds_last_at_before_caret() {
-        // Two `@` tokens on the line: the nearest one to the caret wins.
-        // Both are valid: the first is at start-of-line, the second is
-        // preceded by a space.
-        let mut e = ed("@a @b");
-        e.col = 5; // caret past the second token
-        assert_eq!(e.at_token_info(), Some((3, "b".into())));
-        // The caret just past the first token: the first token is at
-        // col 0 (start of line) → valid.
-        e.col = 2;
-        assert_eq!(e.at_token_info(), Some((0, "a".into())));
-    }
-
-    #[test]
-    fn at_token_glued_to_word_is_not_detected() {
-        // "foo@b" — the `@` at col 3 is glued to "foo" (no whitespace
-        // before it), so it is part of a larger token: not a trigger.
-        let e = ed_at_end("foo@b");
-        assert_eq!(e.at_token_info(), None);
-    }
-
-    #[test]
-    fn replace_at_token_swaps_in_the_value() {
-        let mut e = ed_at_end("hello @src/m");
-        e.replace_at_token(6, "docs/guide.md");
-        assert_eq!(e.lines[e.row], "hello docs/guide.md");
-        assert_eq!(e.col, 6 + "docs/guide.md".len(), "caret past the path");
-    }
-
-    #[test]
-    fn replace_at_token_keeps_text_after_caret() {
-        let mut e = ed("@a and more");
-        e.col = 2; // caret just past the token "a"
-        e.replace_at_token(0, "src/main.rs");
-        assert_eq!(e.lines[0], "src/main.rs and more");
-        assert_eq!(e.col, "src/main.rs".len());
-    }
-
-    #[test]
-    fn replace_at_token_pushes_undo() {
-        let mut e = ed_at_end("@x");
-        let before = e.undo_stack.len();
-        e.replace_at_token(0, "path/y.md");
-        assert_eq!(e.undo_stack.len(), before + 1, "the swap is undoable");
     }
 }
