@@ -60,9 +60,6 @@ impl LoopCommand {
 pub struct TuiConfig {
     /// Absolute directory that contains session directories.
     pub sessions_root: PathBuf,
-    /// Absolute schema directory for producer-side event validation, if
-    /// one exists next to the config. `None` skips schema validation.
-    pub schemas_dir: Option<PathBuf>,
     /// The opaque loop command, if configured.
     pub loop_cmd: Option<LoopCommand>,
     /// Absolute directory containing the config file.
@@ -287,13 +284,6 @@ impl TuiConfig {
             .unwrap_or_else(|| "sessions".to_string());
         let sessions_root = resolve(&config_dir, sessions_root);
 
-        let schemas_path = config_dir.join("schemas").join("events").join("v1");
-        let schemas_dir = if schemas_path.is_dir() {
-            Some(schemas_path)
-        } else {
-            None
-        };
-
         let loop_cmd = match raw.loop_cmd {
             Some(l) => {
                 let arg_style = ArgStyle::parse(&l.arg_style)
@@ -498,7 +488,6 @@ impl TuiConfig {
 
         Ok(TuiConfig {
             sessions_root,
-            schemas_dir,
             loop_cmd,
             config_dir,
             config_path: canonical,
@@ -525,15 +514,8 @@ impl TuiConfig {
                     .map(|p| p.to_path_buf())
                     .unwrap_or_else(|| PathBuf::from("."))
             });
-        let schemas_path = config_dir.join("schemas").join("events").join("v1");
-        let schemas_dir = if schemas_path.is_dir() {
-            Some(schemas_path)
-        } else {
-            None
-        };
         TuiConfig {
             sessions_root: config_dir.join("sessions"),
-            schemas_dir,
             loop_cmd: None,
             config_dir,
             config_path: path.to_path_buf(),

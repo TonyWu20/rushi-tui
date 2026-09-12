@@ -38,7 +38,6 @@ fn empty_host() -> (ExtHost, TempDir) {
     let cfg = crate::config::TuiConfig {
         clipboard_unnamed: false,
         sessions_root: tmp.path().join("sessions"),
-        schemas_dir: None,
         loop_cmd: None,
         config_dir: tmp.path().to_path_buf(),
         config_path: tmp.path().join("config.toml"),
