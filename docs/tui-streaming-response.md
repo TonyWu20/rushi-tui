@@ -1,6 +1,13 @@
 # TUI streaming response rendering
 
-Status: Implemented (2026-09-13). Depends on Phase 2 (`docs/phase-2-plan.md`).
+Status: Implemented (2026-09-13).
+
+The pinned-block render in section 6.3 is superseded by
+`docs/tui-streaming-simplify.md`: the live stream now renders inside the
+transcript instead of a separate pinned block. The stream-file protocol,
+producer-side changes, and all other sections remain authoritative.
+
+Depends on Phase 2 (`docs/phase-2-plan.md`).
 The `harness` binary must exist before this feature lands. The
 streaming channel is the TUI-side consumer; `harness` and `bin/model`
 are the producers. This doc is the contract for all three.

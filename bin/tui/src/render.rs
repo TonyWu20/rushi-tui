@@ -1854,30 +1854,24 @@ fn working_row(app: &App, running: bool, now: &chrono::DateTime<chrono::Utc>) ->
     Line::from(vec![frame, body])
 }
 
-/// The live stream block for an in-progress model response
-/// (docs/tui-streaming-response.md §6.3).
+/// The in-progress model response lines, rendered inside the transcript
+/// (docs/tui-streaming-simplify.md section 3). The caller appends the
+/// returned lines to the settled transcript so the live body settles
+/// where it lands and the user can scroll up through the whole body.
 ///
 /// Shows the header with an ellipsis ("…") while the stream is open.
 /// Once the done line arrives, the header shows "· done".
 ///
-/// The body shows the tail of the accumulated content. The thinking
-/// tail and the response text share one window, the last
-/// `max_body_lines` rows, thinking above text. The block grows with
-/// the content, and its height never shrinks when the response text
-/// starts. The thinking slides out as the text arrives. It never
-/// collapses suddenly. Any partial tool-call arguments render when no
-/// content has arrived yet. A blinking block cursor marks the end of
-/// the live text.
+/// The body shows the full accumulated content (no sliding-window cap
+/// when `max_body_lines` is `usize::MAX`): thinking above text, partial
+/// tool-call arguments when no content has arrived yet. A blinking
+/// block cursor marks the end of the live text.
 ///
-/// The block sits right after the existing messages, the transcript.
-/// It sits above the model status indicator, the working row. It does
-/// not scroll with the transcript. The app clears it when the
-/// matching log event lands or the loop stops.
-///
-/// The block grows with the arriving content. The body rows are
-/// bounded by `max_body_lines`, which the caller sets to a fraction of
-/// the viewport height. A long response extends the block without
-/// stealing the whole screen. The transcript absorbs the rest.
+/// The thinking block honors the same global toggles as settled blocks
+/// (docs/tui-streaming-simplify.md section 3, the unified toggle):
+/// `thinking_shown` (Ctrl+X) controls visibility; `thinking_expanded`
+/// (Ctrl+T) controls collapse/expand. When collapsed the live thinking
+/// shows only the one-line "thinking …" label.
 fn stream_block_lines(app: &App, width: usize, max_body_lines: usize) -> Vec<Line<'static>> {
     let buf = match app.stream_buf() {
         Some(b) => b,
@@ -1895,8 +1889,11 @@ fn stream_block_lines(app: &App, width: usize, max_body_lines: usize) -> Vec<Lin
     let tool_name_style = Style::default()
         .fg(palette.color(crate::color::Role::ToolName))
         .add_modifier(Modifier::BOLD);
-    let gutter = " ".repeat(GUTTER);
-    let wrap_w = width.saturating_sub(GUTTER).max(4);
+    // One-cell left pad, matching the settled thinking/assistant-body
+    // gutter (docs/tui-streaming-simplify.md section 3): the live body
+    // settles where it lands, so it must not carry the old 12-col GUTTER.
+    let gutter = " ".to_string();
+    let wrap_w = width.saturating_sub(1).max(4);
 
     let mut out: Vec<Line<'static>> = Vec::new();
 
@@ -1915,13 +1912,16 @@ fn stream_block_lines(app: &App, width: usize, max_body_lines: usize) -> Vec<Lin
     let has_text = !buf.text.is_empty();
 
     // Thinking renders above the response text (the natural order is
-    // thinking → response). Thinking and text share one content
-    // window: when the response starts, the thinking is not suddenly
-    // collapsed — the block keeps its height and the oldest thinking
-    // lines slide out as the text arrives, so the view never jumps
-    // (no flicker at the thinking → text transition).
+    // thinking → response). The live block honors the same global
+    // thinking toggles as the settled blocks
+    // (docs/tui-streaming-simplify.md section 3, the unified toggle):
+    // `Ctrl+T` (collapse/expand, `thinking_expanded`) and `Ctrl+X`
+    // (show/hide, `thinking_shown`). When collapsed the live block
+    // shows only the one-line `thinking …` label, like a settled
+    // block.
     let thinking_style = palette.style(crate::color::Role::Thinking, Modifier::empty());
-    let thinking_tag_style = Style::default().fg(palette.thinking_tag(true));
+    let thinking_tag_style =
+        Style::default().fg(palette.thinking_tag(app.thinking_expanded()));
     let mut thinking_tail: Vec<Line<'static>> = Vec::new();
     let mut shows_thinking_label = false;
     if has_thinking && max_body_lines > 0 {
@@ -1935,13 +1935,15 @@ fn stream_block_lines(app: &App, width: usize, max_body_lines: usize) -> Vec<Lin
             .join("\n");
         if !thinking_text.is_empty() {
             shows_thinking_label = true;
-            thinking_tail = wrap_thinking(
-                &thinking_text,
-                wrap_w,
-                palette,
-                thinking_style,
-                app.tool_display().highlight_engine,
-            );
+            if app.thinking_expanded() {
+                thinking_tail = wrap_thinking(
+                    &thinking_text,
+                    wrap_w,
+                    palette,
+                    thinking_style,
+                    app.tool_display().highlight_engine,
+                );
+            }
         }
     }
 
@@ -1968,8 +1970,13 @@ fn stream_block_lines(app: &App, width: usize, max_body_lines: usize) -> Vec<Lin
         let text_drop = drop.saturating_sub(thinking_tail.len());
         let text_take = text_tail.len().saturating_sub(text_drop);
         if shows_thinking_label {
+            let label = if app.thinking_expanded() {
+                "thinking".to_string()
+            } else {
+                "thinking \u{2026}".to_string()
+            };
             body_lines.push(Line::from(vec![Span::styled(
-                "thinking".to_string(),
+                label,
                 thinking_tag_style,
             )]));
         }
@@ -3054,24 +3061,15 @@ pub fn draw(
     // The waiting-message block owns one layout cell for its rows
     // (docs/tui_feature_requests_from_human.md 2026-08-31, stage 1).
     let pending_rows = pending_message_lines(app, running, inner.width as usize);
-    // The live stream block (docs/tui-streaming-response.md section
-    // 6.3): pinned right after the existing messages (the transcript)
-    // and above the model status indicator while a model response
-    // streams. Empty while no model call is in flight. The block
-    // grows with the arriving content: the body is bounded to half
-    // the viewport height, so a long response extends the block
-    // without stealing the whole screen (the transcript's Min(2)
-    // absorbs the rest).
-    let stream_max_body = inner.height as usize / 2;
-    let stream_lines = stream_block_lines(app, inner.width as usize, stream_max_body);
+    // The in-progress model response now renders inside the transcript
+    // (docs/tui-streaming-simplify.md section 3) instead of a separate
+    // pinned layout cell between the transcript and the working row.
+    // No dedicated layout cell is allocated for it: the transcript is
+    // the fill cell, so the layout no longer shifts when a response
+    // starts or completes. The stream lines are computed later, once
+    // the transcript text width is known, and appended to the tail of
+    // the transcript so the user can scroll up through the whole body.
     let mut constraints: Vec<Constraint> = vec![Constraint::Min(2)];
-    // The live stream block owns one layout cell per row it renders
-    // (docs/tui-streaming-response.md section 6.3): it sits right
-    // after the existing messages, above the model status indicator.
-    // No cell when no model response is streaming.
-    if !stream_lines.is_empty() {
-        constraints.push(Constraint::Length(stream_lines.len() as u16));
-    }
     if !pending_rows.is_empty() {
         constraints.push(Constraint::Length(pending_rows.len() as u16));
     }
@@ -3135,9 +3133,27 @@ pub fn draw(
     // borrow: the cache holds the lines, so no app borrow may stay
     // live while the app mutates (the palette owned values above,
     // same pattern).
-    let total = app.transcript_lines(text_w, Some(host)).len();
+    // The in-progress model response renders at the tail of the
+    // transcript (docs/tui-streaming-simplify.md section 3). `usize::MAX`
+    // disables the sliding-window cap so the whole streamed body
+    // (thinking + text + partial tool calls) stays reachable by
+    // scrolling; the stream file and the settled log are unchanged.
+    let stream_lines = stream_block_lines(app, text_w, usize::MAX);
+    let stream_len = stream_lines.len();
+    // Combine the settled transcript with the live stream tail so the
+    // whole content area is one scrollable sequence. The settled lines
+    // come from the cached transcript; the stream tail is appended after
+    // them. This means `total`, the cursor clamp, and the browse layout
+    // all account for the live lines.
+    let combined: Vec<Line<'static>> = {
+        let mut v: Vec<Line<'static>> = app.transcript_lines(text_w, Some(host)).to_vec();
+        v.extend(stream_lines);
+        v
+    };
+    let total = combined.len();
     // Store block spans and transcript top row for mouse-click hit-testing
-    // (docs/tui-tool-display-fancy.md section 6).
+    // (docs/tui-tool-display-fancy.md section 6). The spans cover only the
+    // settled tool-result blocks; the live stream tail carries no block span.
     let spans = app.transcript_block_spans(text_w, Some(host));
     app.set_block_spans(spans);
     app.set_transcript_top_row(t_area.y);
@@ -3150,32 +3166,28 @@ pub fn draw(
     let start = total.saturating_sub(scroll + h);
     app.set_transcript_visible_start(start);
     // The cursor col clamps to the visible cursor line length
-    // (section 4.1): a transient lines read, released before the
-    // mutation.
+    // (section 4.1): read from the combined settled + stream lines.
     if browse_active {
         let (cl, _) = app.browse_ref().line_col();
         if cl >= start && cl < start + h {
-            let len = {
-                let ls = app.transcript_lines(text_w, Some(host));
-                ls[cl]
-                    .spans
-                    .iter()
-                    .map(|s| s.content.chars().count())
-                    .sum::<usize>()
-            };
+            let len = combined[cl]
+                .spans
+                .iter()
+                .map(|s| s.content.chars().count())
+                .sum::<usize>();
             app.browse().clamp_col(len);
         }
     }
     // The press-path layout: the line texts and the width the
     // browse motions and the search read, plus the raw source texts
     // the browse yank prefers over the rendered lines (section 11.3).
+    // The raw map extends the settled lines with one `None` per live
+    // stream line (the live body is not yet a settled, shareable
+    // event; yanks over it fall back to the rendered text).
     if browse_active {
-        let texts: Vec<String> = app
-            .transcript_lines(text_w, Some(host))
-            .iter()
-            .map(ToString::to_string)
-            .collect();
-        let line_raw = app.transcript_raw(text_w, Some(host));
+        let texts: Vec<String> = combined.iter().map(|l| l.to_string()).collect();
+        let mut line_raw: Vec<Option<String>> = app.transcript_raw(text_w, Some(host));
+        line_raw.extend(std::iter::repeat_n(None, stream_len));
         app.set_browse_layout(total, h, text_w, texts, line_raw);
     }
     // The owned browse draw inputs: the cursor, the match-line
@@ -3207,8 +3219,9 @@ pub fn draw(
         None
     };
     let sel_bg = pl.color(crate::color::Role::Selection);
-    let lines = app.transcript_lines(text_w, Some(host));
-    let window = &lines[start..];
+    // The visible window is a slice of the combined settled + stream
+    // tail. `start` was computed against the combined total above.
+    let window = &combined[start..];
     if window.is_empty() {
         let placeholder = match app.active() {
             // The placeholder in the pi `dim` tone (not a hard-coded gray).
@@ -3226,7 +3239,7 @@ pub fn draw(
     } else {
         let mut draw_lines = if browse_active {
             browse_window_lines(
-                lines,
+                &combined,
                 start,
                 h,
                 gutter_w,
@@ -3296,26 +3309,11 @@ pub fn draw(
     }
 
     let mut row = 1usize;
-    // Live stream block (docs/tui-streaming-response.md section 6.3):
-    // the in-progress model response, rendered right after the
-    // existing messages, above the model status indicator (working
-    // row). It does not scroll with the transcript; the settle event
-    // moves the text into the transcript and clears the block.
-    if !stream_lines.is_empty() {
-        for (i, l) in stream_lines.iter().enumerate() {
-            if i as u16 >= rows[row].height {
-                break;
-            }
-            let sub = ratatui::layout::Rect {
-                x: rows[row].x,
-                y: rows[row].y + i as u16,
-                width: rows[row].width,
-                height: 1,
-            };
-            f.render_widget(Paragraph::new(l.clone()), sub);
-        }
-        row += 1;
-    }
+    // The in-progress stream content now renders inside the transcript
+    // (docs/tui-streaming-simplify.md section 3): no dedicated layout
+    // cell for it here. The `row` counter starts at 1 and tracks the
+    // first post-transcript cell (pending rows, banner, working row,
+    // host rows, input, status).
 
     // waiting messages: the steering list of the active session
     // (docs/tui_feature_requests_from_human.md 2026-08-31, stage 1).
