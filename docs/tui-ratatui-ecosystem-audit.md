@@ -1,7 +1,7 @@
 # TUI ratatui Ecosystem Audit
 
 Status: Active
-Last updated: 2026-09-28
+Last updated: 2026-09-13
 Scope: `bin/tui`, `bin/tui-stream-drt`, `crates/tui-highlight`
 Basis: `docs/NEW-refactor.md` (the refactor decision) and
 `docs/tui_feature_requests_from_human.md` (the feature index)
@@ -230,7 +230,13 @@ narrow" request (open item) grows into interactive diff viewing.
 **Verdict**: **Keep hand-rolled.** `frizbee` already handles the
 fuzzy ranking. The list rendering is tightly coupled to the preview
 pane, scope cycling, and path abbreviation. Extracting to
-`tui-widget-list` would not reduce complexity.
+`tui-widget-list` would not reduce complexity. The preview pane
+wraps its content via `crate::render::wrap_hard_lines` (§4.8): the
+pane reflows on terminal resize instead of clipping, and no new
+crate was needed — the `reflow` module inside `ratatui-widgets`
+(`WordWrapper`) is private in 0.30.2, and `textwrap` /
+`unicode-linebreak` drop the per-segment styling the preview
+requires.
 
 ### 3.7 Vim Editor
 
@@ -448,6 +454,68 @@ means the stream content scrolls with the transcript and the
 transcript buffer instead of a separate pinned region. The
 `ratatui-markdown` hybrid scroll system is not relevant here.
 
+### 4.8 Preview-pane text wrapping (FIXED 2026-09-13)
+
+> "The preview pane in the floating window does not wrap text
+> dynamically with the current terminal size. Truncated content in
+> the preview pane is always frustrating."
+
+**Root cause**: In ratatui 0.30.2, `Paragraph` defaults to
+`wrap: None` (verified in `ratatui-widgets-0.3.2/src/paragraph.rs`
+line 158: `wrap: Option<Wrap>` initialised to `None`). Both preview
+panes — `picker/render.rs` (`render_preview`) and `palette/render.rs`
+(`render_preview_pane`) — built a `Paragraph` without calling
+`.wrap(...)`, so any hard line wider than the pane was silently
+clipped. The picker additionally used `take(pane_h)` without
+subtracting the two `Block` border rows, so the last two visible rows
+were always cut off.
+
+**Crate evaluation**:
+
+- **`Paragraph::wrap(Wrap { trim })`** — the built-in path. A
+  one-liner, but `Paragraph`'s scroll offset operates in *display-row*
+  units after internal wrapping, while `preview_scroll` in both state
+  machines (`picker/state.rs`, `palette/state.rs`) is a *hard-line*
+  index. Using `Paragraph`'s internal wrap would desynchronise the
+  scroll offset and break the palette's auto-scroll-to-selected-option
+  logic. Rejected.
+
+- **`ratatui-widgets::reflow::WordWrapper`** — the exact word-wrap
+  state machine that `Paragraph::wrap` uses internally. However the
+  `reflow` module is **private** in ratatui 0.30.2 (`mod reflow;` in
+  `ratatui-widgets/src/lib.rs`, not re-exported). Not usable as a
+  public API.
+
+- **`textwrap` / `unicode-linebreak`** — operate on plain `&str`.
+  The preview content is `Vec<Vec<Seg>>` where
+  `Seg = (Style, String)`. Neither crate preserves per-segment
+  styling across wrap points; a re-map would be required, defeating
+  the purpose.
+
+- **`tui-textarea`** — a multi-line text *editor* widget, not a
+  read-only preview renderer. Wrong abstraction.
+
+**Decision**: **Keep hand-rolled; no new crate.** Reuse the existing
+`wrap_styled` helper (already in `render.rs`, used by the transcript
+prose renderer) through a new public `wrap_hard_lines` entry point
+that pre-wraps each hard line to the pane's current inner width. The
+pre-wrapped display lines feed a plain `Paragraph` (no `.wrap()`
+call needed, since each line already fits). Scroll state stays in
+hard-line units; two small index-mapping helpers
+(`hard_line_display_start`, `display_row_hard_line`) translate the
+hard-line offset into display-row offsets. Because the wrap is
+recomputed every frame at the current pane width, the pane reflows
+automatically when the terminal resizes.
+
+**Files changed**:
+- `bin/tui/src/render.rs` — add `wrap_hard_lines`,
+  `hard_line_display_start`, `display_row_hard_line` plus tests.
+- `bin/tui/src/picker/render.rs` — `render_preview` now pre-wraps
+  at `preview_rect.width - 2` and subtracts the 2 border rows from
+  the visible height.
+- `bin/tui/src/palette/render.rs` — `render_preview_pane` now
+  pre-wraps at the inner width and auto-scrolls in display-row space.
+
 ---
 
 ## 5. Shipped Features That Already Use Ecosystem Libraries
@@ -508,6 +576,10 @@ Priority ordered by impact-to-effort ratio:
 15. **N/A** — `tui-realm` / `widgetui` / `rat-salsa` /
     `ratatui-input-manager` / `ratatui-interact` / `malevich`
     (§3.8). These are extension-side libraries, not core TUI.
+16. **DONE** — Preview-pane text wrapping (§4.8). Pre-wrap hard lines
+    at the pane's inner width so content reflows on terminal resize
+    instead of being clipped. Reuses the existing `wrap_styled`
+    helper; no new crate needed.
 
 ---
 

@@ -203,51 +203,65 @@ fn render_preview_pane(
 
     let content = render_preview(item, state.option_cursor, palette);
     let pane_h = preview_rect.height as usize;
-    // The block border consumes 2 rows (top + bottom).
+    // The block border consumes 2 rows (top + bottom) and 2 columns
+    // (left + right).
     let visible_h = pane_h.saturating_sub(2).max(1);
-
-    // Auto-scroll: keep the selected option visible. The selected
-    // option is at content-line index `option_cursor`. If it falls
-    // outside the visible window, adjust `preview_scroll`.
-    if !item.options.is_empty() {
-        let sel = state.option_cursor.min(item.options.len().saturating_sub(1));
-        let top = state.preview_scroll;
-        let bot = top + visible_h;
-        if sel < top {
-            state.preview_scroll = sel;
-        } else if sel >= bot {
-            state.preview_scroll = sel - visible_h + 1;
-        }
-    }
-
-    let start = state.preview_scroll.min(content.len());
-
+    let inner_w = (preview_rect.width as usize).saturating_sub(2).max(1);
     let plain_base = palette.style(
         crate::color::Role::PlainText,
         Modifier::empty(),
     );
-    let lines: Vec<Line> = content
+    // Plain (default-style) segments get the pane's plain-text tone;
+    // highlighted segments keep their palette styles.
+    let styled: Vec<Vec<crate::highlight::Seg>> = content
         .iter()
-        .skip(start)
-        .take(visible_h)
         .map(|segs| {
-            if segs.is_empty() {
-                Line::from("")
-            } else {
-                let spans: Vec<Span> = segs
-                    .iter()
-                    .map(|(s, t)| {
-                        let style = if *s == Style::default() {
-                            plain_base
-                        } else {
-                            *s
-                        };
-                        Span::styled(t.clone(), style)
-                    })
-                    .collect();
-                Line::from(spans)
-            }
+            segs
+                .iter()
+                .map(|(s, t)| {
+                    if *s == Style::default() {
+                        (plain_base, t.clone())
+                    } else {
+                        (*s, t.clone())
+                    }
+                })
+                .collect()
         })
+        .collect();
+    // Wrap the hard lines at the pane's inner width so content
+    // reflows with the pane instead of being clipped
+    // (docs/tui-ratatui-ecosystem-audit.md §4.8).
+    let wrapped = crate::render::wrap_hard_lines(&styled, inner_w);
+
+    // Auto-scroll: keep the selected option visible. The selected
+    // option is at hard-line index `option_cursor`. If it falls
+    // outside the visible display-row window, adjust `preview_scroll`.
+    if !item.options.is_empty() {
+        let sel = state.option_cursor.min(item.options.len().saturating_sub(1));
+        let sel_disp = crate::render::hard_line_display_start(&wrapped, sel);
+        let top = state
+            .preview_scroll
+            .min(content.len().saturating_sub(1));
+        let top_disp = crate::render::hard_line_display_start(&wrapped, top);
+        let bottom_disp = top_disp + visible_h;
+        if sel_disp < top_disp {
+            state.preview_scroll = sel;
+        } else if sel_disp >= bottom_disp {
+            // Land the window so the selection is the last visible
+            // display row, in hard-line units.
+            state.preview_scroll =
+                crate::render::display_row_hard_line(&wrapped, sel_disp - visible_h + 1);
+        }
+    }
+
+    let start = state.preview_scroll.min(content.len().saturating_sub(1));
+    let disp_start = crate::render::hard_line_display_start(&wrapped, start);
+    let lines: Vec<Line> = wrapped
+        .iter()
+        .flat_map(|ls| ls.iter())
+        .skip(disp_start)
+        .take(visible_h)
+        .cloned()
         .collect();
 
     let preview_block = Block::bordered()

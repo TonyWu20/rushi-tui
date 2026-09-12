@@ -1081,6 +1081,64 @@ fn wrap_styled(segs: Vec<(Style, String)>, width: usize) -> Vec<Line<'static>> {
     out
 }
 
+/// Wrap a list of hard lines of styled segments to fit `width` display
+/// cells, preserving segment styling across wrap points.
+///
+/// Each input line is a `Vec<Seg>` (one hard line of the previewer
+/// output). Each output line is at most `width` cells: words wrap at
+/// spaces, and a word longer than the width is hard-broken. A hard
+/// line whose segments are all empty (a blank line) yields one empty
+/// display line, so blank lines stay visible. Re-running this every
+/// frame with the pane's current inner width is what makes the
+/// preview pane reflow when the terminal resizes instead of
+/// clipping (docs/tui-ratatui-ecosystem-audit.md §4.8).
+pub fn wrap_hard_lines(lines: &[Vec<crate::highlight::Seg>], width: usize) -> Vec<Vec<Line<'static>>> {
+    let width = width.max(1);
+    lines
+        .iter()
+        .map(|segs| {
+            if segs.iter().all(|(_, t)| t.is_empty()) {
+                // A blank line: keep exactly one empty display row.
+                return vec![Line::from("")];
+            }
+            wrap_styled(segs.clone(), width)
+        })
+        .collect()
+}
+
+/// The display-row index where hard line `hard` begins in `wrapped`
+/// (the output of [`wrap_hard_lines`]). Used to translate the
+/// hard-line-unit `preview_scroll` offset into a display-row offset
+/// without re-wrapping.
+pub fn hard_line_display_start(wrapped: &[Vec<Line>], hard: usize) -> usize {
+    let mut acc = 0usize;
+    for (i, lines) in wrapped.iter().enumerate() {
+        if i == hard {
+            return acc;
+        }
+        acc += lines.len();
+    }
+    // `hard` past the end: the display row after the last hard line.
+    acc
+}
+
+/// The largest hard-line index whose display start is at or before
+/// `row` (in `wrapped`). Used to back-track the scroll target when
+/// the palette auto-scrolls to a selected option that wraps onto
+/// several display rows.
+pub fn display_row_hard_line(wrapped: &[Vec<Line>], row: usize) -> usize {
+    let mut acc = 0usize;
+    let mut last = 0usize;
+    for (i, lines) in wrapped.iter().enumerate() {
+        if acc > row {
+            break;
+        }
+        last = i;
+        acc += lines.len();
+    }
+    last
+}
+
 /// Like [`wrap_styled`] but treats every segment as one continuous
 /// text stream. All spans from a single ext line flow onto the same
 /// visual line (word-wrapping across span boundaries when the width
@@ -4262,5 +4320,137 @@ mod table_fix_tests {
             data_line_count >= 2,
             "the long cell should wrap to ≥2 visual lines, got {data_line_count}:\n{joined}"
         );
+    }
+}
+
+// ── §4.8 preview-pane wrapping helpers ─────────────────────────────
+
+#[cfg(test)]
+mod wrap_hard_lines_tests {
+    use crate::highlight::Seg;
+    use crate::render::{display_row_hard_line, hard_line_display_start, wrap_hard_lines};
+    use ratatui::style::Style;
+
+    fn segs(texts: &[&str]) -> Vec<Seg> {
+        let s = Style::default();
+        texts
+            .iter()
+            .map(|t| (s, t.to_string()))
+            .collect()
+    }
+
+    /// Join one hard line's display lines with a marker so wrap
+    /// points are visible.
+    fn joined(display_lines: &[ratatui::text::Line]) -> String {
+        display_lines
+            .iter()
+            .map(|line| {
+                line.iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<Vec<_>>()
+                    .concat()
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    /// Short lines pass through unchanged: one display row each.
+    #[test]
+    fn short_lines_pass_through() {
+        let lines = vec![
+            segs(&["fn main() {"]),
+            segs(&["    println!(\"hi\");"]),
+            segs(&["}"]),
+        ];
+        let wrapped = wrap_hard_lines(&lines, 80);
+        assert_eq!(wrapped.len(), 3);
+        assert_eq!(wrapped[0].len(), 1);
+        assert_eq!(wrapped[1].len(), 1);
+        assert_eq!(wrapped[2].len(), 1);
+        let j = joined(&wrapped[1]);
+        assert!(j.contains("println!"), "indent must be preserved: {j}");
+    }
+
+    /// A word longer than the width hard-breaks at the boundary.
+    #[test]
+    fn overlong_word_hard_breaks() {
+        let lines = vec![segs(&["abcdef"])];
+        let wrapped = wrap_hard_lines(&lines, 4);
+        let j = joined(&wrapped[0]);
+        assert_eq!(j, "abcd | ef", "expected 4-char hard break, got: {j}");
+    }
+
+    /// A word longer than a narrow width hard-breaks repeatedly.
+    #[test]
+    fn overlong_word_repeated_breaks() {
+        let lines = vec![segs(&["abcdefgh"])];
+        let wrapped = wrap_hard_lines(&lines, 3);
+        let j = joined(&wrapped[0]);
+        assert_eq!(j, "abc | def | gh", "expected repeated breaks, got: {j}");
+    }
+
+    /// Words wrap at spaces; a trailing space moves to the next line
+    /// but is not visible.
+    #[test]
+    fn words_wrap_at_spaces() {
+        let lines = vec![segs(&["hello world"])];
+        let wrapped = wrap_hard_lines(&lines, 6);
+        let j = joined(&wrapped[0]);
+        assert!(
+            j.contains("hello") && j.contains("world"),
+            "both words must survive: {j}"
+        );
+        assert_eq!(wrapped[0].len(), 2, "expected two display rows: {j}");
+    }
+
+    /// A blank hard line stays a single empty display row.
+    #[test]
+    fn blank_line_stays_visible() {
+        let lines = vec![segs(&[""]), segs(&["x"])];
+        let wrapped = wrap_hard_lines(&lines, 80);
+        assert_eq!(wrapped.len(), 2);
+        assert_eq!(wrapped[0].len(), 1);
+        assert!(joined(&wrapped[0]).is_empty());
+    }
+
+    /// Width 0 is floored to 1, so no infinite loop or panic.
+    #[test]
+    fn width_zero_is_floored() {
+        let lines = vec![segs(&["ab"])];
+        let wrapped = wrap_hard_lines(&lines, 0);
+        assert!(!wrapped.is_empty());
+    }
+
+    /// `hard_line_display_start` maps a hard-line index to the
+    /// display-row index where that hard line's first row begins.
+    #[test]
+    fn hard_line_display_start_maps_cumulative() {
+        // width 4: "abcd" fits in one row; "w1 w2 w3" wraps to
+        // three rows ("w1 ", "w2 ", "w3"); "z" is one row.
+        let lines = vec![segs(&["abcd"]), segs(&["w1 w2 w3"]), segs(&["z"])];
+        let wrapped = wrap_hard_lines(&lines, 4);
+        assert_eq!(wrapped[0].len(), 1);
+        assert_eq!(wrapped[1].len(), 3);
+        assert_eq!(wrapped[2].len(), 1);
+        assert_eq!(hard_line_display_start(&wrapped, 0), 0);
+        assert_eq!(hard_line_display_start(&wrapped, 1), 1);
+        assert_eq!(hard_line_display_start(&wrapped, 2), 4);
+        // Past the end: the total display-row count.
+        assert_eq!(hard_line_display_start(&wrapped, 99), 5);
+    }
+
+    /// `display_row_hard_line` maps a display row back to the largest
+    /// hard line that starts at or before it.
+    #[test]
+    fn display_row_hard_line_back_tracks() {
+        let lines = vec![segs(&["abcd"]), segs(&["w1 w2 w3"]), segs(&["z"])];
+        let wrapped = wrap_hard_lines(&lines, 4);
+        // display rows: 0 -> hard 0; 1..3 -> hard 1; 4 -> hard 2
+        assert_eq!(display_row_hard_line(&wrapped, 0), 0);
+        assert_eq!(display_row_hard_line(&wrapped, 1), 1);
+        assert_eq!(display_row_hard_line(&wrapped, 3), 1);
+        assert_eq!(display_row_hard_line(&wrapped, 4), 2);
+        // Past the end clamps to the last hard line.
+        assert_eq!(display_row_hard_line(&wrapped, 99), 2);
     }
 }

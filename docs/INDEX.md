@@ -30,7 +30,7 @@ extension-host lifecycle. Method and conventions:
 | `tui.md` | Historical | 2026-09-07 | Original TUI proposal: coupling contract, `SessionPort`, wire format. Superseded by shipped code. |
 | `tui-plan.html` | Historical | 2026-09-07 | HTML implementation plan with mermaid diagrams for the first TUI build. |
 | `NEW-refactor.md` | Implemented | 2026-09-11 | Decision to drop syntect for tree-sitter and adopt the ratatui widget ecosystem. This repo is the result. |
-| `tui-ratatui-ecosystem-audit.md` | Active | 2026-09-28 | Per-module and per-feature audit of hand-rolled vs. ratatui-ecosystem libraries. Action items with priorities. |
+| `tui-ratatui-ecosystem-audit.md` | Active | 2026-09-13 | Per-module and per-feature audit of hand-rolled vs. ratatui-ecosystem libraries. Action items with priorities. |
 | `ui-extension.md` | Active | 2026-09-07 | UI extension design: protocol, host lifecycle, trust model. The contract for `../rushi-exts`. |
 | `ui-extension-plan.md` | Plan | 2026-09-07 | Staged build plan for the extension mechanism. |
 | `tui-extension-design-review.md` | Review | 2026-09-07 | Adversarial review of `ui-extension.md`: missing `notify` op, `transform` reply correlation. |
@@ -59,7 +59,7 @@ extension-host lifecycle. Method and conventions:
 | `goal-ux.md` | Spec | 2026-09-08 | Goal UX: prompt template, TUI status, `goal pause` / `goal clear`. |
 | `goal-ui_feedback_from_human.md` | Draft | 2026-09-10 | Human-reported goal UI bugs and feature requests. |
 | `tree-ui-design-from-human.md` | Draft | 2026-09-11 | Draft for the rewind/tree browse UI. |
-| `tui_feature_requests_from_human.md` | Active | 2026-09-10 | Slim index of all TUI feature requests with ship status. |
+| `tui_feature_requests_from_human.md` | Active | 2026-09-13 | Slim index of all TUI feature requests with ship status. |
 | `tui-ext-repo-split.md` | Historical | 2026-09-08 | The repo-split execution record. Marked STALE for the re-pointing step. |
 | `tui-insta-snapshot-testing.md` | Implemented | 2026-09-11 | The insta-snapshot test method: harness, snapshot set, determinism rules. |
 

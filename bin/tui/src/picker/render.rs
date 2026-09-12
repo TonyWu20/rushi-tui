@@ -214,29 +214,40 @@ fn render_preview(
 ) {
     let header = previewer.header(item).unwrap_or_else(|| item.label.clone());
     let content = previewer.content(item, palette);
-    let pane_h = preview_rect.height as usize;
-    let start = state.preview_scroll.min(content.len());
     // Plain (default-style) segments get the pane's plain-text tone;
     // highlighted segments keep their palette syntax styles.
     let plain_base = palette.style(crate::color::Role::PlainText, Modifier::empty());
-    let lines: Vec<Line> = content
+    let styled: Vec<Vec<crate::highlight::Seg>> = content
         .iter()
-        .skip(start)
-        .take(pane_h)
         .map(|segs| {
-            if segs.is_empty() {
-                Line::from("")
-            } else {
-                let spans: Vec<Span> = segs
-                    .iter()
-                    .map(|(s, t)| {
-                        let style = if *s == Style::default() { plain_base } else { *s };
-                        Span::styled(t.clone(), style)
-                    })
-                    .collect();
-                Line::from(spans)
-            }
+            segs
+                .iter()
+                .map(|(s, t)| {
+                    if *s == Style::default() {
+                        (plain_base, t.clone())
+                    } else {
+                        (*s, t.clone())
+                    }
+                })
+                .collect()
         })
+        .collect();
+    // The block border eats 2 rows and 2 columns; wrap the hard lines
+    // at the inner width so content reflows with the pane instead of
+    // being clipped (docs/tui-ratatui-ecosystem-audit.md §4.8).
+    let inner_w = preview_rect.width.saturating_sub(2).max(1) as usize;
+    let visible_h = preview_rect.height.saturating_sub(2).max(1) as usize;
+    let wrapped = crate::render::wrap_hard_lines(&styled, inner_w);
+    // `preview_scroll` is in hard-line units (state-machine doc);
+    // translate it to a display-row offset.
+    let start = state.preview_scroll.min(content.len().saturating_sub(1));
+    let disp_start = crate::render::hard_line_display_start(&wrapped, start);
+    let lines: Vec<Line> = wrapped
+        .iter()
+        .flat_map(|ls| ls.iter())
+        .skip(disp_start)
+        .take(visible_h)
+        .cloned()
         .collect();
     let preview_block = Block::bordered()
         .border_type(BorderType::Rounded)

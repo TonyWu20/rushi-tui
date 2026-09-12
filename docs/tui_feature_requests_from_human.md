@@ -397,3 +397,18 @@ macchiato` as the first internal color scheme. Shipped in
 - [x] Recolor the `Thinking` role to `#8087a2`. Updated the
       `Level::thinking` fallback, the macchiato scheme, and the
       color alignment doc.
+
+## New requests (2026-09-13)
+
+- [x] Preview-pane text in the picker and palette floats was
+      truncated at the pane width instead of wrapping.
+      Fixed: `wrap_hard_lines` (in `render.rs`) pre-wraps each
+      hard line to the pane's inner width, so content reflows on
+      terminal resize. Detail:
+      `docs/tui-ratatui-ecosystem-audit.md` (§4.8).
+
+- [x] Also fixed a latent off-by-2 in the picker preview pane
+      where the two border rows were not subtracted from the
+      visible height. Detail:
+      `docs/tui-ratatui-ecosystem-audit.md` (§4.8).
+

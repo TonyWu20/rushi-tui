@@ -623,3 +623,134 @@ fn snap_markdown_blockquote() {
     let out = render(&mut app, &host, 80, 24);
     insta::assert_snapshot!(out);
 }
+
+// ── §4.8 preview-pane wrapping ───────────────────────────────────────
+
+/// A file line wider than the picker preview pane's inner width
+/// wraps onto extra display rows instead of being clipped
+/// (docs/tui-ratatui-ecosystem-audit.md §4.8). Drives the real
+/// `render_picker` on a `TestBackend` at 100 columns: the
+/// narrow-orientation pane is 58 cells wide, 56 inner.
+#[test]
+fn picker_preview_wide_line_wraps_not_truncates() {
+    use crate::float::compute_float_layout;
+    use crate::picker::fuzzy::Snapshot;
+    use crate::picker::items::PickerItem;
+    use crate::picker::preview::FilePreviewer;
+    use crate::picker::render::render_picker;
+    use crate::picker::state::PickerState;
+    use ratatui::layout::Rect;
+
+    // A 20-word line (79 chars) wider than the 56-cell pane.
+    let words: Vec<String> = (0..20).map(|i| format!("w{i:02}")).collect();
+    let line = words.join(" ");
+    let tmp = TempDir::new().unwrap();
+    let file = tmp.path().join("long.txt");
+    std::fs::write(&file, format!("{line}\n")).unwrap();
+
+    let snap = Snapshot {
+        items: vec![PickerItem {
+            label: "long.txt".into(),
+            value: "long.txt".into(),
+            payload: file.to_str().unwrap().to_string(),
+        }],
+        query: "long".into(),
+        settled: true,
+    };
+    let mut state = PickerState::new();
+    state.open("long", 5);
+
+    let previewer = FilePreviewer::new(50);
+    let layout = compute_float_layout(Rect::new(0, 0, 100, 30), true);
+    // Narrow orientation: the preview pane is 58 cells wide, 56
+    // inner. The 79-char line cannot fit on one display row.
+    assert!(layout.preview.is_some(), "the preview pane must show");
+
+    let backend = TestBackend::new(100, 30);
+    let mut term = Terminal::new(backend).expect("test backend");
+    let palette = Palette::builtin(Level::Rgb);
+    let mut cursor = None;
+    term.draw(|f| {
+        render_picker()
+            .f(f)
+            .state(&mut state)
+            .snapshot(&snap)
+            .layout(&layout)
+            .previewer(&previewer)
+            .hints("hints")
+            .palette(&palette)
+            .cursor(&mut cursor)
+            .call();
+    })
+    .unwrap();
+    let out: String = term.backend().to_string();
+
+    // Every word of the wide line survives: it wrapped onto a
+    // second display row instead of being clipped at 56 cells.
+    for w in &words {
+        assert!(
+            out.contains(w),
+            "word `{w}` must be visible in the preview pane:\n{out}"
+        );
+    }
+}
+
+/// Same guarantee for the palette preview pane: a help line wider
+/// than the pane wraps instead of being clipped.
+#[test]
+fn palette_preview_wide_help_line_wraps() {
+    use crate::float::compute_float_layout;
+    use crate::palette::items::{CmdKind, CmdOption, PaletteItem};
+    use crate::palette::render::render_palette;
+    use crate::palette::state::PaletteState;
+    use ratatui::layout::Rect;
+
+    let help: String = (0..20)
+        .map(|i| format!("w{i:02}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let item = PaletteItem {
+        id: "demo".into(),
+        label: "demo".into(),
+        kind: CmdKind::Set,
+        hint: String::new(),
+        help: help,
+        options: vec![CmdOption {
+            value: "a".into(),
+            current: true,
+        }],
+        ext: None,
+    };
+    let items = vec![item];
+    let mut state = PaletteState::new();
+    state.open(5);
+
+    let layout = compute_float_layout(Rect::new(0, 0, 100, 30), true);
+    assert!(layout.preview.is_some(), "the preview pane must show");
+
+    let backend = TestBackend::new(100, 30);
+    let mut term = Terminal::new(backend).expect("test backend");
+    let palette = Palette::builtin(Level::Rgb);
+    let mut cursor = None;
+    term.draw(|f| {
+        render_palette()
+            .f(f)
+            .state(&mut state)
+            .items(&items)
+            .layout(&layout)
+            .palette(&palette)
+            .cursor(&mut cursor)
+            .call();
+    })
+    .unwrap();
+    let out: String = term.backend().to_string();
+
+    // The help line is 79 chars, the pane inner width is 56. Every
+    // word must survive via wrapping, not clipping.
+    for w in (0..20).map(|i| format!("w{i:02}")) {
+        assert!(
+            out.contains(&w),
+            "word `{w}` must be visible in the preview pane:\n{out}"
+        );
+    }
+}
