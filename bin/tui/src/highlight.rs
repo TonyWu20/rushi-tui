@@ -851,24 +851,26 @@ pub fn table_grid(rows: &[String], width: usize, palette: &Palette) -> Vec<Vec<(
     if ncols == 0 {
         return Vec::new();
     }
-    // The column widths: the content cap, then the narrow share.
-    // The grid owns `ncols` verticals, the two outer borders, and
-    // `ncols` padding cells: the content columns split the rest.
+    // The column widths: compute the natural content width per column
+    // (the longest cell in that column). When the total natural width
+    // fits in the available space, the grid uses it as-is so no cell
+    // wraps unnecessarily. When it overflows, `allocate_col_widths`
+    // shrinks only the widest columns so the narrow ones keep their
+    // natural width.
     let avail = width
         .saturating_sub(2)
         .saturating_sub(ncols)
         .saturating_sub(2 * ncols);
-    let share = (avail / ncols).max(1);
-    let widths: Vec<usize> = (0..ncols)
+    let content_widths: Vec<usize> = (0..ncols)
         .map(|c| {
-            let content = cells_rows
+            cells_rows
                 .iter()
                 .map(|row| row.get(c).map(|s| s.chars().count()).unwrap_or(0))
                 .max()
-                .unwrap_or(0);
-            content.min(share)
+                .unwrap_or(0)
         })
         .collect();
+    let widths = allocate_col_widths(&content_widths, avail);
 
     let border = palette.style(Role::Hint, Modifier::DIM);
     let plain = palette.style(Role::PlainText, Modifier::empty());
@@ -914,6 +916,62 @@ pub fn table_grid(rows: &[String], width: usize, palette: &Palette) -> Vec<Vec<(
     out
 }
 
+/// Decide the rendered width of each table column.
+///
+/// `natural` is the longest cell in each column (the content width the
+/// user would want to see without wrapping). `avail` is the number of
+/// columns the grid may claim for content (the caller has already
+/// removed the two outer borders, the inter-column verticals, and the
+/// per-cell padding).
+///
+/// When the natural widths already fit within `avail`, they are used as
+/// is — a wide table is not squeezed into an even share of the pane.
+/// Each column still gets a floor of 1 so empty cells stay visible.
+///
+/// When the natural widths exceed `avail` (the table genuinely cannot
+/// fit), the deficit is removed from the widest columns first: narrow
+/// columns keep their natural width and only the wide columns shrink,
+/// so short headers like `Name` never wrap. Each column keeps a floor
+/// of 1.
+fn allocate_col_widths(natural: &[usize], avail: usize) -> Vec<usize> {
+    let n = natural.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    // Floor every column at 1 first so empty cells stay visible.
+    let mut w = natural.iter().map(|&x| x.max(1)).collect::<Vec<_>>();
+    let total: usize = w.iter().sum();
+    if total <= avail {
+        return w;
+    }
+    // Remove the excess from the widest columns, tier by tier, so the
+    // narrowest columns keep their natural width. Each tier (columns
+    // sharing the same current max width) absorbs an even share; a
+    // tier never drops below 1 in a single step.
+    let mut rem = total - avail;
+    loop {
+        if rem == 0 {
+            break;
+        }
+        let mx = w.iter().copied().max().unwrap_or(1);
+        if mx <= 1 {
+            break; // every column is at the floor; nothing left to take
+        }
+        let top: usize = w.iter().filter(|&&x| x == mx).count();
+        let cap = mx - 1;
+        // Even split of the remaining deficit across the top tier,
+        // rounded up so progress is guaranteed, bounded by the tier cap.
+        let take = ((rem + top - 1) / top).min(cap).max(1);
+        for i in 0..n {
+            if w[i] == mx {
+                w[i] -= take;
+                rem = rem.saturating_sub(take);
+            }
+        }
+    }
+    w
+}
+
 /// Word-wrap one table cell to at most `width` columns: words break
 /// on runs of whitespace, and a single word longer than the column
 /// hard-breaks into `width`-sized chunks so no content is lost
@@ -946,13 +1004,16 @@ fn wrap_cell_text(text: &str, width: usize) -> Vec<String> {
             }
             continue;
         }
-        let sep = usize::from(!cur.is_empty());
-        if !cur.is_empty() && cur_w + sep + w > width {
+        if !cur.is_empty() && cur_w + 1 + w > width {
             lines.push(cur.join(" "));
             cur.clear();
             cur_w = 0;
         }
-        cur_w += usize::from(cur.is_empty()) + w;
+        if cur.is_empty() {
+            cur_w = w;
+        } else {
+            cur_w += 1 + w;
+        }
         cur.push(word);
     }
     if !cur.is_empty() {
@@ -985,5 +1046,83 @@ fn grid_border(
     }
     out.push((*style, right.to_string()));
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn allocate_fits_natural_widths() {
+        // Natural widths fit: total 12 <= 20 avail
+        let w = allocate_col_widths(&[5, 7], 20);
+        assert_eq!(w, vec![5, 7]);
+    }
+
+    #[test]
+    fn allocate_shrinks_wider_column_first() {
+        // Total 80 > avail 60 → shrink wide col, keep narrow col.
+        // natural = [5, 75], avail = 60 → col0 stays 5, col1 gets 55.
+        let w = allocate_col_widths(&[5, 75], 60);
+        assert_eq!(w[0], 5, "narrow column keeps its natural width");
+        assert_eq!(w.iter().sum::<usize>(), 60, "total equals avail");
+        assert!(w[1] < 75, "wide column was shrunk");
+    }
+
+    #[test]
+    fn allocate_minimum_one_per_column() {
+        // Very small avail: every column gets at least 1.
+        let w = allocate_col_widths(&[3, 4, 5], 3);
+        assert_eq!(w.len(), 3);
+        for &v in &w {
+            assert!(v >= 1, "column width must be >= 1");
+        }
+    }
+
+    #[test]
+    fn allocate_zero_content_gets_one() {
+        let w = allocate_col_widths(&[0, 10], 30);
+        assert_eq!(w[0], 1, "empty column still gets width 1");
+    }
+
+    #[test]
+    fn wrap_cell_text_short_text_no_wrap() {
+        let lines = wrap_cell_text("hello", 20);
+        assert_eq!(lines, vec!["hello".to_string()]);
+    }
+
+    #[test]
+    fn wrap_cell_text_wraps_at_word_boundary() {
+        // "one two three" at width 6:
+        // "one" (3), "one two" (7 > 6) → wrap after "one"
+        // "two" (3), "two three" (9 > 6) → wrap after "two"
+        // "three" (5)
+        let lines = wrap_cell_text("one two three", 6);
+        assert_eq!(lines, vec!["one".to_string(), "two".to_string(), "three".to_string()]);
+    }
+
+    #[test]
+    fn wrap_cell_text_hard_breaks_long_word() {
+        // A single 10-char word in a width-4 column: chunks of 4.
+        let lines = wrap_cell_text("abcdefghij", 4);
+        assert_eq!(lines, vec!["abcd".to_string(), "efgh".to_string(), "ij".to_string()]);
+    }
+
+    #[test]
+    fn wrap_cell_text_counts_spaces() {
+        // "aa bb cc" at width 8:
+        // "aa" (2), "aa bb" (5), "aa bb cc" (8) — exactly fits.
+        let lines = wrap_cell_text("aa bb cc", 8);
+        assert_eq!(lines, vec!["aa bb cc".to_string()]);
+
+        // width 7: "aa bb" (5) fits, "aa bb cc" would be 8 > 7 → wrap
+        let lines = wrap_cell_text("aa bb cc", 7);
+        assert_eq!(lines, vec!["aa bb".to_string(), "cc".to_string()]);
+    }
+
+    #[test]
+    fn wrap_cell_text_empty() {
+        assert_eq!(wrap_cell_text("", 10), vec![String::new()]);
+    }
 }
 
