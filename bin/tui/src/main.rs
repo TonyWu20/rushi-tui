@@ -24,6 +24,7 @@ mod port;
 mod port_file;
 mod render;
 mod tool_display;
+mod transcript_worker;
 mod vim_editor;
 
 #[cfg(test)]
@@ -356,6 +357,11 @@ fn main() {
     let backend = CrosstermBackend::new(std::io::stdout());
     let mut term = Terminal::new(backend).expect("cannot create the terminal");
     let mut app = App::new();
+    // Stage 2 of the perf plan runs the transcript build on a
+    // background worker. Docs: docs/tui-perf-background-build-plan.md.
+    // The first draw of a session shows a fast tail-window build.
+    // The full build then lands in the background.
+    app.attach_transcript_worker();
     // The [tui] color override forces the capability level. Absent,
     // the environment detection stands (color.rs module docs). The
     // [tui] color scheme (docs/tui-color-scheme.md section 3) maps
@@ -1355,6 +1361,13 @@ fn main() {
                 app.set_focus_block(&id);
             }
         }
+
+        // 4.9 Background transcript build, stage 2 of the perf plan.
+        // Docs: docs/tui-perf-background-build-plan.md.
+        // Dispatch a recorded rebuild when none is in flight.
+        // Then poll so finished builds swap in before the draw.
+        app.dispatch_transcript_build(Some(&host));
+        app.poll_transcript_worker();
 
         // 5. Draw.
         let mut cursor: Option<(u16, u16)> = None;

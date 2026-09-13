@@ -1934,10 +1934,27 @@ fn working_row(app: &App, running: bool, now: &chrono::DateTime<chrono::Utc>) ->
     Line::from(vec![frame, body])
 }
 
+/// The transcript-building row, shown while a background build is in
+/// flight (docs/tui-perf-background-build-plan.md, stage 2).
+/// It reuses the working-row spinner shape: the braille frame in the
+/// thinking-border color, then the label in the pi `dim` tone.
+fn rebuilding_row(app: &App, now: &chrono::DateTime<chrono::Utc>) -> Line<'static> {
+    let frame = Span::styled(
+        format!("{} ", spinner_frame(now)),
+        Style::default().fg(app.palette().thinking_border(app.thinking_level())),
+    );
+    let body = Span::styled(
+        " building transcript…",
+        app.palette()
+            .style(crate::color::Role::Status, Modifier::empty()),
+    );
+    Line::from(vec![frame, body])
+}
+
 /// The in-progress model response lines, rendered inside the transcript
 /// (docs/tui-streaming-simplify.md section 3). The caller appends the
-/// returned lines to the settled transcript so the live body settles
-/// where it lands and the user can scroll up through the whole body.
+/// returned lines to the settled transcript. The live body settles
+/// where it lands, and the user can scroll up through the whole body.
 ///
 /// Shows the header with an ellipsis ("…") while the stream is open.
 /// Once the done line arrives, the header shows "· done".
@@ -2654,9 +2671,18 @@ pub fn raw_event_text(e: &crate::event::Event) -> String {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TranscriptBuildInput {
     /// Events of the active session, oldest first.
+    /// A tail-window build holds only the newest suffix of the log.
     pub events: Vec<Event>,
     /// 1-based log seq of the first in-memory event.
+    /// For a tail-window build this is the full-log base seq shifted
+    /// forward by the events dropped, so log seq math stays exact.
     pub events_base_seq: usize,
+    /// First in-memory event index this input covers.
+    /// `0` for a full build.
+    /// A tail-window build holds the newest suffix of the log,
+    /// and this field is that suffix's first in-memory index.
+    /// (docs/tui-perf-background-build-plan.md, stage 2.)
+    pub event_offset: usize,
     /// Tool-call details: call id to (name, arguments).
     pub call_details: std::collections::HashMap<String, (String, serde_json::Value)>,
     /// The oldest pending approval, if any.
@@ -2717,10 +2743,27 @@ impl TranscriptBuildInput {
         width: usize,
         ext: Option<&crate::ext::ExtHost>,
     ) -> Self {
-        let events = app.events();
+        Self::from_app_tail(app, width, ext, app.events().len())
+    }
+
+    /// Snapshot the newest `tail_events` events only.
+    /// The first-build fast path (docs/tui-perf-background-build-plan.md,
+    /// stage 2) renders the visible tail window on the main thread.
+    /// The result is a partial build until the full build lands.
+    /// Event ids and log seqs stay aligned with the full log.
+    pub fn from_app_tail(
+        app: &crate::app::App,
+        width: usize,
+        ext: Option<&crate::ext::ExtHost>,
+        tail_events: usize,
+    ) -> Self {
+        let all = app.events();
+        let offset = all.len().saturating_sub(tail_events.max(1));
+        let events = &all[offset..];
         Self {
             events: events.to_vec(),
-            events_base_seq: app.events_base_seq(),
+            events_base_seq: app.events_base_seq() + offset,
+            event_offset: offset,
             call_details: app.call_details(),
             pending: app.oldest_pending_approval(),
             palette: app.palette().clone(),
@@ -2734,9 +2777,9 @@ impl TranscriptBuildInput {
             loop_running: app.active().is_some_and(|s| app.loop_running(s)),
             width,
             ext_data: ext.as_ref().map(|host| ExtRenderData {
-                span_lines: resolve_ext_spans(host, events, width),
+                span_lines: resolve_ext_spans_at(host, events, width, offset),
             }),
-            ext_lines: resolve_ext_lines(ext, events),
+            ext_lines: resolve_ext_lines_at(ext, events, offset),
         }
     }
 }
@@ -2750,17 +2793,31 @@ impl TranscriptBuildInput {
 /// It returns an owned `Vec<ExtLine>`.
 /// Events without a valid reply add no entry.
 /// The build falls back to the built-in render.
+#[allow(dead_code)]
 pub fn resolve_ext_lines(
     ext: Option<&crate::ext::ExtHost>,
     events: &[Event],
+) -> std::collections::HashMap<u64, Vec<crate::ext::ExtLine>> {
+    resolve_ext_lines_at(ext, events, 0)
+}
+
+/// `resolve_ext_lines` with an in-memory index offset.
+/// A tail-window build passes its suffix start so the keys are the
+/// full in-memory event indices (docs/tui-perf-background-build-plan.md,
+/// stage 2).
+pub fn resolve_ext_lines_at(
+    ext: Option<&crate::ext::ExtHost>,
+    events: &[Event],
+    offset: usize,
 ) -> std::collections::HashMap<u64, Vec<crate::ext::ExtLine>> {
     let mut out: std::collections::HashMap<u64, Vec<crate::ext::ExtLine>> =
         std::collections::HashMap::new();
     if let Some(host) = ext {
         for (i, e) in events.iter().enumerate() {
+            let event_id = (offset + i) as u64;
             if let Some(owner) = host.owner_for_kind(e.kind()) {
-                if let Some(lines) = host.lookup_lines(owner, i as u64) {
-                    out.insert(i as u64, lines);
+                if let Some(lines) = host.lookup_lines(owner, event_id) {
+                    out.insert(event_id, lines);
                 }
             }
         }
@@ -2778,17 +2835,31 @@ pub fn resolve_ext_lines(
 /// into an owned map the pure build can read.
 /// Spans without a finished reply add no entry.
 /// The build shows the raw span then (G5 fallback).
+#[allow(dead_code)]
 pub fn resolve_ext_spans(
     host: &crate::ext::ExtHost,
     events: &[Event],
     width: usize,
+) -> std::collections::HashMap<(u64, u32), Vec<crate::ext::ExtLine>> {
+    resolve_ext_spans_at(host, events, width, 0)
+}
+
+/// `resolve_ext_spans` with an in-memory index offset.
+/// A tail-window build passes its suffix start so the span keys are
+/// the full in-memory event indices (docs/tui-perf-background-build-plan.md,
+/// stage 2).
+pub fn resolve_ext_spans_at(
+    host: &crate::ext::ExtHost,
+    events: &[Event],
+    width: usize,
+    offset: usize,
 ) -> std::collections::HashMap<(u64, u32), Vec<crate::ext::ExtLine>> {
     use std::collections::HashMap;
     let mut out: HashMap<(u64, u32), Vec<crate::ext::ExtLine>> = HashMap::new();
     // The same width the build passes to `event_lines`.
     let ew = width.max(GUTTER + 8);
     for (i, e) in events.iter().enumerate() {
-        let event_id = i as u64;
+        let event_id = (offset + i) as u64;
         let (content, wrap_w) = match e.kind() {
             EventKind::UserMessage => (
                 e.get_str("content")
@@ -2851,6 +2922,10 @@ pub fn build_transcript_input(input: &TranscriptBuildInput) -> TranscriptBuild {
     // session history stays reachable (docs/tui-conversation-
     // browsing.md section 4.6). The log file is the record.
     let start = 0;
+    // The in-memory index of the first event this input covers.
+    // A tail-window input holds a suffix of the log, and its
+    // event ids and log seqs shift by this offset.
+    let offset = input.event_offset;
     // The tool_result ids of the visible window: a tool_call whose
     // result follows merges into the result box (the call line drops
     // for the tools whose result carries the call info).
@@ -2895,10 +2970,11 @@ pub fn build_transcript_input(input: &TranscriptBuildInput) -> TranscriptBuild {
     let mut line_raw: Vec<Option<String>> = Vec::new();
     let mut block_spans: std::collections::HashMap<String, (usize, usize)> =
         std::collections::HashMap::new();
-    // First screen-line index of each event, indexed by its position in
-    // the in-memory log window (docs/tree-ui-design-from-human.md
-    // view-only scroll). `None` for suppressed and out-of-window events.
-    let mut event_line_starts: Vec<Option<usize>> = vec![None; events.len()];
+    // First screen-line index of each in-memory event, indexed by its
+    // position in the full log window. `None` for events outside the
+    // build window (the tail-window fast build keeps the head `None`,
+    // docs/tui-perf-background-build-plan.md stage 2).
+    let mut event_line_starts: Vec<Option<usize>> = vec![None; offset + events.len()];
     // The active-path ranges of the current log (docs/rewind-fork-
     // design.md section 3, docs/tree-ui-design-from-human.md). When a
     // rewind marker exists, abandoned-branch events are dimmed. `None`
@@ -2920,7 +2996,7 @@ pub fn build_transcript_input(input: &TranscriptBuildInput) -> TranscriptBuild {
             all.push(Line::from(""));
             line_raw.push(None);
         }
-        let event_id = (start + i) as u64;
+        let event_id = (offset + start + i) as u64;
         // Record the start of a tool-result block for click hit-testing.
         let tr_start = if e.kind() == EventKind::ToolResult {
             Some(all.len())
@@ -2968,7 +3044,7 @@ pub fn build_transcript_input(input: &TranscriptBuildInput) -> TranscriptBuild {
                 }
             }
         }
-        event_line_starts[start + i] = Some(all.len());
+        event_line_starts[offset + start + i] = Some(all.len());
         all.extend(segs);
         line_raw.extend(raws);
         // Record the end of the tool-result block span.
@@ -3004,6 +3080,23 @@ pub fn build_transcript(
     ext: Option<&crate::ext::ExtHost>,
 ) -> TranscriptBuild {
     let input = TranscriptBuildInput::from_app(app, width, ext);
+    build_transcript_input(&input)
+}
+
+/// Fast tail-window build (docs/tui-perf-background-build-plan.md, stage 2).
+///
+/// Renders only the newest `tail_events` events, so a first build or a
+/// transient re-build stays O(viewport). The `event_line_starts` output
+/// is padded back to the full event length with `None`, so event-index
+/// addressing stays valid. The full background build follows and
+/// replaces this partial result.
+pub fn build_transcript_tail(
+    app: &App,
+    width: usize,
+    ext: Option<&crate::ext::ExtHost>,
+    tail_events: usize,
+) -> TranscriptBuild {
+    let input = TranscriptBuildInput::from_app_tail(app, width, ext, tail_events);
     build_transcript_input(&input)
 }
 
@@ -3304,6 +3397,9 @@ pub fn draw(
         .as_ref()
         .map(|s| app.loop_running(s))
         .unwrap_or(false);
+    // The transcript build bit (docs/tui-perf-background-build-plan.md,
+    // stage 2): a rebuild is recorded or in flight on the worker.
+    let rebuilding = app.transcript_rebuilding();
     // The loop-phase bit (docs/tui-model-wait-indicator.md): a
     // running loop names its phase (`[wait]`, `[tools]`); an
     // idle loop or an unknown marker keeps the plain bit.
@@ -3399,8 +3495,10 @@ pub fn draw(
     // and text while the loop runs (docs/tui-model-wait-indicator.md
     // section 3). No row when idle: the transcript absorbs it. The
     // input box shifts one row at the loop start/stop transition,
-    // like the `pi` working indicator.
-    if running {
+    // like the `pi` working indicator. The transcript rebuild
+    // indicator (docs/tui-perf-background-build-plan.md, stage 2)
+    // reserves the same row while a build is in flight.
+    if running || rebuilding {
         constraints.push(Constraint::Length(1));
     }
     // The host-reserved row above the input box (docs/ui-extension.md
@@ -3734,6 +3832,13 @@ pub fn draw(
     if running {
         let now = chrono::Utc::now();
         f.render_widget(Paragraph::new(working_row(app, running, &now)), rows[row]);
+        row += 1;
+    } else if rebuilding {
+        // The transcript build indicator: the working-row spinner
+        // shape with the build label
+        // (docs/tui-perf-background-build-plan.md, stage 2).
+        let now = chrono::Utc::now();
+        f.render_widget(Paragraph::new(rebuilding_row(app, &now)), rows[row]);
         row += 1;
     }
 

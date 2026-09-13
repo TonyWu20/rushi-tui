@@ -322,6 +322,24 @@ pub struct App {
         u64,
         Vec<String>,
     )>,
+    /// The background transcript build worker (docs/tui-perf-background-
+    /// build-plan.md, stage 2). `None` until `attach_transcript_worker`.
+    /// The miss path then falls back to the synchronous main-thread build.
+    transcript_worker: Option<crate::transcript_worker::TranscriptWorker>,
+    /// The monotonic sequence of dispatched transcript builds.
+    transcript_build_seq: u64,
+    /// A cache-key miss recorded the key it wants. The main loop
+    /// dispatches one background build before the next draw.
+    transcript_rebuild_requested: bool,
+    /// A background build is in flight. Cleared when its result
+    /// arrives, swaps in, or drops as stale.
+    transcript_build_in_flight: bool,
+    /// The cache key the pending rebuild targets. The last miss's key.
+    transcript_desired_key: Option<crate::transcript_worker::BuildKey>,
+    /// The cache holds the tail-window fast build, not the full
+    /// transcript (docs/tui-perf-background-build-plan.md, stage 2).
+    /// While set, browse yank and `gg` stay disabled.
+    transcript_partial: bool,
     /// The terminal's color capability the built-in palette is lowered
     /// to, and the selected color scheme (docs/tui-color-scheme.md
     /// section 3). Set by the host in `main`; `new` defaults to the
@@ -566,6 +584,12 @@ impl App {
             events_base_seq: 1,
             view_only_target: None,
             transcript_cache: None,
+            transcript_worker: None,
+            transcript_build_seq: 0,
+            transcript_rebuild_requested: false,
+            transcript_build_in_flight: false,
+            transcript_desired_key: None,
+            transcript_partial: false,
             palette: crate::color::Palette::builtin(crate::color::Level::detect()),
             tool_display: crate::tool_display::ToolDisplay::preset(
                 crate::tool_display::Preset::OpenCode,
@@ -965,6 +989,16 @@ impl App {
         // target: the picked event's index is unchanged.
         if self.active.as_ref() != Some(&id) {
             self.view_only_target = None;
+            // A new session voids the old session's cached transcript
+            // (docs/tui-perf-background-build-plan.md, stage 2). The
+            // next draw runs the tail-window fast build for the new
+            // session. An in-flight old-session result drops as
+            // stale at the poll point.
+            self.transcript_cache = None;
+            self.transcript_partial = false;
+            self.transcript_rebuild_requested = false;
+            self.transcript_desired_key = None;
+            self.transcript_build_in_flight = false;
         }
         self.active = Some(id);
         self.events = events;
@@ -1284,54 +1318,248 @@ impl App {
 
     /// The wrapped transcript lines at `width`, oldest first.
     ///
-    /// Cached by (events_version, width, ext reply version): a scroll
-    /// redraw or a draw with no new events reuses the cache instead of
-    /// rewrapping every line. A new extension reply (or a session
-    /// switch that clears the replies) bumps the ext version and
-    /// rebuilds the lines.
+    /// Cached by (events_version, width, ext reply version, palette
+    /// level, palette, frac_epoch). A scroll redraw or a draw with no
+    /// new events reuses the cache instead of rewrapping every line.
     ///
-    /// The miss path builds the lines synchronously on the main
-    /// thread through the snapshot pure build
-    /// (docs/tui-perf-background-build-plan.md stage 1).
-    /// Stage 2 moves the build to the background worker and returns
-    /// the last good cache on a miss.
+    /// Stage 2 (docs/tui-perf-background-build-plan.md): a miss
+    /// returns the last good cache and records the wanted key. The
+    /// main loop dispatches the background build. The first build of
+    /// a session renders the tail window on the main thread,
+    /// O(viewport), and the full build follows in the background.
+    /// With no worker attached the miss builds on the main thread.
     pub fn transcript_lines(
         &mut self,
         width: usize,
         ext: Option<&crate::ext::ExtHost>,
     ) -> &[Line<'static>] {
         let ext_ver = ext.map(|h| h.replies_version()).unwrap_or(0);
-        if let Some((v, w, ev, cl, p, _, _, _, _, fe, _)) = &self.transcript_cache {
-            if *v == self.events_version
-                && *w == width
-                && *ev == ext_ver
-                && *cl == self.palette.level()
-                && *p == self.palette
-                && *fe == self.frac_epoch
-            {
-                return &self.transcript_cache.as_ref().unwrap().5;
-            }
-        }
-        let build = crate::render::build_transcript(self, width, ext);
-        let lines = build.lines;
-        let line_raw = build.line_raw;
-        let block_spans = build.block_spans;
-        let event_line_starts = build.event_line_starts;
-        let texts = build.texts;
-        self.transcript_cache = Some((
-            self.events_version,
+        let key = crate::transcript_worker::BuildKey {
+            events_version: self.events_version,
             width,
             ext_ver,
-            self.palette.level(),
-            self.palette.clone(),
-            lines,
-            line_raw,
-            block_spans,
-            event_line_starts,
-            self.frac_epoch,
-            texts,
-        ));
+            palette_level: self.palette.level(),
+            palette: self.palette.clone(),
+            frac_epoch: self.frac_epoch,
+        };
+        // A partial tail cache matches the key but does not satisfy
+        // it: the full build is still owed, so it misses too.
+        if self.transcript_cache_matches(&key) && !self.transcript_partial {
+            // A hit means a pending rebuild for this key is already
+            // satisfied, so clear the request state.
+            if self.transcript_desired_key.as_ref() == Some(&key) {
+                self.transcript_rebuild_requested = false;
+                self.transcript_desired_key = None;
+            }
+            return &self.transcript_cache.as_ref().unwrap().5;
+        }
+        // Cache-key miss: record the wanted key and ask for a
+        // rebuild. The main loop dispatches one background build
+        // when nothing is in flight.
+        self.transcript_desired_key = Some(key.clone());
+        self.transcript_rebuild_requested = true;
+        // The natural `if let Some(cached)` return extends the
+        // cache borrow over the first-build store below (E0502).
+        // The `is_some` check plus a fresh borrow at the return
+        // keeps the borrow checker happy.
+        #[allow(clippy::unnecessary_unwrap)]
+        if self.transcript_cache.is_some() {
+            // Stale-while-revalidate: draw the last good cache while
+            // the background build runs.
+            return &self.transcript_cache.as_ref().unwrap().5;
+        }
+        // First build: no good cache yet. The main thread renders the
+        // visible tail window, O(viewport), while the full build
+        // follows in the background.
+        if self.transcript_worker.is_some() {
+            let tail = self.viewport.saturating_add(1);
+            let build = crate::render::build_transcript_tail(self, width, ext, tail);
+            let truncated = self.events().len() > tail.max(1);
+            self.store_transcript_build(&key, &build, truncated);
+            if !truncated {
+                // The tail window covered every event: the build is
+                // complete, so no full build is owed.
+                self.transcript_rebuild_requested = false;
+                self.transcript_desired_key = None;
+            }
+        } else {
+            // No worker attached (tests and the worker-death
+            // fallback): build on the main thread.
+            let build = crate::render::build_transcript(self, width, ext);
+            self.store_transcript_build(&key, &build, false);
+            self.transcript_rebuild_requested = false;
+            self.transcript_desired_key = None;
+        }
         &self.transcript_cache.as_ref().unwrap().5
+    }
+
+    /// True when the cached transcript matches the build key.
+    fn transcript_cache_matches(
+        &self,
+        key: &crate::transcript_worker::BuildKey,
+    ) -> bool {
+        self.transcript_cache.as_ref().is_some_and(|c| {
+            c.0 == key.events_version
+                && c.1 == key.width
+                && c.2 == key.ext_ver
+                && c.3 == key.palette_level
+                && c.4 == key.palette
+                && c.9 == key.frac_epoch
+        })
+    }
+
+    /// Store a finished build under its key and set the partial bit.
+    fn store_transcript_build(
+        &mut self,
+        key: &crate::transcript_worker::BuildKey,
+        build: &crate::render::TranscriptBuild,
+        partial: bool,
+    ) {
+        self.transcript_cache = Some((
+            key.events_version,
+            key.width,
+            key.ext_ver,
+            key.palette_level,
+            key.palette.clone(),
+            build.lines.clone(),
+            build.line_raw.clone(),
+            build.block_spans.clone(),
+            build.event_line_starts.clone(),
+            key.frac_epoch,
+            build.texts.clone(),
+        ));
+        self.transcript_partial = partial;
+    }
+
+    /// Attach the background transcript build worker
+    /// (docs/tui-perf-background-build-plan.md, stage 2).
+    /// `main` calls this once before the event loop. Without it the
+    /// miss path falls back to the synchronous main-thread build.
+    pub fn attach_transcript_worker(&mut self) {
+        self.transcript_worker =
+            Some(crate::transcript_worker::TranscriptWorker::spawn());
+    }
+
+    /// Dispatch a recorded transcript rebuild to the worker
+    /// (docs/tui-perf-background-build-plan.md, stage 2).
+    ///
+    /// The main loop calls this before each draw. At most one build
+    /// is in flight. The snapshot is taken here on the main thread
+    /// because the ext replies are pre-resolved against the host,
+    /// which is not `Send`.
+    ///
+    /// Without a worker, or when the send fails on a dead worker,
+    /// the build runs on the main thread as the fallback. Returns
+    /// true when a build was queued or run.
+    pub fn dispatch_transcript_build(
+        &mut self,
+        ext: Option<&crate::ext::ExtHost>,
+    ) -> bool {
+        if !self.transcript_rebuild_requested || self.transcript_build_in_flight {
+            return false;
+        }
+        let Some(key) = self.transcript_desired_key.clone() else {
+            self.transcript_rebuild_requested = false;
+            return false;
+        };
+        let input = crate::render::TranscriptBuildInput::from_app(self, key.width, ext);
+        let Some(worker) = self.transcript_worker.as_ref() else {
+            self.store_transcript_build(
+                &key,
+                &crate::render::build_transcript(self, key.width, ext),
+                false,
+            );
+            self.transcript_rebuild_requested = false;
+            self.transcript_desired_key = None;
+            return true;
+        };
+        self.transcript_build_seq += 1;
+        let seq = self.transcript_build_seq;
+        // The key moves into the request. Clone it so the dead-worker
+        // fallback below still reads it.
+        match worker.send(crate::transcript_worker::BuildRequest {
+            seq,
+            key: key.clone(),
+            input,
+        }) {
+            Ok(()) => {
+                self.transcript_build_in_flight = true;
+                self.transcript_rebuild_requested = false;
+                true
+            }
+            Err(_) => {
+                // The worker thread died. The failed send is the
+                // safety valve: drop the worker and build here.
+                self.transcript_worker = None;
+                self.transcript_build_in_flight = false;
+                self.store_transcript_build(
+                    &key,
+                    &crate::render::build_transcript(self, key.width, ext),
+                    false,
+                );
+                self.transcript_rebuild_requested = false;
+                self.transcript_desired_key = None;
+                true
+            }
+        }
+    }
+
+    /// Poll the worker for finished builds
+    /// (docs/tui-perf-background-build-plan.md, stage 2).
+    ///
+    /// The main loop calls this before each draw. A result matching
+    /// the desired key swaps into the cache and clears the request
+    /// state. A stale result is dropped and the in-flight bit clears
+    /// so the next dispatch re-requests.
+    pub fn poll_transcript_worker(&mut self) {
+        let (results, worker_gone) = {
+            let Some(worker) = self.transcript_worker.as_ref() else {
+                return;
+            };
+            let mut results: Vec<crate::transcript_worker::BuildResult> = Vec::new();
+            let mut gone = false;
+            loop {
+                match worker.try_recv_result() {
+                    Ok(r) => results.push(r),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        gone = true;
+                        break;
+                    }
+                }
+            }
+            (results, gone)
+        };
+        if worker_gone {
+            // The worker thread died. The next dispatch falls back
+            // to the main-thread build.
+            self.transcript_worker = None;
+            self.transcript_build_in_flight = false;
+        }
+        for result in results {
+            self.transcript_build_in_flight = false;
+            if self.transcript_desired_key.as_ref() == Some(&result.key) {
+                self.store_transcript_build(&result.key, &result.build, false);
+                self.transcript_rebuild_requested = false;
+                self.transcript_desired_key = None;
+            }
+            // A result whose key no longer matches the desired key is
+            // dropped: the newer miss owns the rebuild.
+        }
+    }
+
+    /// True while a transcript rebuild is recorded or a build is in
+    /// flight (docs/tui-perf-background-build-plan.md, stage 2).
+    /// The rebuilding indicator shows while this is true.
+    pub fn transcript_rebuilding(&self) -> bool {
+        self.transcript_rebuild_requested || self.transcript_build_in_flight
+    }
+
+    /// True while the cached transcript is a partial tail build.
+    /// Browse yank and `gg` stay disabled until the full build
+    /// lands.
+    pub fn transcript_partial(&self) -> bool {
+        self.transcript_partial
     }
 
     /// The per-line display text of the settled transcript (docs/tui-
@@ -1629,6 +1857,14 @@ impl App {
                 }
                 return;
             }
+        }
+        // While the cached transcript is a partial tail build
+        // (docs/tui-perf-background-build-plan.md, stage 2), yank
+        // and `gg` reach outside the built cells. Hold them until
+        // the full background build lands.
+        if self.transcript_partial() && matches!(key, Key::Char('y') | Key::Char('g')) {
+            self.flash("building: y and gg wait for the full build");
+            return;
         }
         let (total, h, texts, line_raw) = match &self.browse_layout {
             Some((total, h, _w, texts, line_raw)) => (
@@ -3537,6 +3773,227 @@ mod full_history_tests {
             head.contains(&marker),
             "the transcript head shows the first event, head: {head}"
         );
+    }
+}
+
+#[cfg(test)]
+mod background_build_tests {
+    use super::{App, Key};
+    use crate::event::Event;
+    use crate::port::SessionId;
+
+    fn user_event(i: u32) -> Event {
+        Event::parse_line(
+            &format!(
+                r#"{{"v":1,"type":"user_message","ts":"t","id":"u{i}","content":"line {i}"}}"#
+            ),
+        )
+        .unwrap()
+    }
+
+    fn assistant_event(i: u32) -> Event {
+        Event::parse_line(
+            &format!(
+                r#"{{"v":1,"type":"assistant_message","ts":"t","id":"a{i}","content":"reply {i}","tool_calls":[],"stop_reason":"stop","usage":{{"input_tokens":1,"output_tokens":1}},"reasoning":{{}}}}"#
+            ),
+        )
+        .unwrap()
+    }
+
+    fn make_events(n: usize) -> Vec<Event> {
+        (0..n)
+            .map(|i| {
+                if i % 2 == 0 {
+                    user_event(i as u32)
+                } else {
+                    assistant_event(i as u32)
+                }
+            })
+            .collect()
+    }
+
+    /// Poll the worker until no build is requested or in flight.
+    fn settle(app: &mut App) {
+        let start = std::time::Instant::now();
+        while app.transcript_rebuilding() {
+            app.poll_transcript_worker();
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(10),
+                "the background build did not settle within 10 s"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    fn joined_text(app: &mut App, width: usize) -> String {
+        app.transcript_lines(width, None)
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn width_miss_returns_stale_cache_until_the_build_lands() {
+        let mut app = App::new();
+        app.attach_transcript_worker();
+        app.set_viewport_height(200);
+        app.set_active(
+            SessionId::new("s1"),
+            make_events(3000),
+            3000,
+        );
+        let first = app.transcript_lines(100, None).to_vec();
+        assert!(app.transcript_partial(), "a truncated tail is partial");
+        let stale = app.transcript_lines(120, None).to_vec();
+        assert_eq!(
+            stale, first,
+            "the miss returns the last good cache"
+        );
+        let stale_text = stale
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !stale_text.contains("line 0"),
+            "the stale tail cache does not hold the old head"
+        );
+        assert!(app.transcript_rebuilding(), "a rebuild is requested");
+        assert!(app.dispatch_transcript_build(None));
+        assert!(
+            !app.dispatch_transcript_build(None),
+            "no second build while one is in flight"
+        );
+        settle(&mut app);
+        assert!(!app.transcript_rebuilding());
+        assert!(!app.transcript_partial(), "the full build replaced the tail");
+        let full_text = joined_text(&mut app, 120);
+        assert!(
+            full_text.contains("line 0"),
+            "the settled build is the full transcript"
+        );
+    }
+
+    #[test]
+    fn key_burst_coalesces_to_the_newest_key() {
+        let mut app = App::new();
+        app.attach_transcript_worker();
+        app.set_viewport_height(200);
+        app.set_active(
+            SessionId::new("s1"),
+            make_events(2000),
+            2000,
+        );
+        let _ = app.transcript_lines(80, None);
+        let _ = app.transcript_lines(90, None);
+        let _ = app.transcript_lines(100, None);
+        assert!(app.transcript_rebuilding());
+        assert!(
+            app.dispatch_transcript_build(None),
+            "one dispatch queues the newest key"
+        );
+        assert!(
+            !app.dispatch_transcript_build(None),
+            "a second dispatch is a no-op while in flight"
+        );
+        settle(&mut app);
+        assert!(
+            !app.transcript_rebuilding(),
+            "the settled key is a hit"
+        );
+        let _ = app.transcript_lines(100, None);
+        assert!(!app.transcript_rebuilding());
+        let _ = app.transcript_lines(90, None);
+        assert!(
+            app.transcript_rebuilding(),
+            "the superseded key misses and requests its own build"
+        );
+    }
+
+    #[test]
+    fn first_build_uses_the_tail_window_and_gates_browse() {
+        let mut app = App::new();
+        app.attach_transcript_worker();
+        app.set_viewport_height(5);
+        app.set_active(
+            SessionId::new("s1"),
+            make_events(50),
+            50,
+        );
+        let text = joined_text(&mut app, 120);
+        assert!(app.transcript_partial());
+        assert!(
+            text.contains("line 44"),
+            "the newest events show in the tail build: {text}"
+        );
+        assert!(
+            !text.contains("line 0"),
+            "the first build does not render the old head"
+        );
+        let starts = app.transcript_event_line_starts(120, None);
+        assert_eq!(starts.len(), 50);
+        assert!(starts[0].is_none());
+        assert!(starts[44].is_some());
+        let total = app.transcript_lines(120, None).len();
+        let texts = app.transcript_texts(120, None).clone();
+        let raw = app.transcript_raw(120, None);
+        app.browse().enter();
+        app.set_browse_layout(total, 5, 120, texts, raw);
+        app.browse_key(Key::Char('j'));
+        assert_eq!(
+            app.browse_ref().line_col().0,
+            1,
+            "the cursor moves down"
+        );
+        app.browse_key(Key::Char('y'));
+        assert_eq!(
+            app.browse_ref().line_col().0,
+            1,
+            "y is held while the build is partial"
+        );
+        app.browse_key(Key::Char('g'));
+        app.browse_key(Key::Char('g'));
+        assert_eq!(
+            app.browse_ref().line_col().0,
+            1,
+            "gg is held while the build is partial"
+        );
+        assert!(app.dispatch_transcript_build(None));
+        settle(&mut app);
+        assert!(!app.transcript_partial());
+        let full = joined_text(&mut app, 120);
+        assert!(full.contains("line 0"), "the full build holds the head");
+        let total = app.transcript_lines(120, None).len();
+        let texts = app.transcript_texts(120, None).clone();
+        let raw = app.transcript_raw(120, None);
+        app.set_browse_layout(total, 5, 120, texts, raw);
+        app.browse_key(Key::Char('j'));
+        app.browse_key(Key::Char('g'));
+        app.browse_key(Key::Char('g'));
+        assert_eq!(
+            app.browse_ref().line_col().0,
+            0,
+            "gg lands at the head once the full build is in"
+        );
+    }
+
+    #[test]
+    fn first_build_without_a_worker_builds_sync() {
+        let mut app = App::new();
+        app.set_viewport_height(5);
+        app.set_active(
+            SessionId::new("s1"),
+            make_events(50),
+            50,
+        );
+        let text = joined_text(&mut app, 120);
+        assert!(
+            !app.transcript_partial(),
+            "the sync fallback stores a full build"
+        );
+        assert!(!app.transcript_rebuilding());
+        assert!(text.contains("line 0"), "the sync build holds the head");
     }
 }
 
