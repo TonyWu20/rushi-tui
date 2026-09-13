@@ -2791,7 +2791,9 @@ pub fn resolve_ext_spans(
         let event_id = i as u64;
         let (content, wrap_w) = match e.kind() {
             EventKind::UserMessage => (
-                e.get_str("content").unwrap_or("[missing content]").to_string(),
+                e.get_str("content")
+                    .unwrap_or("[missing content]")
+                    .to_string(),
                 user_box_content_w(ew),
             ),
             EventKind::AssistantMessage => (
@@ -2841,9 +2843,7 @@ pub fn resolve_ext_spans(
 /// No app or ext-host state is read.
 /// The build can run on the background worker.
 /// (docs/tui-perf-background-build-plan.md, stage 1.)
-pub fn build_transcript_input(
-    input: &TranscriptBuildInput,
-) -> TranscriptBuild {
+pub fn build_transcript_input(input: &TranscriptBuildInput) -> TranscriptBuild {
     let events = &input.events;
     let details = &input.call_details;
     let pending = input.pending.is_some();
@@ -4874,7 +4874,10 @@ mod transcript_snapshot_tests {
     #[test]
     fn running_loop_bit_flows_through_snapshot() {
         let mut app = app_with_rich_session();
-        let sid = app.active().cloned().expect("the helper sets an active session");
+        let sid = app
+            .active()
+            .cloned()
+            .expect("the helper sets an active session");
         app.attach_external_loop(sid);
         let direct = build_transcript(&app, 100, None);
         let input = TranscriptBuildInput::from_app(&app, 100, None);
