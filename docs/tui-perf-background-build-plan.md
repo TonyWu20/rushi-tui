@@ -347,18 +347,34 @@ same toggle through the real worker loop.
 the LRU eviction. `memo_full_key_mismatch_is_a_
 miss` checks the palette-miss rule.
 
-### Stage 4: width debounce.
+### Stage 4: committed.
 
-Files: `bin/tui/src/transcript_worker.rs` or
+Commit `683390f`.
+
+Files: `bin/tui/src/transcript_worker.rs` and
 `bin/tui/src/app.rs`.
 
-Add a 75 ms trailing window for width-triggered
-misses. A new width event resets the deadline.
-Only the final width after the burst triggers a
-build. Event-commit misses bypass the debounce.
+The worker module gains a `TRANSCRIPT_WIDTH_DEBOUNCE`
+constant set to 75 ms. `App` gains a
+`transcript_width_debounce` deadline field.
 
-Test gate: unit test that a burst of width events
-produces one build at the settled width.
+Width-triggered misses arm the trailing window. Each new
+width value resets the deadline. Redraws at the pending
+width keep the deadline. One build fires at the settled
+width.
+
+Event-commit misses at the built width bypass the window
+and build immediately. A cache hit at the last built
+width cancels a pending build. It drops the deadline too.
+
+The pending width compares against the last built width.
+It does not use the last observed width. A settled width
+that arrives after a build still builds.
+
+Test gate: `width_burst_produces_one_build_at_the_settled_width`
+drives a 90 to 110 to 90 to 110 to 110 burst. It asserts
+one build at 110. Three more tests cover bypass, toggle
+back, and rebuild after a newer build.
 
 ## Risks and mitigations.
 
