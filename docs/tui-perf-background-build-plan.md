@@ -318,19 +318,34 @@ coalescing, and the first-build tail window.
 All four `background_build_tests` and the three worker
 tests pass.
 
-### Stage 3: width-keyed memo.
+### Stage 3: committed.
 
-Files: `bin/tui/src/transcript_worker.rs`,
-`bin/tui/src/app.rs`.
+Commit `e491656`.
 
-Add an LRU cache keyed by `(events_version, width)`
-with capacity 4. The worker consults the memo before
-building. A hit publishes the cached result
+Files: `bin/tui/src/transcript_worker.rs`.
+No `app.rs` change: the memo is worker-local.
+The worker API and the main loop stay as staged 2.
+
+The `BuildMemo` LRU is added to the worker.
+It is keyed by `(events_version, width)` with
+capacity 4. The worker consults the memo before
+building. A hit publishes the cached build
 immediately. A miss runs the full build.
 
-Test gate: unit test that a repeated toggle between
-two widths hits the memo. Verify the build function
-is not called on the second toggle.
+Each entry keeps the full build key that built
+it. A hit needs the full key to match. A palette
+or fraction change at the same width is a miss.
+It rebuilds, so stale colors never settle.
+
+Test gate: `width_toggle_hits_the_memo_without_
+rebuilding` counts build calls. The toggle back
+to the first width is a memo hit. The build
+function is not called on the second toggle.
+`worker_toggle_back_hits_the_memo` drives the
+same toggle through the real worker loop.
+`memo_evicts_oldest_width_at_capacity` checks
+the LRU eviction. `memo_full_key_mismatch_is_a_
+miss` checks the palette-miss rule.
 
 ### Stage 4: width debounce.
 
