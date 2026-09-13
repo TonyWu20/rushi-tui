@@ -121,9 +121,33 @@ impl BuildMemo {
     }
 }
 
+/// A size guard for the width-keyed build memo
+/// (docs/tui-perf-background-build-audit.md).
+///
+/// A full `TranscriptBuild` on a 24 MB battlefield log costs
+/// several hundred MB of resident memory. The memo can hold up to
+/// `cap` of them. Builds whose raw text exceeds this cap are
+/// delivered but not retained. They fall back to
+/// stale-while-revalidate instead of pinning multi-hundred-MB
+/// builds in the LRU.
+pub const MEMO_MAX_RAW_BYTES: usize = 4 * 1024 * 1024;
+
+/// The total display-text byte count of a build.
+/// `texts` holds the rendered display string for every screen line,
+/// and is the dominant memory cost alongside `lines` and `line_raw`.
+pub fn build_raw_bytes(build: &TranscriptBuild) -> usize {
+    build.texts.iter().map(|s| s.len()).sum()
+}
+
 /// Consult the width-keyed memo before building.
 /// A hit returns the cached build.
 /// A miss runs `build` and stores the result.
+///
+/// Builds whose raw text exceeds [`MEMO_MAX_RAW_BYTES`] are
+/// delivered but not retained in the memo. The toggle-back
+/// fast path is sacrificed for huge logs: that width re-miss
+/// rebuilds in the background, and the UI stays responsive
+/// via stale-while-revalidate.
 pub fn build_with_memo<F: FnOnce(&TranscriptBuildInput) -> TranscriptBuild>(
     memo: &mut BuildMemo,
     req: &BuildRequest,
@@ -133,7 +157,13 @@ pub fn build_with_memo<F: FnOnce(&TranscriptBuildInput) -> TranscriptBuild>(
         return cached.clone();
     }
     let built = build(&req.input);
-    memo.insert(&req.key, built.clone());
+    // Retain in the memo only when the build is small enough.
+    // A large build is returned but dropped: holding several
+    // copies in the LRU is what pushed a 24 MB log session
+    // to ~865 MB RSS.
+    if build_raw_bytes(&built) <= MEMO_MAX_RAW_BYTES {
+        memo.insert(&req.key, built.clone());
+    }
     built
 }
 
@@ -447,5 +477,69 @@ mod tests {
         assert_eq!(r3.key, key(1, 80, Level::Rgb));
         drop(tx);
         t.join().unwrap();
+    }
+
+    /// A build whose raw text exceeds [`MEMO_MAX_RAW_BYTES`] is
+    /// delivered but not retained. Toggling back re-builds instead of
+    /// hitting the memo. This is what keeps a 24 MB log session from
+    /// pinning several multi-hundred-MB builds in the LRU
+    /// (docs/tui-perf-background-build-audit.md).
+    #[test]
+    fn memo_skips_retention_above_raw_cap() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let input = big_input();
+        assert!(
+            build_raw_bytes(&build_transcript_input(&input)) > MEMO_MAX_RAW_BYTES,
+            "the fixture must exceed the memo size cap"
+        );
+        let builds = AtomicUsize::new(0);
+        let counting = |input: &TranscriptBuildInput| {
+            builds.fetch_add(1, Ordering::SeqCst);
+            build_transcript_input(input)
+        };
+        let mut memo = BuildMemo::new();
+        // 80: a miss runs the build. Not retained (above the cap).
+        build_with_memo(&mut memo, &req_big(&input, 1, 80), |i| counting(i));
+        assert_eq!(builds.load(Ordering::SeqCst), 1);
+        // 120: a miss runs the build.
+        build_with_memo(&mut memo, &req_big(&input, 2, 120), |i| counting(i));
+        assert_eq!(builds.load(Ordering::SeqCst), 2);
+        // Back to 80: the first build was dropped, so this re-builds.
+        build_with_memo(&mut memo, &req_big(&input, 3, 80), |i| counting(i));
+        assert_eq!(
+            builds.load(Ordering::SeqCst),
+            3,
+            "a build above the size cap is not retained, so the toggle back must rebuild"
+        );
+    }
+
+    /// An input whose raw text exceeds the memo size cap.
+    /// Plain text keeps the build cheap (no tool calls or fences).
+    fn big_input() -> TranscriptBuildInput {
+        let mut input = small_input();
+        let payload = "a".repeat(150_000);
+        let mut events = Vec::new();
+        for i in 0..30 {
+            events.push(
+                Event::parse_line(
+                    &format!(
+                        r#"{{"v":1,"type":"user_message","ts":"t","id":"b{i}","content":"{payload}"}}"#
+                    ),
+                )
+                .unwrap(),
+            );
+        }
+        input.events = events;
+        input
+    }
+
+    fn req_big(input: &TranscriptBuildInput, seq: u64, width: usize) -> BuildRequest {
+        let mut input = input.clone();
+        input.width = width;
+        BuildRequest {
+            seq,
+            key: key(1, width, Level::Rgb),
+            input,
+        }
     }
 }

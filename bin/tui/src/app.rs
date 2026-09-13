@@ -345,6 +345,17 @@ pub struct App {
     /// transcript (docs/tui-perf-background-build-plan.md, stage 2).
     /// While set, browse yank and `gg` stay disabled.
     transcript_partial: bool,
+    /// Optional transcript-rebuild trace sink, enabled when the
+    /// `TUI_TRANSCRIPT_TRACE` env var is set
+    /// (docs/tui-perf-background-build-audit.md). Every miss,
+    /// dispatch, debounce hold, cancel, and settle writes one line.
+    /// `None` unless enabled; the lock keeps App usable across the
+    /// tests that share one.
+    transcript_trace: Option<std::sync::Mutex<std::fs::File>>,
+    /// The wall-clock moment the current in-flight build dispatched.
+    /// Set by [`App::dispatch_transcript_build`], read by
+    /// [`App::poll_transcript_worker`] to log settle latency.
+    transcript_dispatched_at: Option<std::time::Instant>,
     /// The terminal's color capability the built-in palette is lowered
     /// to, and the selected color scheme (docs/tui-color-scheme.md
     /// section 3). Set by the host in `main`; `new` defaults to the
@@ -596,6 +607,8 @@ impl App {
             transcript_desired_key: None,
             transcript_width_debounce: None,
             transcript_partial: false,
+            transcript_trace: None,
+            transcript_dispatched_at: None,
             palette: crate::color::Palette::builtin(crate::color::Level::detect()),
             tool_display: crate::tool_display::ToolDisplay::preset(
                 crate::tool_display::Preset::OpenCode,
@@ -1340,7 +1353,12 @@ impl App {
         width: usize,
         ext: Option<&crate::ext::ExtHost>,
     ) -> &[Line<'static>] {
-        let ext_ver = ext.map(|h| h.replies_version()).unwrap_or(0);
+        // The transcript key folds in the transcript-visible ext
+        // version, not `replies_version`. Status, frame, and row
+        // replies update their own UI regions and do not bump it, so
+        // a statusline tick at idle does not force a full transcript
+        // rebuild (docs/tui-perf-background-build-audit.md).
+        let ext_ver = ext.map(|h| h.transcript_replies_version()).unwrap_or(0);
         let key = crate::transcript_worker::BuildKey {
             events_version: self.events_version,
             width,
@@ -1389,6 +1407,15 @@ impl App {
         } else {
             // Same width as the last build: no window, build now.
             self.transcript_width_debounce = None;
+        }
+        // Log the miss only when the key is new, not every frame
+        // while the build is in flight.
+        let key_is_new = self
+            .transcript_desired_key
+            .as_ref()
+            .map_or(true, |prev| prev != &key);
+        if key_is_new {
+            self.trace_transcript(&format!("miss {}", Self::fmt_key(&key)));
         }
         self.transcript_desired_key = Some(key.clone());
         self.transcript_rebuild_requested = true;
@@ -1474,6 +1501,36 @@ impl App {
             Some(crate::transcript_worker::TranscriptWorker::spawn());
     }
 
+    /// Enable the transcript-rebuild trace by opening a sink file
+    /// (docs/tui-perf-background-build-audit.md). `main` wires this
+    /// up when `TUI_TRANSCRIPT_TRACE` is set. Every miss, dispatch,
+    /// cancel, and settle writes one timestamped line.
+    pub fn set_transcript_trace(&mut self, file: std::fs::File) {
+        self.transcript_trace = Some(std::sync::Mutex::new(file));
+    }
+
+    /// Append one line to the transcript trace sink, if enabled.
+    fn trace_transcript(&mut self, msg: &str) {
+        let Some(trace) = self.transcript_trace.as_mut() else {
+            return;
+        };
+        use std::io::Write;
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let mut f = trace.lock().unwrap();
+        let _ = writeln!(f, "{ts} {msg}");
+    }
+
+    /// One-line render of a build key for the trace log.
+    fn fmt_key(key: &crate::transcript_worker::BuildKey) -> String {
+        format!(
+            "ev={} w={} ext={} frac={}",
+            key.events_version, key.width, key.ext_ver, key.frac_epoch
+        )
+    }
+
     /// Dispatch a recorded transcript rebuild to the worker
     /// (docs/tui-perf-background-build-plan.md, stage 2).
     ///
@@ -1512,12 +1569,14 @@ impl App {
         // observed width. A settled width that arrived after a build
         // still misses here, so it still builds.
         if self.transcript_cache_matches(&key) && !self.transcript_partial {
+            self.trace_transcript(&format!("cancel cache-match {}", Self::fmt_key(&key)));
             self.transcript_rebuild_requested = false;
             self.transcript_desired_key = None;
             return false;
         }
         let input = crate::render::TranscriptBuildInput::from_app(self, key.width, ext);
         let Some(worker) = self.transcript_worker.as_ref() else {
+            self.trace_transcript(&format!("dispatch main-thread {}", Self::fmt_key(&key)));
             self.store_transcript_build(
                 &key,
                 &crate::render::build_transcript(self, key.width, ext),
@@ -1539,6 +1598,8 @@ impl App {
             Ok(()) => {
                 self.transcript_build_in_flight = true;
                 self.transcript_rebuild_requested = false;
+                self.transcript_dispatched_at = Some(Instant::now());
+                self.trace_transcript(&format!("dispatch worker seq={} {}", seq, Self::fmt_key(&key)));
                 true
             }
             Err(_) => {
@@ -1546,6 +1607,7 @@ impl App {
                 // safety valve: drop the worker and build here.
                 self.transcript_worker = None;
                 self.transcript_build_in_flight = false;
+                self.trace_transcript(&format!("dispatch main-thread(fallback) {}", Self::fmt_key(&key)));
                 self.store_transcript_build(
                     &key,
                     &crate::render::build_transcript(self, key.width, ext),
@@ -1593,6 +1655,14 @@ impl App {
         for result in results {
             self.transcript_build_in_flight = false;
             if self.transcript_desired_key.as_ref() == Some(&result.key) {
+                if let Some(at) = self.transcript_dispatched_at.take() {
+                    let ms = at.elapsed().as_millis();
+                    self.trace_transcript(&format!(
+                        "settle {} in {} ms",
+                        Self::fmt_key(&result.key),
+                        ms
+                    ));
+                }
                 self.store_transcript_build(&result.key, &result.build, false);
                 self.transcript_rebuild_requested = false;
                 self.transcript_desired_key = None;
@@ -4247,6 +4317,352 @@ mod background_build_tests {
         assert!(
             !app.transcript_rebuilding(),
             "the rebuilt width is a cache hit"
+        );
+    }
+}
+
+#[cfg(test)]
+mod perf_bgbuild_tests {
+    //! Performance regression tests for the promised level in
+    //! docs/tui-perf-background-build-plan.md.
+    //!
+    //! The plan's test plan says: no frame over 100 ms during a
+    //! cache-key miss on a large log. Before the stage-2 fix, that
+    //! miss ran the full build inline for ~7 s. These tests build a
+    //! heavy log where one full build takes seconds, then time the
+    //! main-thread frame path while that build runs in the
+    //! background. They fail loudly if the inline build returns.
+    use super::App;
+    use crate::event::Event;
+    use crate::port::SessionId;
+    use std::time::{Duration, Instant};
+
+    /// Heavy events that make one full build take seconds.
+    /// Calibrated: 5000 events -> ~3.8 s in the debug build.
+    const N_HEAVY: usize = 5000;
+    /// The promised frame budget from the plan's test plan.
+    const FRAME_BUDGET_MS: u128 = 100;
+
+    /// Interleaved user and assistant events with heavy content.
+    /// Markdown fences, tool calls, and long reasoning blocks drive
+    /// the per-event render cost that made the 24 MB build slow.
+    fn heavy_events(n: usize) -> Vec<Event> {
+        (0..n)
+            .map(|i| {
+                if i % 2 == 0 {
+                    Event::parse_line(
+                        &format!(
+                            r#"{{"v":1,"type":"user_message","ts":"t","id":"u{i}","content":"Please implement a complex algorithm that handles edge cases and performance optimization for step {i}. It must be generic over the input container, stream arbitrarily large data with bounded memory, and emit a machine-readable diagnostic report of every optimization decision, plus a documented example a user can adapt."}}"#
+                        ),
+                    )
+                    .unwrap()
+                } else {
+                    Event::parse_line(
+                        &format!(
+                            r#"{{"v":1,"type":"assistant_message","ts":"t","id":"a{i}","content":"Here is the full solution for step {i}.\n\n```rust\npub fn solve<C: Container>(c: &C, step: {i}) -> Result<Report, Error> {{\n    let mut report = Report::new();\n    for item in c.iter() {{\n        let optimized = optimize(item, step);\n        report.record(&optimized);\n    }}\n    Ok(report.finish())\n}}\n```\n\n- Step 1: analyze the container layout and pick a traversal order.\n- Step 2: implement the streaming core with bounded memory.\n- Step 3: generate the diagnostic report (summary + JSON block).","tool_calls":[{{"id":"tc{i}","name":"bash","args":{{"command":"cargo test step_{i} -- --nocapture && cargo doc --no-deps"}}}}],"stop_reason":"stop","usage":{{"input_tokens":1000,"output_tokens":2000}},"reasoning":{{"content":"step {i}: trade streaming throughput against per-item diagnostic cost; keep diagnostics behind a feature flag so the hot path stays fast, and make the resume logic idempotent so a partial run followed by a full run does not double-count work."}}}}"#
+                        ),
+                    )
+                    .unwrap()
+                }
+            })
+            .collect()
+    }
+
+    /// Poll the worker until no rebuild is pending or in flight.
+    fn settle(app: &mut App, budget_s: u64) {
+        let start = Instant::now();
+        while app.transcript_rebuilding() {
+            app.poll_transcript_worker();
+            std::thread::sleep(Duration::from_millis(10));
+            assert!(
+                start.elapsed() < Duration::from_secs(budget_s),
+                "the background build did not settle within {budget_s} s"
+            );
+        }
+    }
+
+    /// The main-thread frame path during a cache-key miss.
+    /// Read the stale lines, dispatch a pending build, poll results.
+    /// This is the work that used to hold the full inline build.
+    fn frame_path_ms(app: &mut App, width: usize) -> u128 {
+        let t0 = Instant::now();
+        let _ = app.transcript_lines(width, None);
+        app.dispatch_transcript_build(None);
+        app.poll_transcript_worker();
+        t0.elapsed().as_millis()
+    }
+
+    /// Seed a settled full cache at `width` on a heavy log.
+    fn seed_settled_cache(app: &mut App, events: Vec<Event>, width: usize) {
+        let n = events.len();
+        app.set_active(SessionId::new("perf"), events, n as u64);
+        let _ = app.transcript_lines(width, None);
+        assert!(app.dispatch_transcript_build(None));
+        settle(app, 60);
+        assert!(!app.transcript_rebuilding());
+    }
+
+    /// An event-commit cache-key miss dispatches the full build to
+    /// the worker with no width debounce. While that build runs for
+    /// seconds, the frame path stays under the 100 ms budget.
+    #[test]
+    fn event_commit_miss_keeps_frames_under_budget() {
+        let mut app = App::new();
+        app.attach_transcript_worker();
+        app.set_viewport_height(50);
+        seed_settled_cache(&mut app, heavy_events(N_HEAVY), 80);
+
+        // Commit one more event at the same width. The events version
+        // bump is a cache-key miss that must build immediately.
+        let sid = app.active().clone().expect("an active session");
+        app.set_active(sid.clone(), heavy_events(N_HEAVY + 1), (N_HEAVY + 1) as u64);
+        let t_miss = Instant::now();
+        let _ = app.transcript_lines(80, None);
+        let miss_ms = t_miss.elapsed().as_millis();
+        assert!(app.transcript_rebuilding());
+        assert!(
+            app.transcript_width_debounce.is_none(),
+            "an event-commit miss bypasses the width debounce"
+        );
+        assert!(
+            app.dispatch_transcript_build(None),
+            "the commit builds immediately, no debounce wait"
+        );
+        let dispatch_ms = t_miss.elapsed().as_millis();
+        assert!(
+            app.transcript_build_in_flight,
+            "the full build is running on the worker"
+        );
+
+        // The background build takes seconds. While it is in flight
+        // the frame path stays far under the promised budget.
+        let frame_ms = frame_path_ms(&mut app, 80);
+        assert!(
+            frame_ms < FRAME_BUDGET_MS,
+            "the frame path took {frame_ms} ms while the background \
+             build was in flight (budget {FRAME_BUDGET_MS} ms); \
+             stale_ms={miss_ms} dispatch_ms={dispatch_ms}"
+        );
+
+        // The settled build must land with the new events version.
+        let t_settle = Instant::now();
+        settle(&mut app, 60);
+        let build_ms = t_settle.elapsed().as_millis();
+        eprintln!(
+            "perf_bgbuild timing: frame_path={} ms, miss_read={} ms, \
+             snapshot+dispatch={} ms, background_full_build={} ms",
+            frame_ms, miss_ms, dispatch_ms, build_ms
+        );
+        assert!(
+            !app.transcript_rebuilding(),
+            "the background build settles"
+        );
+    }
+
+    /// A width miss renders the stale cache through the 75 ms
+    /// debounce window and while the settled build runs in the
+    /// background. Every frame stays under the budget. A browse
+    /// toggle never hitches.
+    #[test]
+    fn width_miss_frames_stay_under_budget() {
+        let mut app = App::new();
+        app.attach_transcript_worker();
+        app.set_viewport_height(50);
+        seed_settled_cache(&mut app, heavy_events(N_HEAVY), 80);
+
+        // The width miss returns the stale cache and arms the window.
+        let t0 = Instant::now();
+        let _ = app.transcript_lines(120, None);
+        let miss_ms = t0.elapsed().as_millis();
+        assert!(app.transcript_rebuilding());
+        assert!(
+            app.transcript_width_debounce.is_some(),
+            "the width miss armed the trailing window"
+        );
+
+        // Inside the window the dispatch is held. Frames keep
+        // rendering the stale cache under the budget.
+        let held_ms = frame_path_ms(&mut app, 120);
+        assert!(
+            held_ms < FRAME_BUDGET_MS,
+            "a frame inside the debounce window took {held_ms} ms \
+             (budget {FRAME_BUDGET_MS} ms)"
+        );
+
+        // The window lapses. One build fires at the settled width.
+        std::thread::sleep(
+            app.transcript_width_debounce
+                .map(|d| d.saturating_duration_since(Instant::now()))
+                .unwrap_or_default()
+                + Duration::from_millis(5),
+        );
+        assert!(
+            app.dispatch_transcript_build(None),
+            "the settled width dispatches one build after the window"
+        );
+        assert!(app.transcript_build_in_flight);
+        let build_ms = frame_path_ms(&mut app, 120);
+        assert!(
+            build_ms < FRAME_BUDGET_MS,
+            "a frame while the settled build ran took {build_ms} ms \
+             (budget {FRAME_BUDGET_MS} ms); miss_ms={miss_ms}"
+        );
+
+        settle(&mut app, 60);
+        assert_eq!(
+            app.transcript_cache.as_ref().unwrap().1,
+            120,
+            "the settled-width build landed in the cache"
+        );
+    }
+
+    /// The first build of a session renders only the visible tail
+    /// window on the main thread. That portion is viewport-sized and
+    /// far under the budget. The full build follows in the
+    /// background.
+    #[test]
+    fn first_build_tail_window_is_fast_on_the_main_thread() {
+        let mut app = App::new();
+        app.attach_transcript_worker();
+        app.set_viewport_height(50);
+        app.set_active(
+            SessionId::new("perf"),
+            heavy_events(N_HEAVY),
+            N_HEAVY as u64,
+        );
+
+        let t0 = Instant::now();
+        let n_lines = {
+            let lines = app.transcript_lines(80, None);
+            lines.len()
+        };
+        let tail_ms = t0.elapsed().as_millis();
+        assert!(
+            app.transcript_partial(),
+            "the first build stores a partial tail cache"
+        );
+        assert!(
+            tail_ms < FRAME_BUDGET_MS,
+            "the tail-window first build took {tail_ms} ms on the main \
+             thread (budget {FRAME_BUDGET_MS} ms)"
+        );
+        assert!(
+            n_lines > 0,
+            "the tail window produced rendered lines"
+        );
+        assert!(
+            app.transcript_rebuilding(),
+            "the full build is owed and in flight after the tail window"
+        );
+
+        // Frames while the full build runs stay under the budget.
+        let frame_ms = frame_path_ms(&mut app, 80);
+        assert!(
+            frame_ms < FRAME_BUDGET_MS,
+            "a frame during the first full build took {frame_ms} ms \
+             (budget {FRAME_BUDGET_MS} ms)"
+        );
+        settle(&mut app, 60);
+        assert!(!app.transcript_partial());
+    }
+
+    /// Candidate paths for the 24 MB battlefield log:
+    /// env override, then repo-relative, then the known absolute path.
+    fn fixture_paths() -> Vec<std::path::PathBuf> {
+        let mut v = Vec::new();
+        if let Ok(p) = std::env::var("TUI_PERF_FIXTURE") {
+            if !p.is_empty() {
+                v.push(std::path::PathBuf::from(p));
+            }
+        }
+        v.push(std::path::PathBuf::from(
+            "../../../rushi-tui/sessions/tui-diff-spec-lean/events.jsonl",
+        ));
+        v.push(std::path::PathBuf::from(
+            "/home/tony/programming/rushi-tui/sessions/tui-diff-spec-lean/events.jsonl",
+        ));
+        v
+    }
+
+    /// Load the real 24 MB session log, or None when no candidate exists.
+    fn fixture_events() -> Option<(std::path::PathBuf, Vec<Event>)> {
+        for p in fixture_paths() {
+            let Ok(text) = std::fs::read_to_string(&p) else {
+                continue;
+            };
+            let evts: Vec<Event> =
+                text.lines().filter_map(|l| Event::parse_line(l.trim())).collect();
+            if !evts.is_empty() {
+                return Some((p, evts));
+            }
+        }
+        None
+    }
+
+    /// The battlefield test. The real 24 MB log drives a multi-second
+    /// full build on the worker. The frame path must stay under the
+    /// 100 ms budget while it runs. Skips gracefully when the
+    /// fixture is absent.
+    #[test]
+    fn real_24mb_log_frames_stay_under_budget() {
+        let Some((path, events)) = fixture_events() else {
+            eprintln!("SKIP: 24 MB fixture not found (set TUI_PERF_FIXTURE)");
+            return;
+        };
+        let n = events.len();
+        eprintln!("real fixture: {n} events from {}", path.display());
+        assert!(n > 2000, "the fixture should be the large log");
+
+        let mut app = App::new();
+        app.attach_transcript_worker();
+        app.set_viewport_height(50);
+        app.set_active(SessionId::new("real"), events, n as u64);
+
+        // First build: tail window on the main thread, full build owed.
+        let t0 = Instant::now();
+        let tail_lines = {
+            let l = app.transcript_lines(80, None);
+            l.len()
+        };
+        let tail_ms = t0.elapsed().as_millis();
+        eprintln!("real fixture tail-window build: {tail_ms} ms ({tail_lines} lines)");
+        assert!(
+            app.transcript_partial(),
+            "the large log gives a partial tail cache"
+        );
+        assert!(
+            tail_ms < FRAME_BUDGET_MS,
+            "the tail build took {tail_ms} ms (budget {FRAME_BUDGET_MS} ms)"
+        );
+
+        // Dispatch the full build. It takes seconds on the real log.
+        assert!(
+            app.dispatch_transcript_build(None),
+            "the full build dispatches to the worker"
+        );
+        assert!(app.transcript_build_in_flight);
+
+        // While the full build is in flight, the frame path stays fast.
+        let frame_ms = frame_path_ms(&mut app, 80);
+        assert!(
+            frame_ms < FRAME_BUDGET_MS,
+            "the frame path took {frame_ms} ms while the full build ran \
+             (budget {FRAME_BUDGET_MS} ms)"
+        );
+
+        // Settle with a generous budget: the real log builds for minutes
+        // in a debug build.
+        let t1 = Instant::now();
+        settle(&mut app, 600);
+        let build_ms = t1.elapsed().as_millis();
+        eprintln!(
+            "real fixture full background build: {build_ms} ms; \
+             frame path was {frame_ms} ms",
+        );
+        assert!(!app.transcript_partial());
+        assert!(
+            !app.transcript_rebuilding(),
+            "the real-log build settles"
         );
     }
 }

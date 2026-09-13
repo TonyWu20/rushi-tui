@@ -362,6 +362,23 @@ fn main() {
     // The first draw of a session shows a fast tail-window build.
     // The full build then lands in the background.
     app.attach_transcript_worker();
+    // Optional transcript-rebuild trace (docs/tui-perf-background-build-audit.md).
+    // `TUI_TRANSCRIPT_TRACE=1` writes to /tmp/tui-transcript-trace-<pid>.log;
+    // a path value writes there instead.
+    if let Ok(val) = std::env::var("TUI_TRANSCRIPT_TRACE") {
+        let path = if val == "1" || val.is_empty() {
+            std::env::temp_dir().join(format!("tui-transcript-trace-{}.log", std::process::id()))
+        } else {
+            std::path::PathBuf::from(&val)
+        };
+        match std::fs::File::create(&path) {
+            Ok(f) => {
+                app.set_transcript_trace(f);
+                eprintln!("transcript trace -> {}", path.display());
+            }
+            Err(e) => eprintln!("TUI_TRANSCRIPT_TRACE: cannot open {}: {e}", path.display()),
+        }
+    }
     // The [tui] color override forces the capability level. Absent,
     // the environment detection stands (color.rs module docs). The
     // [tui] color scheme (docs/tui-color-scheme.md section 3) maps

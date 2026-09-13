@@ -1142,9 +1142,18 @@ struct SlotShared {
 struct HostInner {
     slots: Vec<Arc<SlotShared>>,
     transform: Mutex<TransformRegistry>,
-    /// Bumped when a reply changes what the transcript shows. The
-    /// transcript cache key folds this version in.
+    /// Bumped on every extension reply, regardless of type. This is a
+    /// general "some reply changed" signal; the transcript cache key
+    /// does NOT fold this in (it uses `transcript_replies_version`).
     replies_version: AtomicU64,
+    /// Bumped only when transcript-visible ext data changes:
+    /// per-event `lines`, `transformed` spans, and the clears that
+    /// wipe them (dead extension, session switch). `status`,
+    /// `frame_spec`, and `row_spec` replies update their own UI
+    /// regions and never bump this, so a statusline tick at idle
+    /// does not force a full transcript rebuild
+    /// (docs/tui-perf-background-build-audit.md).
+    transcript_replies_version: AtomicU64,
     out_tx: mpsc::SyncSender<ExtItem>,
     /// Set by [`ExtHost::start`] from the host-level value.
     transform_timeout: Mutex<Duration>,
@@ -1225,6 +1234,7 @@ impl ExtHost {
                 slots,
                 transform: Mutex::new(TransformRegistry::new()),
                 replies_version: AtomicU64::new(0),
+                transcript_replies_version: AtomicU64::new(0),
                 out_tx,
                 transform_timeout: Mutex::new(TRANSFORM_TIMEOUT),
                 color_level: cfg.color.unwrap_or_else(crate::color::Level::detect),
@@ -1419,6 +1429,12 @@ impl ExtHost {
         self.inner.commands_cache.lock().unwrap().clear();
         self.inner.invoke.lock().unwrap().clear();
         self.inner.replies_version.fetch_add(1, Ordering::SeqCst);
+        // Clearing wipes the lines cache and transform registry, so
+        // the transcript-visible data changed (built-in render
+        // returns). Bump the transcript version too.
+        self.inner
+            .transcript_replies_version
+            .fetch_add(1, Ordering::SeqCst);
     }
 
     /// Send due ticks to the status extensions. The main loop calls
@@ -2026,11 +2042,29 @@ impl ExtHost {
             .map(|&i| self.disc.owner_name(i))
     }
 
-    /// The transcript cache key folds this version in, so a new
-    /// extension reply rebuilds the transcript (ui-extension-plan
-    /// stage 1: the cache folds in extension replies).
+    /// General extension reply version: bumped on every extension
+    /// reply (lines, status, frame, row, transformed). The transcript
+    /// cache key does not fold this in; it uses
+    /// [`transcript_replies_version`] instead, so non-transcript
+    /// replies (status, frame, row) do not force a transcript rebuild.
+    /// (docs/tui-perf-background-build-audit.md)
+    #[allow(dead_code)]
     pub fn replies_version(&self) -> u64 {
         self.inner.replies_version.load(Ordering::SeqCst)
+    }
+
+    /// The transcript-visible extension version.
+    ///
+    /// Bumps only when data the transcript build reads changes:
+    /// per-event `lines`, `transformed` spans, and the clears that
+    /// wipe them (dead extension, session switch). `status`,
+    /// `frame_spec`, and `row_spec` replies update their own UI
+    /// regions and never bump this. The transcript cache key folds
+    /// this in, not `replies_version`, so a statusline tick at idle
+    /// does not force a full transcript rebuild
+    /// (docs/tui-perf-background-build-audit.md).
+    pub fn transcript_replies_version(&self) -> u64 {
+        self.inner.transcript_replies_version.load(Ordering::SeqCst)
     }
 
     /// The extension names, in composed order.
@@ -2199,6 +2233,10 @@ impl HostInner {
                 cache.upsert(id, lines.clone());
                 drop(cache);
                 self.replies_version.fetch_add(1, Ordering::SeqCst);
+                // Per-event ext lines feed the transcript build, so
+                // the transcript-visible version bumps here too.
+                self.transcript_replies_version
+                    .fetch_add(1, Ordering::SeqCst);
                 let _ = self.out_tx.try_send(ExtItem::LinesCached {
                     ext: slot.name.clone(),
                 });
@@ -2297,6 +2335,10 @@ impl HostInner {
                 };
                 if ok {
                     self.replies_version.fetch_add(1, Ordering::SeqCst);
+                    // A transform span feeds the transcript build, so
+                    // the transcript-visible version bumps here too.
+                    self.transcript_replies_version
+                        .fetch_add(1, Ordering::SeqCst);
                     let _ = self.out_tx.try_send(ExtItem::TransformedCached { req });
                 }
             }
@@ -2732,6 +2774,9 @@ fn mark_dead(slot: &Arc<SlotShared>, inner: &Arc<HostInner>, idx: usize) {
         }
     }
     inner.replies_version.fetch_add(1, Ordering::SeqCst);
+    // The dead mark wipes the slot's lines cache and marks its
+    // transform spans stale, so the transcript-visible data changed.
+    inner.transcript_replies_version.fetch_add(1, Ordering::SeqCst);
     // Also clear any cached commands and in-flight invokes for this slot.
     inner.commands_cache.lock().unwrap().remove(&idx);
     {
@@ -4268,12 +4313,63 @@ done
             "{\"v\":1,\"op\":\"lines\",\"event_id\":1,\"lines\":[[\"a\",{}]]}",
         );
         let v2 = host.replies_version();
-        assert!(v2 > v1, "a reply bumps the version the transcript folds in");
+        assert!(v2 > v1, "a lines reply bumps the general reply version");
         host.clear_replies();
         assert!(
             host.inner.slots[0].lines_cache.lock().unwrap().is_empty(),
             "a session switch clears the reply cache"
         );
+        host.stop();
+    }
+
+    /// Status, frame, and row replies change their own UI regions but
+    /// not the transcript data. They must not bump the transcript
+    /// version that the cache key folds in. Per-event lines do
+    /// (docs/tui-perf-background-build-audit.md).
+    #[test]
+    fn status_frame_and_row_replies_do_not_bump_the_transcript_version() {
+        let tmp = TempDir::new().unwrap();
+        let manifest = "[ext]\ncommand = \"bash\"\nargs = [\"x.sh\"]\nprotocol_v = 1\n";
+        let host = host_with(&tmp, "x", manifest, "sleep 30");
+        host.start();
+
+        let tv0 = host.transcript_replies_version();
+        let rv0 = host.replies_version();
+
+        // A statusline content change bumps the generic version only.
+        host.reply_line(
+            0,
+            r#"{"v":1,"op":"status","lines":[["idle",{}]]}"#,
+        );
+        assert!(
+            host.replies_version() > rv0,
+            "a status reply bumps the generic version"
+        );
+        assert_eq!(
+            host.transcript_replies_version(),
+            tv0,
+            "a statusline change must not force a transcript rebuild"
+        );
+
+        // Frame and row replies are outside the transcript key space too.
+        host.reply_line(0, r#"{"v":1,"op":"frame_spec","spec":{}}"#);
+        host.reply_line(0, r#"{"v":1,"op":"row_spec","lines":[["working",{}]]}"#);
+        assert_eq!(
+            host.transcript_replies_version(),
+            tv0,
+            "frame and row replies must not force a transcript rebuild"
+        );
+
+        // Per-event lines feed the transcript build, so they bump it.
+        host.reply_line(
+            0,
+            r#"{"v":1,"op":"lines","event_id":1,"lines":[["a",{}]]}"#,
+        );
+        assert!(
+            host.transcript_replies_version() > tv0,
+            "a lines reply must bump the transcript version"
+        );
+
         host.stop();
     }
 
