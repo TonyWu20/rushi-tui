@@ -66,6 +66,7 @@ extension-host lifecycle. Method and conventions:
 | `tui-large-content-research.md` | Research | 2026-09-13 | Ecosystem survey: how ratatui apps (helix, atuin, zellij, gitui, codex-TUI, yazi, more) keep large content off the render thread. Maps patterns onto Option A and B. |
 | `tui-perf-background-build-plan.md` | Implemented | 2026-09-13 | Option A background build worker plus Option B width-keyed memo. Staged and committed. Test gates in the audit doc. |
 | `tui-perf-background-build-audit.md` | Audit | 2026-09-13 | Audit of the background build plan and the independent perf test for the 100 ms frame budget. |
+| `tui-perf-streaming-incremental-plan.md` | Spec | 2026-09-13 | Incremental cache for the live streaming block (thinking + text). Eliminates per-frame O(n) re-wrap/re-highlight; subsumes the keep-highlighter-alive optimisation. |
 
 ## Status legend
 
