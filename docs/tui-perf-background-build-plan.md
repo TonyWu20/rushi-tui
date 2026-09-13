@@ -286,34 +286,37 @@ non-`Send` ext host.
 Test gate: a unit test asserts the snapshot build
 equals the direct `&App` build via insta snapshot.
 
-### Stage 2: worker plus coalescing.
+### Stage 2: committed.
+
+Commit `a658c02`.
 
 Files: new `bin/tui/src/transcript_worker.rs`,
 `bin/tui/src/app.rs`, `bin/tui/src/main.rs`,
 `bin/tui/src/render.rs`.
 
-Add the `TranscriptWorker` module. Reuse the
-`picker/fuzzy.rs` shape with `std::thread` and `mpsc`.
-`App` owns the worker and the result receiver.
+The `TranscriptWorker` module is added.
+It reuses the `picker/fuzzy.rs` shape with `std::thread`
+and `mpsc`. `App` owns the worker and the result
+receiver.
 
-Change `App::transcript_lines` to return the stale
-cache on a miss instead of building. Record the
-desired key and a rebuild flag.
+`App::transcript_lines` returns the stale cache on a
+key miss instead of building. It records the desired
+key and a rebuild flag.
 
-In the main loop before draw, dispatch one request
-when the flag is set and no build is in flight.
-Call `poll_transcript_worker()` before each draw.
-Swap in results that match the current key.
+The main loop dispatches one request before each draw
+when the flag is set and no build is in flight. It
+then calls `poll_transcript_worker()`. Results that
+match the desired key swap in. Stale results drop.
 
-Add the rebuilding indicator. Reuse the working-row
-spinner shape from `render.rs` line 1852.
-
-Implement the tail-window fast build for the first
-session build and transient states. Disable browse
-yank and `gg` until the full build lands.
+The rebuilding indicator row reuses the working-row
+spinner shape. A tail-window fast build renders the
+first session build on the main thread. Browse yank
+and `gg` stay held until the full build lands.
 
 Test gate: unit tests for stale-while-revalidate,
-coalescing, and first-build tail window.
+coalescing, and the first-build tail window.
+All four `background_build_tests` and the three worker
+tests pass.
 
 ### Stage 3: width-keyed memo.
 
