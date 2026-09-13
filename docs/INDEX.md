@@ -67,6 +67,7 @@ extension-host lifecycle. Method and conventions:
 | `tui-perf-background-build-plan.md` | Implemented | 2026-09-13 | Option A background build worker plus Option B width-keyed memo. Staged and committed. Test gates in the audit doc. |
 | `tui-perf-background-build-audit.md` | Audit | 2026-09-13 | Audit of the background build plan and the independent perf test for the 100 ms frame budget. |
 | `tui-perf-streaming-incremental-plan.md` | Spec | 2026-09-13 | Incremental cache for the live streaming block (thinking + text). Eliminates per-frame O(n) re-wrap/re-highlight; subsumes the keep-highlighter-alive optimisation. |
+| `tui-preview-pane-plan.md` | Spec | 2026-09-24 | No-truncation picker preview pane: windowed highlight (only the visible window), cancellable background load, and a size guard so huge ignored files never freeze the TUI. |
 
 ## Status legend
 

@@ -402,6 +402,27 @@ macchiato` as the first internal color scheme. Shipped in
       `Level::thinking` fallback, the macchiato scheme, and the
       color alignment doc.
 
+- [ ] Observation (2026-09-24): the text inside a markdown table
+      renders as raw text, with no syntax highlighting. The grid
+      itself (the fixed-width `table_grid` pass) draws, but each
+      cell's content passes through unprocessed — `table_cells`
+      (`bin/tui/src/highlight.rs`) pipe-splits the row and
+      `wrap_cell_text` word-wraps the raw string, so a cell never
+      goes through `md_line` (inline markdown) or the code
+      highlighter the way the surrounding prose does. Reported by
+      the user while reading a rendered reply; unrelated to the
+      streaming-perf work tracked elsewhere. Open.
+
+- [ ] Observation (2026-09-24): the picker preview pane truncates
+      file content to 50 lines (`FilePreviewer::new(50)` in
+      `bin/tui/src/render.rs`). The user wants no truncation — the
+      full file should be scrollable. Design: "no truncation" does
+      not mean rendering the whole file at once; it means windowed
+      rendering (only the visible window is highlighted per frame)
+      plus a cancellable background load, so an accidental hover on
+      a huge ignored file never freezes the TUI. Detail:
+      `docs/tui-preview-pane-plan.md`.
+
 ## New requests (2026-09-13)
 
 - [x] Preview-pane text in the picker and palette floats was
