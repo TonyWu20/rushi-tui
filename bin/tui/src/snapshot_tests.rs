@@ -68,7 +68,8 @@ fn render(app: &mut App, host: &ExtHost, w: u16, h: u16) -> String {
 /// Build an `App` with a single active session holding the given events.
 fn app_with_session(events: Vec<Event>) -> App {
     let mut app = App::new();
-    app.set_active(SessionId::new("s1"), events);
+    let log_lines = events.len() as u64;
+    app.set_active(SessionId::new("s1"), events, log_lines);
     app
 }
 
@@ -413,6 +414,25 @@ fn snap_palette_open() {
     insta::assert_snapshot!(out);
 }
 
+/// The `tree` picker's option screen: the picked event's four outcome
+/// options in place of the event list, with the option's help in the
+/// preview pane (docs/tree-ui-design-from-human.md).
+#[test]
+fn snap_tree_options_screen() {
+    let events = vec![
+        ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u1","content":"hello"}"#),
+        ev(
+            r#"{"v":1,"type":"assistant_message","ts":"t","id":"a1","content":"hi","tool_calls":[],"stop_reason":"stop","usage":{"input_tokens":1,"output_tokens":1},"reasoning":{}}"#,
+        ),
+    ];
+    let mut app = app_with_session(events);
+    app.open_palette();
+    app.palette_state_mut().goto_tree_options(1);
+    let (host, _tmp) = empty_host();
+    let out = render(&mut app, &host, 80, 24);
+    insta::assert_snapshot!(out);
+}
+
 // ── color schemes ───────────────────────────────────────────────────
 
 #[test]
@@ -752,4 +772,183 @@ fn palette_preview_wide_help_line_wraps() {
             "word `{w}` must be visible in the preview pane:\n{out}"
         );
     }
+}
+
+// ── tree picker: view-only and rewind without summary ──────────────
+// docs/tree-ui-design-from-human.md. These drive the palette state
+// machine directly and assert the commit outcomes.
+
+/// Drive the palette to the `TreeOptions` stage for a picked log seq,
+/// with the cursor parked on the named outcome option (by index).
+fn tree_options_at(events: Vec<Event>, seq: usize, opt: usize) -> App {
+    let mut app = app_with_session(events);
+    let st = app.palette_state_mut();
+    st.open(10);
+    st.goto_tree_options(seq);
+    for _ in 0..opt {
+        st.move_down(4, 0);
+    }
+    app
+}
+
+fn two_events() -> Vec<Event> {
+    vec![
+        ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u1","content":"hello"}"#),
+        ev(r#"{"v":1,"type":"assistant_message","ts":"t","id":"a1","content":"hi","tool_calls":[],"stop_reason":"stop","usage":{"input_tokens":1,"output_tokens":1},"reasoning":{}}"#),
+    ]
+}
+
+/// View-only commit: the action is `TreeViewOnly` and the one-shot
+/// scroll target is the in-memory index of the picked event (log seq 2
+/// with base 1 → index 1). No marker is appended.
+#[test]
+fn tree_view_only_commit() {
+    use crate::app::Action;
+    let mut app = tree_options_at(two_events(), 2, 0);
+    let actions = app.commit_palette();
+    assert_eq!(actions, vec![Action::TreeViewOnly]);
+    assert_eq!(app.take_view_only_target(), Some(1));
+    // Committing closed the palette and cleared the tree seq.
+    assert!(!app.palette_state().open);
+    assert_eq!(app.palette_state().tree_seq(), None);
+}
+
+/// Rewind without summary on a user-message target uses `before` mode
+/// and restores the message text to the input box, unsent.
+#[test]
+fn tree_rewind_before_user_message_restores() {
+    use crate::app::Action;
+    let mut events = two_events();
+    events.push(ev(
+        r#"{"v":1,"type":"user_message","ts":"t","id":"u2","content":"question"}"#,
+    ));
+    let mut app = tree_options_at(events, 3, 1);
+    let actions = app.commit_palette();
+    match actions.as_slice() {
+        [Action::RewindNoSummary {
+            target_seq,
+            mode,
+            restore_text,
+        }] => {
+            assert_eq!(*target_seq, 3);
+            assert_eq!(mode.as_str(), "before");
+            assert_eq!(restore_text.as_deref(), Some("question"));
+        }
+        other => panic!("unexpected actions {other:?}"),
+    }
+    // The fork also scrolls to the picked event (in-memory index 2).
+    assert_eq!(app.take_view_only_target(), Some(2));
+}
+
+/// Rewind without summary on a non-user target uses `on` mode and
+/// restores no text.
+#[test]
+fn tree_rewind_on_tool_result_no_restore() {
+    use crate::app::Action;
+    let events = vec![
+        ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u1","content":"hi"}"#),
+        ev(r#"{"v":1,"type":"tool_call","ts":"t","id":"c1","name":"bash","arguments":{"command":"ls"}}"#),
+        ev(r#"{"v":1,"type":"tool_result","ts":"t","id":"c1","value":"ok"}"#),
+    ];
+    let mut app = tree_options_at(events, 3, 1);
+    let actions = app.commit_palette();
+    match actions.as_slice() {
+        [Action::RewindNoSummary {
+            target_seq,
+            mode,
+            restore_text,
+        }] => {
+            assert_eq!(*target_seq, 3);
+            assert_eq!(mode.as_str(), "on");
+            assert!(restore_text.is_none());
+        }
+        other => panic!("unexpected actions {other:?}"),
+    }
+    // The fork also scrolls to the picked event (in-memory index 2).
+    assert_eq!(app.take_view_only_target(), Some(2));
+}
+
+/// A busy loop blocks the fork outcomes: committing Rewind without
+/// summary while a loop runs keeps the options open and flashes a hint.
+#[test]
+fn tree_rewind_blocked_while_loop_runs() {
+    let events = two_events();
+    let mut app = tree_options_at(events, 2, 1);
+    let sid = app.active().cloned().unwrap();
+    app.attach_external_loop(sid);
+    let actions = app.commit_palette();
+    assert!(actions.is_empty(), "busy loop yields no port action: {actions:?}");
+    assert!(app.status().is_some(), "the busy hint must flash");
+    assert!(
+        app.palette_state().open,
+        "the options must stay open while the loop runs"
+    );
+}
+
+/// The two summarize options are shown but not wired yet: committing
+/// one keeps the options open and flashes the pending-kernel hint.
+#[test]
+fn tree_summarize_options_flash_pending() {
+    let events = two_events();
+    let mut app = tree_options_at(events, 1, 2);
+    let actions = app.commit_palette();
+    assert!(
+        actions.is_empty(),
+        "summarize options yield no port action: {actions:?}"
+    );
+    assert!(
+        app.status().is_some(),
+        "the pending-kernel hint must flash"
+    );
+    assert!(
+        app.palette_state().open,
+        "the options must stay open for the fallback pick"
+    );
+}
+
+/// `transcript_event_line_starts` maps each in-memory event to its first
+/// rendered transcript line; out-of-window and suppressed events are
+/// `None`.
+#[test]
+fn transcript_event_line_starts_maps() {
+    use crate::render::build_transcript;
+    let events = two_events();
+    let app = app_with_session(events);
+    let build = build_transcript(&app, 80, None);
+    let starts = &build.event_line_starts;
+    assert_eq!(starts.len(), 2);
+    assert!(starts[0].is_some(), "event 0 must be rendered");
+    assert!(starts[1].is_some(), "event 1 must be rendered");
+    // Event 0 starts at line 0; event 1 starts after event 0 plus a
+    // separator, strictly after event 0's first line.
+    assert_eq!(starts[0], Some(0));
+    assert!(starts[1] > Some(0));
+}
+
+/// A rewind marker masks the abandoned branch: events outside the
+/// active-path ranges render dim; active-path events do not.
+#[test]
+fn rewind_marker_masks_abandoned_branch() {
+    use crate::render::build_transcript;
+    use ratatui::style::Modifier;
+    let events = vec![
+        ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u1","content":"hello"}"#),
+        ev(r#"{"v":1,"type":"assistant_message","ts":"t","id":"a1","content":"hi","tool_calls":[],"stop_reason":"stop","usage":{"input_tokens":1,"output_tokens":1},"reasoning":{}}"#),
+        ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u2","content":"question"}"#),
+        ev(r#"{"v":1,"type":"rewind","ts":"t","id":"w1","target_seq":2,"mode":"on","reason":"tui_pick"}"#),
+    ];
+    let app = app_with_session(events);
+    let build = build_transcript(&app, 80, None);
+    let dim = |li: usize| build.lines[li]
+        .spans
+        .iter()
+        .any(|s| s.style.add_modifier.contains(Modifier::DIM));
+    // Events 0 and 1 are on the active path (seqs 1..=2): not dimmed.
+    for idx in 0..2 {
+        let li = build.event_line_starts[idx].expect("active-path event rendered");
+        assert!(!dim(li), "active-path event {idx} must not be dimmed");
+    }
+    // Event 2 (seq 3, the abandoned "question") is off the active path.
+    let li = build.event_line_starts[2].expect("abandoned event rendered");
+    assert!(dim(li), "the abandoned event must be dimmed");
 }

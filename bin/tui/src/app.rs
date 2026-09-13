@@ -161,6 +161,12 @@ pub enum Action {
     /// Suspend the TUI process via SIGTSTP (standard Unix job control,
     /// issue #2). The shell backgrounds the process; `fg` resumes it.
     Suspend,
+    TreeViewOnly,
+    RewindNoSummary {
+        target_seq: u64,
+        mode: String,
+        restore_text: Option<String>,
+    },
 }
 
 /// The oldest pending `approval_request` in the active session log.
@@ -295,6 +301,8 @@ pub struct App {
     /// Bumped whenever the event list changes. The transcript cache is
     /// valid only while this number is unchanged.
     events_version: u64,
+    events_base_seq: usize,
+    view_only_target: Option<usize>,
     /// Cached wrapped transcript lines, keyed by (events_version,
     /// width, ext reply version, palette). A scroll redraw reuses the
     /// cache: O(viewport) instead of O(total lines). The extension
@@ -310,7 +318,9 @@ pub struct App {
         Vec<Line<'static>>,
         Vec<Option<String>>,
         std::collections::HashMap<String, (usize, usize)>,
+        Vec<Option<usize>>,
         u64,
+        Vec<String>,
     )>,
     /// The terminal's color capability the built-in palette is lowered
     /// to, and the selected color scheme (docs/tui-color-scheme.md
@@ -522,15 +532,9 @@ const QUIT_ARM_TTL: std::time::Duration = std::time::Duration::from_secs(3);
 /// (docs/tui-conversation-browsing.md section 4.2, the FT-012
 /// mirror).
 const SS_ARM_TTL: std::time::Duration = std::time::Duration::from_secs(3);
-/// Scroll distance kept between the viewport top and the log end. The
-/// transcript is capped anyway, so the scroll clamps at draw time.
-const SCROLL_CAP: usize = 100_000;
-/// Maximum number of events held in memory per session. The render
-/// layer only displays the last `TRANSCRIPT_EVENT_CAP` events, but we
-/// keep extra for scrollback and pending-approval lookups. Capping the
-/// Vec prevents unbounded memory growth in long-running sessions
-/// (a single TUI instance must not exhaust system RAM).
-const EVENTS_CAP: usize = 10_000;
+/// No cap on the scroll distance or on the events held in memory: the
+/// whole session log stays reachable (docs/tui-conversation-browsing.md
+/// section 4.6). The view clamps to the rendered total at draw time.
 
 impl App {
     pub fn new() -> Self {
@@ -559,6 +563,8 @@ impl App {
             ext_status_ts: HashMap::new(),
             viewport: 0,
             events_version: 0,
+            events_base_seq: 1,
+            view_only_target: None,
             transcript_cache: None,
             palette: crate::color::Palette::builtin(crate::color::Level::detect()),
             tool_display: crate::tool_display::ToolDisplay::preset(
@@ -761,6 +767,17 @@ impl App {
     /// Set the focus block (focus mode). Only this block is expanded;
     /// all others collapse. (docs/tui-tool-display-fancy.md section 6)
     pub fn set_focus_block(&mut self, tool_id: &str) {
+        // Steady focus is a no-op. Do not bump the cache epoch. The
+        // focus loop calls this every frame. A steady bump would miss
+        // the cache and force a full rebuild each idle frame.
+        if self.block_targets.get(tool_id).copied() == Some(1.0)
+            && !self
+                .block_targets
+                .iter()
+                .any(|(id, t)| id != tool_id && *t > 0.0)
+        {
+            return
+        }
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -928,17 +945,34 @@ impl App {
     }
 
     /// Switch the visible session. Reloads its log and resets scroll.
-    /// The caller restarts the port watch afterwards.
-    pub fn set_active(&mut self, id: SessionId, mut events: Vec<Event>) {
-        // Trim from the front to bound memory; the render layer only
-        // shows the last TRANSCRIPT_EVENT_CAP events anyway.
-        if events.len() > EVENTS_CAP {
-            let excess = events.len() - EVENTS_CAP;
-            events.drain(0..excess);
-        }
+    /// The caller restarts the port watch afterwards. `log_lines` is
+    /// the session's total log line count (the port's line count) and
+    /// seeds `events_base_seq`, the 1-based log seq of the window's
+    /// first retained event.
+    pub fn set_active(
+        &mut self,
+        id: SessionId,
+        events: Vec<Event>,
+        log_lines: u64,
+    ) {
+        // No front trim: the whole session log is held in memory so
+        // the beginning stays reachable (docs/tui-conversation-
+        // browsing.md section 4.6, no replay cap).
         let (statuses, status_ts, order) = ext_status_map(&events);
+        // A new session voids a pending scroll-to-event target: it was
+        // resolved against the previous session's event indices. A same-
+        // session re-read (a watch delivery, a marker append) keeps the
+        // target: the picked event's index is unchanged.
+        if self.active.as_ref() != Some(&id) {
+            self.view_only_target = None;
+        }
         self.active = Some(id);
         self.events = events;
+        // 1-based log seq of the retained window's first event: the
+        // log's total line count minus the retained window length, plus
+        // one (docs/tree-ui-design-from-human.md rewind target seqs).
+        self.events_base_seq =
+            (log_lines.saturating_sub(self.events.len() as u64) + 1) as usize;
         self.scroll = 0;
         // The browse state never survives a session switch (section
         // 4.7): the reset rides the scroll reset.
@@ -954,6 +988,10 @@ impl App {
         self.ext_status_ts = status_ts;
         self.ext_status_order = order;
         self.clear_stream();
+        // A fresh session has no live stream. Clear the stream-length
+        // baseline so the first draw of the new session cannot report
+        // a phantom stream shrink against the prior session's tail.
+        self.last_stream_len = 0;
     }
 
     // ── model stream channel (docs/tui-streaming-response.md §6) ──
@@ -1200,10 +1238,6 @@ impl App {
                     }
                 }
                 self.events.push(event);
-                if self.events.len() > EVENTS_CAP {
-                    let excess = self.events.len() - EVENTS_CAP;
-                    self.events.drain(0..excess);
-                }
                 self.events_version += 1;
             }
             WatchItem::Gone => self.flash("session log missing — waiting for it to come back"),
@@ -1219,14 +1253,17 @@ impl App {
     }
 
     /// Record the live stream length, in rendered lines, at each
-    /// draw. Report whether it grew since the previous draw. The
-    /// browse sync treats stream-tail growth like settled-event
-    /// growth and pins the view in place
-    /// (docs/tui-conversation-browsing.md section 4.6).
-    pub fn note_stream_grew(&mut self, stream_len: usize) -> bool {
-        let grew = stream_len > self.last_stream_len;
+    /// draw. Report whether it changed, in either direction, since
+    /// the previous draw. The browse sync treats a stream-tail
+    /// change, growth or shrink, like a settled-event change and
+    /// pins the view in place
+    /// (docs/tui-conversation-browsing.md section 4.6). A shrink is
+    /// the thinking block sliding its window or the stream settling
+    /// into a shorter event.
+    pub fn note_stream_changed(&mut self, stream_len: usize) -> bool {
+        let changed = stream_len != self.last_stream_len;
         self.last_stream_len = stream_len;
-        grew
+        changed
     }
 
     /// Set the transcript pane height (the renderer does this every
@@ -1258,7 +1295,7 @@ impl App {
         ext: Option<&crate::ext::ExtHost>,
     ) -> &[Line<'static>] {
         let ext_ver = ext.map(|h| h.replies_version()).unwrap_or(0);
-        if let Some((v, w, ev, cl, p, _, _, _, fe)) = &self.transcript_cache {
+        if let Some((v, w, ev, cl, p, _, _, _, _, fe, _)) = &self.transcript_cache {
             if *v == self.events_version
                 && *w == width
                 && *ev == ext_ver
@@ -1273,6 +1310,8 @@ impl App {
         let lines = build.lines;
         let line_raw = build.line_raw;
         let block_spans = build.block_spans;
+        let event_line_starts = build.event_line_starts;
+        let texts = build.texts;
         self.transcript_cache = Some((
             self.events_version,
             width,
@@ -1282,9 +1321,24 @@ impl App {
             lines,
             line_raw,
             block_spans,
+            event_line_starts,
             self.frac_epoch,
+            texts,
         ));
         &self.transcript_cache.as_ref().unwrap().5
+    }
+
+    /// The per-line display text of the settled transcript (docs/tui-
+    /// conversation-browsing.md section 11.3). Cached in step with
+    /// [`Self::transcript_lines`] so the browse layout can store it
+    /// instead of re-stringifying every line on each frame.
+    pub fn transcript_texts(
+        &mut self,
+        width: usize,
+        ext: Option<&crate::ext::ExtHost>,
+    ) -> &Vec<String> {
+        let _lines = self.transcript_lines(width, ext);
+        &self.transcript_cache.as_ref().unwrap().10
     }
 
     /// The per-line raw source map a browse yank reads (docs/tui-
@@ -1312,9 +1366,63 @@ impl App {
         self.transcript_cache.as_ref().unwrap().7.clone()
     }
 
+    /// The first rendered transcript line of each in-memory event
+    /// (docs/tree-ui-design-from-human.md view-only scroll):
+    /// `event_line_starts[i]` is where in-memory event `i` begins in
+    /// the cached transcript, `None` for suppressed or out-of-window
+    /// events. Sourced from the transcript cache which
+    /// `transcript_lines` keeps in step with it.
+    pub fn transcript_event_line_starts(
+        &mut self,
+        width: usize,
+        ext: Option<&crate::ext::ExtHost>,
+    ) -> Vec<Option<usize>> {
+        let _ = self.transcript_lines(width, ext);
+        self.transcript_cache.as_ref().unwrap().8.clone()
+    }
+
     /// Events of the active session, oldest first.
     pub fn events(&self) -> &[Event] {
         &self.events
+    }
+
+    /// 1-based log seq of the first in-memory event. Rewind markers and
+    /// the active-path mask use it to map a window index to the log seq
+    /// that target_seq requires.
+    pub fn events_base_seq(&self) -> usize {
+        self.events_base_seq
+    }
+
+    /// The active-path ranges of the current log (docs/rewind-fork-
+    /// design.md section 3), or None when no rewind marker exists. The
+    /// marker events are parsed from the in-memory window using the
+    /// shared kernel parser; the ranges are in 1-based log seq.
+    pub fn rewind_active_ranges(&self) -> Option<Vec<(usize, usize)>> {
+        use rushi_common::rewind;
+        let base = self.events_base_seq;
+        let mut refs = Vec::new();
+        for (i, e) in self.events.iter().enumerate() {
+            if let Some(obj) = e.obj() {
+                if let Some(ref_) = rewind::parse_rewind_event(obj, base + i) {
+                    refs.push(ref_);
+                }
+            }
+        }
+        if refs.is_empty() {
+            return None;
+        }
+        let end = base + self.events.len() - 1;
+        Some(rewind::active_ranges(end, &refs))
+    }
+
+    /// Consume the pending one-shot scroll-to-event target (the in-memory
+    /// event index to bring to the top of the viewport). The draw reads it
+    /// and pins the viewport there; the sticky scroll then holds until the
+    /// user scrolls (docs/tree-ui-design-from-human.md View-only).
+    pub fn take_view_only_target(&mut self) -> Option<usize> {
+        let target = self.view_only_target;
+        self.view_only_target = None;
+        target
     }
 
 
@@ -1419,7 +1527,7 @@ impl App {
     }
 
     pub fn scroll_up(&mut self, lines: usize) {
-        self.scroll = self.scroll.saturating_add(lines).min(SCROLL_CAP);
+        self.scroll = self.scroll.saturating_add(lines);
     }
 
     pub fn scroll_down(&mut self, lines: usize) {
@@ -1427,7 +1535,7 @@ impl App {
     }
 
     pub fn set_scroll(&mut self, s: usize) {
-        self.scroll = s.min(SCROLL_CAP);
+        self.scroll = s;
     }
 
     // ── browse mode (docs/tui-conversation-browsing.md) ──────
@@ -1765,56 +1873,165 @@ impl App {
     /// The ranked palette items for the current stage and query.
     pub fn palette_ranked(&self) -> Vec<crate::palette::items::PaletteItem> {
         let state = &self.palette_state;
-        if state.stage == crate::palette::state::PaletteStage::SessionList {
-            let filter = state.filter_query();
-            let items: Vec<crate::palette::items::PaletteItem> = self
-                .sessions
-                .iter()
-                .enumerate()
-                .map(|(i, sid)| {
-                    let is_active = self.active.as_ref() == Some(sid);
-                    let running = self.loop_running(sid);
-                    let mut help = String::new();
-                    help.push_str(&format!("recency {} of {}\n", i + 1, self.sessions.len()));
-                    help.push_str(&format!(
-                        "active: {}\n",
-                        if is_active { "yes" } else { "no" }
-                    ));
-                    help.push_str(&format!(
-                        "loop: {}\n",
-                        if running { "running" } else { "stopped" }
-                    ));
-                    crate::palette::items::PaletteItem {
-                        id: sid.as_str().to_string(),
-                        label: sid.as_str().to_string(),
-                        kind: crate::palette::items::CmdKind::Goto,
-                        hint: if is_active { "active".to_string() } else { String::new() },
-                        help,
-                        options: Vec::new(),
-                        ext: None,
-                    }
+        match state.stage {
+            crate::palette::state::PaletteStage::SessionList => {
+                let filter = state.filter_query();
+                let items: Vec<crate::palette::items::PaletteItem> = self
+                    .sessions
+                    .iter()
+                    .enumerate()
+                    .map(|(i, sid)| {
+                        let is_active = self.active.as_ref() == Some(sid);
+                        let running = self.loop_running(sid);
+                        let mut help = String::new();
+                        help.push_str(&format!("recency {} of {}\n", i + 1, self.sessions.len()));
+                        help.push_str(&format!(
+                            "active: {}\n",
+                            if is_active { "yes" } else { "no" }
+                        ));
+                        help.push_str(&format!(
+                            "loop: {}\n",
+                            if running { "running" } else { "stopped" }
+                        ));
+                        crate::palette::items::PaletteItem {
+                            id: sid.as_str().to_string(),
+                            label: sid.as_str().to_string(),
+                            kind: crate::palette::items::CmdKind::Goto,
+                            hint: if is_active { "active".to_string() } else { String::new() },
+                            help,
+                            options: Vec::new(),
+                            ext: None,
+                        }
+                    })
+                    .collect();
+                // Rank by the filter portion of the query (text after the goto prefix).
+                let labels: Vec<String> = items.iter().map(|i| i.label.clone()).collect();
+                let ranked = crate::picker::fuzzy::rank_fuzzy(&labels, filter);
+                ranked
+                    .into_iter()
+                    .map(|i| items[i].clone())
+                    .collect()
+            }
+            // The tree sub-list: the active session's events, fuzzy-
+            // searchable (docs/tree-ui-design-from-human.md).
+            crate::palette::state::PaletteStage::TreeList => {
+                self.tree_event_items(state.filter_query())
+            }
+            // The four outcome options for a tree-picked event. Fixed
+            // order; the query does not rank them.
+            crate::palette::state::PaletteStage::TreeOptions => {
+                self.tree_option_items()
+            }
+            // The root command list.
+            crate::palette::state::PaletteStage::Root => {
+                let items = self.palette_items();
+                let labels: Vec<String> = items.iter().map(|i| {
+                    format!("{} {}", i.label, i.hint)
                 })
                 .collect();
-            // Rank by the filter portion of the query (text after the goto prefix).
-            let labels: Vec<String> = items.iter().map(|i| i.label.clone()).collect();
-            let ranked = crate::picker::fuzzy::rank_fuzzy(&labels, filter);
-            ranked
-                .into_iter()
-                .map(|i| items[i].clone())
-                .collect()
-        } else {
-            let items = self.palette_items();
-            let labels: Vec<String> = items.iter().map(|i| {
-                format!("{} {}", i.label, i.hint)
-            })
-            .collect();
-            let query = state.filter_query();
-            let ranked = crate::picker::fuzzy::rank_fuzzy(&labels, query);
-            ranked
-                .into_iter()
-                .map(|i| items[i].clone())
-                .collect()
+                let query = state.filter_query();
+                let ranked = crate::picker::fuzzy::rank_fuzzy(&labels, query);
+                ranked
+                    .into_iter()
+                    .map(|i| items[i].clone())
+                    .collect()
+            }
         }
+    }
+
+    /// The tree sub-list items (docs/tree-ui-design-from-human.md): the
+    /// active session's events, one line each, type-tagged and
+    /// fuzzy-ranked by `filter`. Each item's `id` is the event's 1-based
+    /// log seq. ExtStatus events are skipped (they add no transcript row).
+    fn tree_event_items(
+        &self,
+        filter: &str,
+    ) -> Vec<crate::palette::items::PaletteItem> {
+        use crate::palette::items::{CmdKind, PaletteItem};
+        use crate::picker::fuzzy::rank_fuzzy;
+        let events = self.events();
+        // The transcript has no render cap, so every in-memory event
+        // maps to a rendered line and the whole history is reachable.
+        let start = 0;
+        let mut candidates: Vec<(usize, String)> = Vec::new();
+        for (i, e) in events[start..].iter().enumerate() {
+            let i = start + i;
+            if e.kind() == EventKind::ExtStatus {
+                continue;
+            }
+            candidates.push((i, tree_row_label(e)));
+        }
+        let labels: Vec<String> = candidates.iter().map(|(_, l)| l.clone()).collect();
+        let ranked = rank_fuzzy(&labels, filter);
+        let base = self.events_base_seq;
+            ranked
+            .into_iter()
+            .map(|i| {
+                let idx = candidates[i].0;
+                let label = labels[i].clone();
+                let seq = base + idx;
+                let picked = &events[idx];
+                let help = format!(
+                    "{}\n\nEnter offers the four options (View-only, Rewind without summary, Summarize the branch, Summarize with custom prompt).",
+                    tree_event_body(picked)
+                );
+                PaletteItem {
+                    id: seq.to_string(),
+                    label,
+                    kind: CmdKind::Goto,
+                    hint: format!("#{seq}"),
+                    help,
+                    options: Vec::new(),
+                    ext: None,
+                }
+            })
+            .collect()
+    }
+
+    /// The four outcome options for a tree-picked event (docs/tree-ui-
+    /// design-from-human.md). View-only and Rewind without summary are
+    /// wired; the two summarize options flash that the kernel compact
+    /// flags are pending.
+    fn tree_option_items(&self) -> Vec<crate::palette::items::PaletteItem> {
+        use crate::palette::items::{CmdKind, PaletteItem};
+        vec![
+            PaletteItem {
+                id: "view-only".into(),
+                label: "View-only".into(),
+                kind: CmdKind::Run,
+                hint: String::new(),
+                help: "Scroll the viewport to this event. No rewind marker, no fork, no state change. Allowed while the loop runs.".into(),
+                options: Vec::new(),
+                ext: None,
+            },
+            PaletteItem {
+                id: "rewind-no-summary".into(),
+                label: "Rewind without summary".into(),
+                kind: CmdKind::Run,
+                hint: String::new(),
+                help: "Append a rewind marker here (reason tui_pick) and dim the abandoned branch. Requires the loop to be idle.".into(),
+                options: Vec::new(),
+                ext: None,
+            },
+            PaletteItem {
+                id: "summarize-branch".into(),
+                label: "Summarize the branch".into(),
+                kind: CmdKind::Run,
+                hint: "pending kernel".into(),
+                help: "Append the rewind marker and run bin/compact --up-to. Pending the kernel compact flag.".into(),
+                options: Vec::new(),
+                ext: None,
+            },
+            PaletteItem {
+                id: "summarize-custom".into(),
+                label: "Summarize with custom prompt".into(),
+                kind: CmdKind::Run,
+                hint: "pending kernel".into(),
+                help: "Append the rewind marker and run bin/compact --up-to --prompt. Pending the kernel compact flag.".into(),
+                options: Vec::new(),
+                ext: None,
+            },
+        ]
     }
 
     /// Handle the `Enter` key when the palette is open. Returns the
@@ -1834,17 +2051,42 @@ impl App {
         use crate::palette::items::CmdKind;
         match item.kind {
             CmdKind::Goto => {
-                // Entering the session sub-list (Root stage only).
-                if state.stage == crate::palette::state::PaletteStage::Root {
-                    self.palette_state_mut().goto_session_list();
-                } else {
-                    // Session sub-list: switch session.
-                    self.palette_state_mut().close();
-                    return vec![Action::SwitchSession(item.id.clone())];
+                // Goto items transition the palette sub-stage
+                // (docs/tree-ui-design-from-human.md, docs/tui-command-
+                // palette.md).
+                match state.stage {
+                    crate::palette::state::PaletteStage::Root => {
+                        // The `tree` item opens the event tree. Every
+                        // other Goto item opens the session list.
+                        if item.id == "tree" {
+                            self.palette_state_mut().goto_tree_list();
+                        } else {
+                            self.palette_state_mut().goto_session_list();
+                        }
+                        Vec::new()
+                    }
+                    crate::palette::state::PaletteStage::TreeList => {
+                        // A tree event was picked: show the four options.
+                        let seq = item.id.parse::<usize>().unwrap_or(0);
+                        self.palette_state_mut().goto_tree_options(seq);
+                        Vec::new()
+                    }
+                    // The session sub-list switches sessions. TreeOptions
+                    // carries no Goto items, so this guards a stray pick.
+                    crate::palette::state::PaletteStage::SessionList
+                    | crate::palette::state::PaletteStage::TreeOptions => {
+                        self.palette_state_mut().close();
+                        vec![Action::SwitchSession(item.id.clone())]
+                    }
                 }
-                Vec::new()
             }
             CmdKind::Run => {
+                // Tree outcome options (View-only / Rewind without summary
+                // / the two pending summarize options) are committed
+                // through their own path, which owns the close.
+                if state.stage == crate::palette::state::PaletteStage::TreeOptions {
+                    return self.commit_tree_option(item.id.as_str());
+                }
                 self.palette_state_mut().close();
                 match item.id.as_str() {
                     "toggle-tools" => {
@@ -1911,6 +2153,71 @@ impl App {
         }
     }
 
+    /// Commit a tree outcome option (docs/tree-ui-design-from-human.md).
+    /// The picked event is remembered in the palette state as a 1-based
+    /// log seq. View-only and Rewind without summary are wired; the two
+    /// summarize outcomes flash that the kernel compact flags are pending.
+    fn commit_tree_option(&mut self, id: &str) -> Vec<Action> {
+        let seq = self.palette_state().tree_seq().unwrap_or(0);
+        let base = self.events_base_seq();
+        // The current in-memory index of the picked event (log seq minus
+        // the window base). The window may have front-trimmed since the
+        // pick, so clamp into the current window.
+        let idx = seq
+            .saturating_sub(base)
+            .min(self.events().len().saturating_sub(1));
+        let picked = self.events().get(idx);
+        match id {
+            "view-only" => {
+                // Navigation only: no marker, no fork, no state change.
+                // Allowed while the loop runs.
+                self.palette_state_mut().close();
+                self.view_only_target = Some(idx);
+                vec![Action::TreeViewOnly]
+            }
+            "rewind-no-summary" => {
+                // The fork outcomes need an idle loop so the marker lands
+                // cleanly. If busy, show the hint and keep the options open.
+                let busy = self
+                    .active
+                    .as_ref()
+                    .is_some_and(|sid| self.loop_running(sid));
+                if busy {
+                    self.flash("loop busy, wait for the step");
+                    return Vec::new();
+                }
+                // A user-message target uses `before` (the message waits in
+                // the input box, unsent). Every other target uses `on`.
+                let mode = match picked.map(|e| e.kind()) {
+                    Some(EventKind::UserMessage) => "before",
+                    _ => "on",
+                };
+                let restore_text = if mode == "before" {
+                    picked.and_then(|e| e.get_str("content")).map(String::from)
+                } else {
+                    None
+                };
+                self.palette_state_mut().close();
+                // Go to the picked event (docs/tree-ui-design-from-human.md):
+                // scroll the viewport to it once the marker lands.
+                self.view_only_target = Some(idx);
+                vec![Action::RewindNoSummary {
+                    target_seq: seq as u64,
+                    mode: mode.to_string(),
+                    restore_text,
+                }]
+            }
+            "summarize-branch" | "summarize-custom" => {
+                // Not wired yet: the kernel bin/compact gains the
+                // --up-to / --prompt flags. Keep the options open so the
+                // user can fall back to View-only or Rewind without summary.
+                self.flash("summarize modes are pending the kernel compact flags");
+                Vec::new()
+            }
+            _ => Vec::new(),
+        }
+    }
+
     pub fn set_ext_commands(&mut self, items: Vec<crate::palette::items::PaletteItem>) {
         self.ext_commands = items;
     }
@@ -1953,10 +2260,15 @@ impl App {
         };
         let token = &query[..space_pos];
         let items = crate::palette::items::builtins(&self.effort_current);
+        let is_tree = items
+            .iter()
+            .any(|i| i.kind == crate::palette::items::CmdKind::Goto && i.label == token && i.id == "tree");
         let is_goto = items.iter().any(|i| {
             i.kind == crate::palette::items::CmdKind::Goto && i.label == token
         });
-        if is_goto {
+        if is_tree {
+            self.palette_state_mut().goto_tree_list();
+        } else if is_goto {
             self.palette_state_mut().goto_session_list();
         }
     }
@@ -2940,6 +3252,119 @@ impl App {
 
 }
 
+/// The one-line tree row for an event (docs/tree-ui-design-from-human.md):
+/// a type tag up front and a truncated single-line preview. No wrapping.
+fn tree_row_label(e: &Event) -> String {
+    let tag = tree_event_tag(e);
+    let preview = tree_event_preview(e);
+    if preview.is_empty() {
+        format!("<{tag}>")
+    } else {
+        format!("<{tag}> {preview}")
+    }
+}
+
+/// The short type tag at the front of a tree row.
+fn tree_event_tag(e: &Event) -> String {
+    match e.kind() {
+        EventKind::UserMessage => "user".to_string(),
+        EventKind::AssistantMessage => "assistant".to_string(),
+        EventKind::ToolCall => match e.get_str("name") {
+            Some(n) => format!("tool:{n}"),
+            None => "tool".to_string(),
+        },
+        EventKind::ToolResult => "tool-result".to_string(),
+        EventKind::ApprovalRequest => "approval".to_string(),
+        EventKind::Approval => "decision".to_string(),
+        EventKind::Cancel => "cancel".to_string(),
+        EventKind::Error => "error".to_string(),
+        EventKind::ContextExhausted => "context-exhausted".to_string(),
+        EventKind::CompactionStarted => "compact-start".to_string(),
+        EventKind::CompactionSummary => "compact".to_string(),
+        EventKind::CompactionFailed => "compact-failed".to_string(),
+        EventKind::UserMessageRetract => "retract".to_string(),
+        EventKind::Rewind => "rewind".to_string(),
+        _ => "event".to_string(),
+    }
+}
+
+/// The one-line preview of an event's content for the tree row.
+fn tree_event_preview(e: &Event) -> String {
+    let raw = match e.kind() {
+        EventKind::UserMessage | EventKind::AssistantMessage => {
+            e.get_str("content").unwrap_or("").to_string()
+        }
+        EventKind::ToolCall => e
+            .get("arguments")
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
+        EventKind::ToolResult => e
+            .get("value")
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
+        EventKind::Rewind => format!(
+            "target_seq={} mode={}",
+            e.get("target_seq")
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            e.get_str("mode").unwrap_or("on")
+        ),
+        EventKind::ApprovalRequest => e.get_str("prompt").unwrap_or("").to_string(),
+        _ => String::new(),
+    };
+    truncate_one_line(&raw)
+}
+
+/// The multi-line body of an event for the tree preview pane
+/// (docs/tree-ui-design-from-human.md "The preview pane shows the
+/// preview of the full content of the event"). Capped so one event does
+/// not dominate the pane.
+fn tree_event_body(e: &Event) -> String {
+    let raw = match e.kind() {
+        EventKind::UserMessage | EventKind::AssistantMessage => {
+            e.get_str("content").unwrap_or("").to_string()
+        }
+        EventKind::ToolCall => e
+            .get("arguments")
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
+        EventKind::ToolResult => e
+            .get("value")
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
+        EventKind::Rewind => format!(
+            "rewound to seq {} ({} mode)",
+            e.get("target_seq")
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            e.get_str("mode").unwrap_or("on")
+        ),
+        EventKind::ApprovalRequest => e.get_str("prompt").unwrap_or("").to_string(),
+        _ => String::new(),
+    };
+    const CAP: usize = 600;
+    if raw.chars().count() <= CAP {
+        raw
+    } else {
+        let cut: String = raw.chars().take(CAP).collect();
+        format!("{cut}...")
+    }
+}
+
+/// Collapse to the first line and cap the length, appending `...` when
+/// truncated (docs/tree-ui-design-from-human.md "Show ... when the
+/// message is too long").
+fn truncate_one_line(s: &str) -> String {
+    let one = s.lines().next().unwrap_or("").trim();
+    const CAP: usize = 120;
+    if one.chars().count() <= CAP {
+        one.to_string()
+    } else {
+        let cut: String = one.chars().take(CAP).collect();
+        format!("{cut}...")
+    }
+}
+
 /// Fold one paced release into the live buffer accumulators (the
 /// consumer of the §6.5 pace queue).
 fn apply_paced(buf: &mut StreamBuf, kind: &StreamDeltaKind, payload: &str) {
@@ -2960,6 +3385,152 @@ fn apply_paced(buf: &mut StreamBuf, kind: &StreamDeltaKind, payload: &str) {
             }
             entry.1.push_str(payload);
         }
+    }
+}
+
+#[cfg(test)]
+mod full_history_tests {
+    //! End to end guards for the removed replay caps
+    //! (docs/tui-conversation-browsing.md section 4.6, no replay
+    //! cap). A session past the old 2000 event render cap must
+    //! still expose its beginning in the tree and in the rendered
+    //! transcript.
+
+    use super::App;
+    use crate::event::Event;
+    use crate::port::SessionId;
+
+    fn many_events(n: usize) -> Vec<Event> {
+        (0..n)
+            .map(|i| {
+                if i % 2 == 0 {
+                    Event::parse_line(
+                        &format!(
+                            r#"{{"v":1,"type":"user_message","ts":"t","id":"u{i}","content":"line {i}"}}"#
+                        ),
+                    )
+                    .unwrap()
+                } else {
+                    Event::parse_line(
+                        &format!(
+                            r#"{{"v":1,"type":"assistant_message","ts":"t","id":"a{i}","content":"reply {i}","tool_calls":[],"stop_reason":"stop","usage":{{"input_tokens":1,"output_tokens":1}},"reasoning":{{}}}}"#
+                        ),
+                    )
+                    .unwrap()
+                }
+            })
+            .collect()
+    }
+
+    /// The tree list spans the whole log, not a capped tail. Past
+    /// the old 2000 event cap, event 1 must still lead the list.
+    #[test]
+    fn tree_list_reaches_the_first_event_past_the_old_cap() {
+        let n = 3000;
+        let mut app = App::new();
+        app.set_active(SessionId::new("s1"), many_events(n), n as u64);
+        let items = app.tree_event_items("");
+        assert_eq!(items.len(), n, "the tree lists every event");
+        assert_eq!(items[0].id, "1", "the first log seq leads the list");
+        assert!(
+            items[0].label.contains("line 0"),
+            "the first event shows in the row: {}",
+            items[0].label
+        );
+        assert_eq!(items.last().unwrap().id, n.to_string());
+    }
+
+    /// The rendered transcript starts at the first event, not at a
+    /// capped window start.
+    #[test]
+    fn transcript_renders_from_the_first_event() {
+        let n = 3000;
+        let mut app = App::new();
+        app.set_active(SessionId::new("s1"), many_events(n), n as u64);
+        let lines = crate::render::build_transcript_lines(&app, 100, None);
+        assert!(
+            lines.len() >= n,
+            "each event yields at least one line, got {}",
+            lines.len()
+        );
+        let head: String = lines.iter().take(8).map(|l| l.to_string()).collect();
+        assert!(
+            head.contains("line 0"),
+            "the transcript head shows the first event: {head}"
+        );
+    }
+
+    /// The stream-change flag reports growth and shrink alike, so a
+    /// live tail that shrinks (thinking window slide, settle into a
+    /// shorter event) still pins the browse view instead of re-
+    /// centering on the cursor (the cc08fa6 regression).
+    #[test]
+    fn stream_changed_flag_fires_on_growth_and_shrink() {
+        let mut app = App::new();
+        assert!(!app.note_stream_changed(0), "no stream yet");
+        assert!(app.note_stream_changed(40), "growth reports a change");
+        assert!(!app.note_stream_changed(40), "steady length does not");
+        assert!(app.note_stream_changed(24), "shrink reports a change");
+        assert!(!app.note_stream_changed(24), "steady again does not");
+        // A session switch resets the baseline, so a fresh session
+        // with no stream reports no phantom change.
+        app.set_active(SessionId::new("s2"), Vec::new(), 0);
+        assert!(!app.note_stream_changed(0), "fresh session baseline is zero");
+    }
+
+    /// Load the real session log when it exists. The `sessions/`
+    /// tree is runtime data, gitignored, so the test skips when the
+    /// file is absent. When present, the tree must lead with the
+    /// first log event even for a long log.
+    #[test]
+    fn tree_list_spans_the_real_session_log_when_present() {
+        use crate::event::EventKind;
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../sessions/browse-mode-issues/events.jsonl");
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return;
+        };
+        let events: Vec<Event> = text
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .filter_map(|l| Event::parse_line(l))
+            .collect();
+        assert!(
+            events.len() >= 2800,
+            "the real session is a long log, got {}",
+            events.len()
+        );
+        let mut app = App::new();
+        app.set_active(
+            SessionId::new("browse-mode-issues"),
+            events.clone(),
+            events.len() as u64,
+        );
+        let items = app.tree_event_items("");
+        let first_idx = events
+            .iter()
+            .position(|e| e.kind() != EventKind::ExtStatus)
+            .unwrap();
+        assert_eq!(items[0].id, "1", "the first log seq leads the list");
+        assert_eq!(
+            items[0].label,
+            super::tree_row_label(&events[first_idx]),
+            "the first row is the first listed event"
+        );
+        let lines = crate::render::build_transcript_lines(&app, 100, None);
+        assert!(!lines.is_empty(), "the transcript is not empty");
+        // The transcript head must show the first event's content, so
+        // `gg` in browse lands on the session start. The user message
+        // renders in its bordered panel with the body at the left edge.
+        let content = events[first_idx]
+            .get_str("content")
+            .unwrap_or("");
+        let marker: String = content.chars().take(12).collect();
+        let head: String = lines.iter().take(12).map(|l| l.to_string()).collect();
+        assert!(
+            head.contains(&marker),
+            "the transcript head shows the first event, head: {head}"
+        );
     }
 }
 

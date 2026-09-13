@@ -408,7 +408,8 @@ fn main() {
                 Vec::new()
             }
         };
-        app.set_active(id.clone(), events.clone());
+        let log_lines = rt.block_on(port.log_line_count(&id)).unwrap_or(0);
+        app.set_active(id.clone(), events.clone(), log_lines);
         app.set_watch_rx(port.watch(&id, TailCursor::end()));
         app.set_sessions(rt.block_on(port.list_sessions()).unwrap_or_default());
         // Reattach a live loop from an earlier TUI (FT-003). The
@@ -955,7 +956,8 @@ fn main() {
                                     Vec::new()
                                 }
                             };
-                            app.set_active(id.clone(), events.clone());
+                            let log_lines = rt.block_on(port.log_line_count(&id)).unwrap_or(0);
+                            app.set_active(id.clone(), events.clone(), log_lines);
                             app.set_watch_rx(port.watch(&id, TailCursor::end()));
                             // Event ids restart per session: clear the
                             // reply caches and resend this session's
@@ -983,7 +985,8 @@ fn main() {
                             Vec::new()
                         }
                     };
-                    app.set_active(sid.clone(), events.clone());
+                    let log_lines = rt.block_on(port.log_line_count(&sid)).unwrap_or(0);
+                    app.set_active(sid.clone(), events.clone(), log_lines);
                     app.set_watch_rx(port.watch(&sid, TailCursor::end()));
                     if let Ok(list) = rt.block_on(port.list_sessions()) {
                         app.set_sessions(list);
@@ -1026,7 +1029,8 @@ fn main() {
                             Vec::new()
                         }
                     };
-                    app.set_active(new_sid.clone(), events.clone());
+                    let log_lines = rt.block_on(port.log_line_count(&new_sid)).unwrap_or(0);
+                    app.set_active(new_sid.clone(), events.clone(), log_lines);
                     app.set_watch_rx(port.watch(&new_sid, TailCursor::end()));
                     if let Ok(list) = rt.block_on(port.list_sessions()) {
                         app.set_sessions(list);
@@ -1042,7 +1046,8 @@ fn main() {
                             // A live loop owns the target session: a
                             // second start would double-append to its
                             // log. Stay on the old session.
-                            app.set_active(old_sid.clone(), old_events);
+                            let log_lines = rt.block_on(port.log_line_count(&old_sid)).unwrap_or(0);
+                            app.set_active(old_sid.clone(), old_events, log_lines);
                             app.set_watch_rx(port.watch(&old_sid, TailCursor::end()));
                             trace(
                                 &rt,
@@ -1062,7 +1067,8 @@ fn main() {
                                 app.flash(format!("handoff to {name} — loop started"));
                             }
                             Err(e) => {
-                                app.set_active(old_sid.clone(), old_events);
+                                let log_lines = rt.block_on(port.log_line_count(&old_sid)).unwrap_or(0);
+                                app.set_active(old_sid.clone(), old_events, log_lines);
                                 app.set_watch_rx(port.watch(&old_sid, TailCursor::end()));
                                 app.flash(format!("handoff to {name} failed: {e}"));
                             }
@@ -1133,7 +1139,8 @@ fn main() {
                             Vec::new()
                         }
                     };
-                    app.set_active(sid.clone(), events.clone());
+                    let log_lines = rt.block_on(port.log_line_count(&sid)).unwrap_or(0);
+                    app.set_active(sid.clone(), events.clone(), log_lines);
                     app.set_watch_rx(port.watch(&sid, TailCursor::end()));
                     host.clear_replies();
                     host.send_history(&events, last_width.saturating_sub(16).max(40));
@@ -1227,6 +1234,42 @@ fn main() {
                     let _ = term.clear();
                     app.flash("resumed");
                     continue 'ui;
+                }
+                // Tree View-only (docs/tree-ui-design-from-human.md): the
+                // app already set the one-shot scroll target and closed the
+                // palette. The next draw scrolls the viewport. No port work.
+                Action::TreeViewOnly => {}
+                // Tree rewind without summary: append the rewind marker
+                // (reason tui_pick) and mask the abandoned branch. A
+                // before-mode user-message pick restores the text to the
+                // input box, unsent (docs/rewind-fork-design.md section 1).
+                Action::RewindNoSummary {
+                    target_seq,
+                    mode,
+                    restore_text,
+                } => {
+                    let Some(sid) = app.active().cloned() else {
+                        continue;
+                    };
+                    let ev = event::produce::rewind(target_seq, &mode, Some("tui_pick"));
+                    match rt.block_on(port.append_event(&sid, &ev)) {
+                        Ok(()) => {
+                            if let Some(text) = restore_text {
+                                app.set_draft(text);
+                            }
+                            app.flash(format!("rewound to seq {target_seq}"));
+                        }
+                        Err(e) => {
+                            trace(
+                                &rt,
+                                &port,
+                                Some(&sid),
+                                "port",
+                                &format!("rewind marker append failed: {e}"),
+                            );
+                            app.flash(e.to_string());
+                        }
+                    }
                 }
             }
         }

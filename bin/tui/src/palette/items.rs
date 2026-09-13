@@ -121,6 +121,15 @@ pub fn builtins(current_effort: &str) -> Vec<PaletteItem> {
             ext: None,
         },
         PaletteItem {
+            id: "tree".into(),
+            label: "tree".into(),
+            kind: CmdKind::Goto,
+            hint: String::new(),
+            help: "Open the session log tree. Type to filter events. Enter picks one and offers 4 options (docs/tree-ui-design-from-human.md).".into(),
+            options: Vec::new(),
+            ext: None,
+        },
+        PaletteItem {
             id: "bn".into(),
             label: "bn".into(),
             kind: CmdKind::Run,

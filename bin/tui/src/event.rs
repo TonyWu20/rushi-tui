@@ -235,7 +235,6 @@ pub mod produce {
     /// restored to the input box, unsent) or `"on"` (the target is
     /// included in the context; a finished step prepares its next
     /// move). `reason` is optional; v1 uses `"tui_pick"`.
-    #[allow(dead_code)]
     pub fn rewind(target_seq: u64, mode: &str, reason: Option<&str>) -> Event {
         let mut obj = json!({
             "v": 1,

@@ -377,12 +377,14 @@ impl Browse {
         self.last_h = 0;
     }
 
-    /// Renderer layout sync (sections 4.6, 4.7). A pure tail growth
-    /// pins the view. A rewrap re-centers it.
+    /// Renderer layout sync (sections 4.6, 4.7). A model-driven tail
+    /// change, growth or a settle shrink, pins the view so the
+    /// cursorline stays fixed. A rewrap, a resize, or a clamped
+    /// cursor re-centers on the cursor.
     pub fn sync(&mut self, total: usize, h: usize, scroll: &mut usize, grew: bool) {
-        let grew_by = total.saturating_sub(self.last_total);
-        let changed = total != self.last_total || h != self.last_h;
-        let pure_growth = grew_by > 0 && grew && h == self.last_h;
+        let last = self.last_total;
+        let last_h = self.last_h;
+        let changed = total != last || h != last_h;
         self.last_total = total;
         self.last_h = h;
         if total == 0 {
@@ -401,14 +403,16 @@ impl Browse {
             self.col = 0;
             self.pending_entry = false;
         } else if changed {
-            if pure_growth && !clamped {
-                // Pin the view on the same absolute lines: grow the
-                // scroll by the tail delta so the window does not
-                // slide. The view never auto-follows (section 4.6).
-                *scroll = (*scroll).saturating_add(grew_by).min(total.saturating_sub(h));
+            // A model-driven tail change at an unchanged pane height
+            // (a settled event grows the tail, or a settled stream
+            // tail shrinks it) pins the view so the cursorline stays
+            // fixed. A rewrap, a resize, or a clamped cursor re-centers
+            // with the scrolloff margins (section 4.7).
+            if !clamped && h == last_h && grew {
+                let delta = total as isize - last as isize;
+                let hi = total.saturating_sub(h) as isize;
+                *scroll = ((*scroll as isize) + delta).clamp(0, hi) as usize;
             } else {
-                // A shrink, height change, rewrap, or clamped cursor
-                // re-centers with the scrolloff margins (section 4.7).
                 *scroll = follow_view(total, h, self.line, *scroll);
             }
         }
@@ -1679,5 +1683,141 @@ fn word_under_cursor(
             }
             Some((chars[i..e].iter().collect(), i, e, false))
         }
+    }
+}
+
+#[cfg(test)]
+mod stream_pin_tests {
+    use super::*;
+
+    /// A parked browse cursor: `Browse::new` plus cursor line and the
+    /// layout the previous draw reported.
+    fn parked(line: usize, total: usize, h: usize, scroll: usize) -> (Browse, usize) {
+        let mut b = Browse::new();
+        b.active = true;
+        b.pending_entry = false;
+        b.line = line;
+        b.col = 0;
+        b.last_total = total;
+        b.last_h = h;
+        (b, scroll)
+    }
+
+    /// The window top row for a total, scroll, and height.
+    fn top(total: usize, scroll: usize, h: usize) -> usize {
+        total.saturating_sub(scroll + h)
+    }
+
+    #[test]
+    fn stream_growth_pins_the_view() {
+        // The cursor sits on a settled history line. The live tail
+        // grows ten lines over ten frames. The window top stays put
+        // and the cursor keeps its line (section 4.6).
+        let (mut b, mut scroll) = parked(50, 100, 20, 33);
+        for total in 101..=110 {
+            b.sync(total, 20, &mut scroll, true);
+        }
+        assert_eq!(b.line, 50, "the cursor keeps its line");
+        assert_eq!(top(110, scroll, 20), 47, "the window top is pinned");
+    }
+
+    #[test]
+    fn settle_shrink_pins_the_view() {
+        // The live tail settled into a shorter event. The total
+        // shrank, but the window top and the cursor stay put.
+        let (mut b, mut scroll) = parked(50, 110, 20, 43);
+        b.sync(108, 20, &mut scroll, true);
+        assert_eq!(b.line, 50, "the cursor keeps its line");
+        assert_eq!(top(108, scroll, 20), 47, "the window top is pinned");
+    }
+
+    #[test]
+    fn stream_shrink_pins_the_view() {
+        // While the model is still active, the live tail shrank:
+        // the thinking block slid its window or the markdown body
+        // reflowed to fewer lines. No settled event landed, but the
+        // stream-tail change still pins the view so the cursorline
+        // holds (section 4.6, the cc08fa6 regression fix).
+        let (mut b, mut scroll) = parked(50, 100, 20, 33);
+        b.sync(90, 20, &mut scroll, true);
+        assert_eq!(b.line, 50, "the cursor keeps its line");
+        assert_eq!(top(90, scroll, 20), 47, "the window top is pinned");
+    }
+
+    #[test]
+    fn rewrap_shrink_recenters_on_cursor() {
+        // A pane rewrap shrinks the total with no model activity.
+        // The view re-centers on the cursor with the scrolloff
+        // margins (section 4.7), so the scroll offset does not
+        // stay pinned like a model-driven change would.
+        let (mut b, mut scroll) = parked(50, 100, 20, 33);
+        b.sync(90, 20, &mut scroll, false);
+        assert_eq!(b.line, 50, "the cursor keeps its line");
+        assert_eq!(scroll, 33, "the recenter leaves this scroll put");
+        assert_eq!(top(90, scroll, 20), 37, "the view slid up ten lines");
+    }
+
+    #[test]
+    fn tail_watch_growth_and_settle_keep_the_view() {
+        // The cursor rides the live tail. Growth pins the window
+        // top. The settle shrink keeps it put. The cursor screen
+        // row never moves during the whole stream.
+        let (mut b, mut scroll) = parked(99, 100, 20, 0);
+        for total in 101..=110 {
+            b.sync(total, 20, &mut scroll, true);
+        }
+        assert_eq!(b.line, 99, "the cursor keeps its line");
+        assert_eq!(top(110, scroll, 20), 80, "the window top is pinned");
+        let row_mid = b.line - top(110, scroll, 20);
+        b.sync(108, 20, &mut scroll, true);
+        assert_eq!(b.line, 99, "the cursor keeps its line");
+        assert_eq!(top(108, scroll, 20), 80, "the settle keeps the view put");
+        let row_end = b.line - top(108, scroll, 20);
+        assert_eq!(row_mid, row_end, "the cursor screen row never moves");
+    }
+
+    #[test]
+    fn clamped_cursor_recenters_on_settle() {
+        // The cursor parks on the live tail line. The settle shrinks
+        // the total past it, so the cursor clamps and the view
+        // re-centers on the clamped cursor.
+        let (mut b, mut scroll) = parked(109, 110, 20, 10);
+        b.sync(100, 20, &mut scroll, true);
+        assert_eq!(b.line, 99, "the cursor clamps to the last line");
+        assert_eq!(scroll, 0, "the view pins to the tail edge");
+    }
+
+    #[test]
+    fn streaming_lifecycle_holds_the_cursorline() {
+        // The full lifecycle the user reported. The cursor parks on
+        // a settled line. The live stream grows, then slides its
+        // thinking window (a mid-stream shrink, no settled event),
+        // then settles into a shorter event. Each frame the draw
+        // loop computes the flag exactly like
+        // `render.rs`: grew = a settled event landed OR the stream
+        // length changed, in either direction. The cursor screen row
+        // must never move through the whole stream.
+        let (mut b, mut scroll) = parked(50, 100, 20, 33);
+        let mut last_stream = 0usize;
+        let row0 = b.line - top(100, scroll, 20);
+        // Growth frames: the live tail extends the total.
+        for s in [10usize, 20, 30, 40] {
+            // The draw-loop predicate: a change in either direction
+            // of the stream length counts as a model-driven change.
+            let grew = last_stream != s;
+            last_stream = s;
+            b.sync(100 + s, 20, &mut scroll, grew);
+        }
+        assert_eq!(b.line - top(140, scroll, 20), row0, "growth holds the row");
+        // Mid-stream shrink: the stream block reflows to fewer lines
+        // with no settled event. The stream-length change alone must
+        // pin the view, not re-center on the cursor.
+        let grew = last_stream != 20;
+        last_stream = 20;
+        b.sync(120, 20, &mut scroll, grew);
+        assert_eq!(b.line - top(120, scroll, 20), row0, "the mid-stream shrink holds the row");
+        // The settle: a settled event lands, the stream clears.
+        b.sync(104, 20, &mut scroll, true);
+        assert_eq!(b.line - top(104, scroll, 20), row0, "the settle holds the row");
     }
 }

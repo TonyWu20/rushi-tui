@@ -23,12 +23,20 @@ pub enum PaletteStage {
     Root,
     /// The session buffer sub-list (entered via the `b` Goto item).
     SessionList,
+    /// The session-log tree sub-list (the `tree` Goto item). It lists
+    /// the active session's events, fuzzy-searchable
+    /// (docs/tree-ui-design-from-human.md).
+    TreeList,
+    /// The four outcome options for a tree-picked event
+    /// (docs/tree-ui-design-from-human.md). Entered from `TreeList` on
+    /// an event commit. `Esc` returns to `TreeList`.
+    TreeOptions,
 }
 
 /// The outcome of a palette key press.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PaletteAction {
-    /// The query was modified (char typed or backspaced). The caller
+    /// The query changed (a char was typed or backspaced). The caller
     /// should re-rank the item list.
     Query,
     /// The list cursor moved. No query change.
@@ -78,6 +86,10 @@ pub struct PaletteState {
     pub preview_forced: bool,
     /// The option cursor index for Set items with options.
     pub option_cursor: usize,
+    /// The 1-based log seq of the tree event the user picked while in
+    /// the `TreeOptions` stage (docs/tree-ui-design-from-human.md).
+    /// `None` outside that stage.
+    pub tree_seq: Option<usize>,
 }
 
 impl Default for PaletteState {
@@ -101,6 +113,7 @@ impl PaletteState {
             preview_shown: true,
             preview_forced: false,
             option_cursor: 0,
+            tree_seq: None,
         }
     }
 
@@ -118,6 +131,7 @@ impl PaletteState {
         self.preview_shown = true;
         self.preview_forced = false;
         self.option_cursor = 0;
+        self.tree_seq = None;
     }
 
     /// Close the palette, resetting all state.
@@ -131,6 +145,7 @@ impl PaletteState {
         self.preview_scroll = 0;
         self.preview_forced = false;
         self.option_cursor = 0;
+        self.tree_seq = None;
     }
 
     /// The current cursor index.
@@ -155,15 +170,54 @@ impl PaletteState {
         self.option_cursor = 0;
     }
 
-    /// Drop back to `Root` from `SessionList`, clearing the query.
+    /// Enter the `TreeList` sub-stage (the `tree` Goto item). Like the
+    /// session list, it records the query length as the goto prefix so
+    /// the fuzzy filter is everything typed after `tree`.
+    /// (docs/tree-ui-design-from-human.md)
+    pub fn goto_tree_list(&mut self) {
+        self.stage = PaletteStage::TreeList;
+        self.goto_prefix_len = self.query.len();
+        self.cursor = 0;
+        self.top = 0;
+        self.preview_scroll = 0;
+        self.option_cursor = 0;
+        self.tree_seq = None;
+    }
+
+    /// Enter the `TreeOptions` sub-stage, remembering the picked event's
+    /// 1-based log seq (docs/tree-ui-design-from-human.md "On
+    /// selection, shows hint of 4 options"). The event list clears and
+    /// the four options take its place.
+    pub fn goto_tree_options(&mut self, seq: usize) {
+        self.stage = PaletteStage::TreeOptions;
+        self.tree_seq = Some(seq);
+        self.cursor = 0;
+        self.top = 0;
+        self.preview_scroll = 0;
+        self.option_cursor = 0;
+    }
+
+    /// The picked event's 1-based log seq, while in the `TreeOptions`
+    /// stage. `None` outside that stage.
+    pub fn tree_seq(&self) -> Option<usize> {
+        self.tree_seq
+    }
+
+    /// Drop back one sub-stage. `TreeOptions` returns to `TreeList`;
+    /// `TreeList` and `SessionList` return to `Root`.
     pub fn drop_sub_stage(&mut self) {
-        self.stage = PaletteStage::Root;
+        self.stage = match self.stage {
+            PaletteStage::TreeOptions => PaletteStage::TreeList,
+            PaletteStage::TreeList | PaletteStage::SessionList => PaletteStage::Root,
+            PaletteStage::Root => PaletteStage::Root,
+        };
         self.query.clear();
         self.goto_prefix_len = 0;
         self.cursor = 0;
         self.top = 0;
         self.preview_scroll = 0;
         self.option_cursor = 0;
+        self.tree_seq = None;
     }
 
     /// The effective filter query for the current stage. In
@@ -173,10 +227,13 @@ impl PaletteState {
     pub fn filter_query(&self) -> &str {
         match self.stage {
             PaletteStage::Root => &self.query,
-            PaletteStage::SessionList => {
+            PaletteStage::SessionList | PaletteStage::TreeList => {
                 let p = self.goto_prefix_len.min(self.query.len());
                 self.query[p..].trim_start_matches(' ')
             }
+            // The option list is a fixed set, not fuzzy-ranked. The
+            // query is unused there, so return it as-is.
+            PaletteStage::TreeOptions => &self.query,
         }
     }
 
@@ -184,6 +241,10 @@ impl PaletteState {
     /// cursor to the top.
     pub fn type_char(&mut self, c: char) -> PaletteAction {
         if !self.open {
+            return PaletteAction::Nothing;
+        }
+        // The option list has no query to edit.
+        if self.stage == PaletteStage::TreeOptions {
             return PaletteAction::Nothing;
         }
         self.query.push(c);
@@ -194,15 +255,18 @@ impl PaletteState {
         PaletteAction::Query
     }
 
-    /// Backspace from the query. In `SessionList` stage, if the query
-    /// would go below the goto prefix, the sub-stage is dropped.
+    /// Backspace from the query. In `SessionList` or `TreeList` stage,
+    /// if the query would go below the goto prefix, the sub-stage is
+    /// dropped. The `TreeOptions` stage has no query to edit.
     pub fn backspace(&mut self) -> PaletteAction {
         if !self.open {
             return PaletteAction::Nothing;
         }
-        if self.stage == PaletteStage::SessionList
-            && self.query.len() <= self.goto_prefix_len
-        {
+        if self.stage == PaletteStage::TreeOptions {
+            return PaletteAction::Nothing;
+        }
+        let is_goto = self.stage == PaletteStage::SessionList || self.stage == PaletteStage::TreeList;
+        if is_goto && self.query.len() <= self.goto_prefix_len {
             self.drop_sub_stage();
             return PaletteAction::DropSubStage;
         }
@@ -396,12 +460,15 @@ impl PaletteState {
         use crate::app::Key;
         match key {
             Key::Esc => {
-                if self.stage == PaletteStage::SessionList {
-                    self.drop_sub_stage();
-                    PaletteAction::DropSubStage
-                } else {
-                    self.close();
-                    PaletteAction::Closed
+                match self.stage {
+                    PaletteStage::Root => {
+                        self.close();
+                        PaletteAction::Closed
+                    }
+                    PaletteStage::SessionList | PaletteStage::TreeList | PaletteStage::TreeOptions => {
+                        self.drop_sub_stage();
+                        PaletteAction::DropSubStage
+                    }
                 }
             }
             Key::Enter => {

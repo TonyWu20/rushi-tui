@@ -73,8 +73,6 @@ pub const CAPS: &[&str] = &[
     "row",
 ];
 /// Cap on the number of cached extension line-replies per slot. The
-/// render layer only displays the last `TRANSCRIPT_EVENT_CAP` events,
-/// so keeping more than a multiple of that in memory is wasted. The
 /// cache evicts its oldest entry when it reaches this cap, so an
 /// active stream (the newest entry) is never wiped. This prevents
 /// unbounded growth in long-running sessions.
@@ -1364,8 +1362,9 @@ impl ExtHost {
     /// `assistant_message` that carries `usage`, uncapped, so
     /// cumulative stats survive a restart from the log alone.
     pub fn send_history(&self, events: &[Event], width: usize) {
-        let cap = crate::render::TRANSCRIPT_EVENT_CAP;
-        let base = events.len().saturating_sub(cap);
+        // No cap: the whole session history is replayed, so render
+        // capable extensions see every event of their kinds.
+        let base = 0;
         for (i, s) in self.inner.slots.iter().enumerate() {
             if *s.state.lock().unwrap() == SlotState::Skipped {
                 continue;

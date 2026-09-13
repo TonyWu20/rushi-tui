@@ -62,8 +62,6 @@ const NOTIFY_DEBOUNCE: Duration = Duration::from_millis(50);
 /// it exits when it next tries to send after the receiver is dropped,
 /// or when the process ends.
 const TAIL_CAPACITY: usize = 256;
-/// Newest log bytes a single `read_events` load may allocate.
-const MAX_LOG_READ_BYTES: u64 = 50 * 1024 * 1024;
 /// Per-poll read cap; keeps tailing latency bounded without big reads.
 const TAIL_CHUNK_BYTES: u64 = 64 * 1024;
 
@@ -453,18 +451,10 @@ impl SessionPort for FileSessionPort {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
                 Err(e) => return Err(BusError::from(e)),
             };
-            let start = if data.len() as u64 > MAX_LOG_READ_BYTES {
-                let cut = data.len() - MAX_LOG_READ_BYTES as usize;
-                // Drop the (possibly partial) first line after the cut.
-                data[cut..]
-                    .iter()
-                    .position(|b| *b == b'\n')
-                    .map(|i| cut + i + 1)
-                    .unwrap_or(data.len())
-            } else {
-                0
-            };
-            let chunk = &data[start..];
+            // No byte cap: the whole log is replayed so the session
+            // beginning stays reachable (docs/tui-conversation-
+            // browsing.md section 4.6, no replay cap).
+            let chunk = &data[..];
             // A read that races an in-flight append leaves the last line
             // without its trailing newline. That tail segment is still
             // being written, not a persisted malformed line. Drop it; the
@@ -488,6 +478,26 @@ impl SessionPort for FileSessionPort {
         res.map_err(|e| BusError::Io {
             what: e.to_string(),
         })?
+    }
+
+    async fn log_line_count(&self, session: &SessionId) -> Result<u64, BusError> {
+        let path = self.log_path(session)?;
+        let inner = tokio::task::spawn_blocking(move || -> Result<u64, BusError> {
+            let data = match std::fs::read(&path) {
+                Ok(d) => d,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+                Err(e) => return Err(BusError::from(e)),
+            };
+            // A complete line ends in a newline. An in-progress tail
+            // (no trailing newline) is not yet a written event, so it
+            // does not count.
+            Ok(data.iter().filter(|b| **b == b'\n').count() as u64)
+        })
+        .await
+        .map_err(|e| BusError::Io {
+            what: e.to_string(),
+        })?;
+        inner
     }
 
     async fn append_event(&self, session: &SessionId, event: &Event) -> Result<(), BusError> {

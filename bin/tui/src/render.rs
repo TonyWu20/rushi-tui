@@ -55,9 +55,6 @@ const GUTTER: usize = 12;
 /// 1). Tool result bodies fold at render time (docs/
 /// tui-tool-display-port.md).
 const TOOL_CALL_BODY_LINES: usize = 4;
-/// Events rendered into the transcript at once. The oldest are dropped
-/// to bound memory on huge logs. The log file is the record.
-pub const TRANSCRIPT_EVENT_CAP: usize = 2000;
 /// Raw JSON lines a fallback event block may show. The fallback is for
 /// opaque data the TUI does not model; the log keeps the full text.
 const RAW_FALLBACK_MAX_LINES: usize = 6;
@@ -2272,7 +2269,6 @@ fn browse_window_lines(
     let (cl, cc) = cursor;
     lines
         .iter()
-        .skip(start)
         .take(h)
         .enumerate()
         .map(|(i, l)| {
@@ -2533,7 +2529,7 @@ fn draw_position_bar(
 }
 
 /// Render the transcript into wrapped visual lines, separated by blank
-/// lines. The oldest events beyond `TRANSCRIPT_EVENT_CAP` are dropped.
+/// lines. All in-memory events render: the log file is the record.
 /// The result is cached per (events version, width, reply version)
 /// by the caller.
 ///
@@ -2558,6 +2554,17 @@ pub struct TranscriptBuild {
     /// Used for mouse-click hit-testing
     /// (docs/tui-tool-display-fancy.md section 6).
     pub block_spans: std::collections::HashMap<String, (usize, usize)>,
+    /// First screen-line index of each event, indexed by the event's
+    /// position in the in-memory log window (docs/tree-ui-design-from-
+    /// human.md view-only scroll). `None` for events the transcript
+    /// does not render (suppressed ext_status, or outside the render
+    /// window).
+    pub event_line_starts: Vec<Option<usize>>,
+    /// The per-line display text, oldest first, parallel to `lines`.
+    /// Cacheable: the browse layout stores this instead of rebuilding
+    /// the string form of every line on each frame
+    /// (docs/tui-conversation-browsing.md section 4.6).
+    pub texts: Vec<String>,
 }
 
 /// The shareable source text of one event (docs/tui-conversation-
@@ -2619,7 +2626,10 @@ pub fn build_transcript(
     let details = app.call_details();
     let pending = app.oldest_pending_approval().is_some();
     let events = app.events();
-    let start = events.len().saturating_sub(TRANSCRIPT_EVENT_CAP);
+    // No render cap: every in-memory event renders so the whole
+    // session history stays reachable (docs/tui-conversation-
+    // browsing.md section 4.6). The log file is the record.
+    let start = 0;
     // The tool_result ids of the visible window: a tool_call whose
     // result follows merges into the result box (the call line drops
     // for the tools whose result carries the call info).
@@ -2666,6 +2676,16 @@ pub fn build_transcript(
     let mut line_raw: Vec<Option<String>> = Vec::new();
     let mut block_spans: std::collections::HashMap<String, (usize, usize)> =
         std::collections::HashMap::new();
+    // First screen-line index of each event, indexed by its position in
+    // the in-memory log window (docs/tree-ui-design-from-human.md
+    // view-only scroll). `None` for suppressed and out-of-window events.
+    let mut event_line_starts: Vec<Option<usize>> = vec![None; events.len()];
+    // The active-path ranges of the current log (docs/rewind-fork-
+    // design.md section 3, docs/tree-ui-design-from-human.md). When a
+    // rewind marker exists, abandoned-branch events are dimmed. `None`
+    // when there is no marker: the full log is active.
+    let active_ranges = app.rewind_active_ranges();
+    let base = app.events_base_seq();
     for (i, e) in events[start..].iter().enumerate() {
         // ext_status is shared UI state: suppressed from the transcript
         // by default. ext_status events add no rows, and add no blank
@@ -2685,7 +2705,16 @@ pub fn build_transcript(
         } else {
             None
         };
-        let (segs, raws): (Vec<Line<'static>>, Vec<Option<String>>) =
+        // Mask the abandoned-branch events: when a rewind marker exists,
+        // an event whose 1-based log seq sits off the active path is
+        // dimmed (docs/rewind-fork-design.md section 3). The seq of this
+        // in-memory event is `base + (start + i)` (base is the 1-based
+        // seq of the first in-memory event).
+        let gseq = base + start + i;
+        let masked = active_ranges
+            .as_ref()
+            .is_some_and(|r| !rushi_common::rewind::seq_in_ranges(gseq, r));
+        let (mut segs, raws): (Vec<Line<'static>>, Vec<Option<String>>) =
             if let Some(owner) = ext.and_then(|h| h.owner_for_kind(e.kind())) {
                 match ext.unwrap().lookup_lines(owner, event_id) {
                     Some(lines) => {
@@ -2730,6 +2759,14 @@ pub fn build_transcript(
                     builder.call()
                 }
             };
+        if masked {
+            for seg in segs.iter_mut() {
+                for s in seg.spans.iter_mut() {
+                    s.style = s.style.add_modifier(Modifier::DIM);
+                }
+            }
+        }
+        event_line_starts[start + i] = Some(all.len());
         all.extend(segs);
         line_raw.extend(raws);
         // Record the end of the tool-result block span.
@@ -2739,10 +2776,15 @@ pub fn build_transcript(
             }
         }
     }
+    // The display text of each line, for the browse layout. Computed
+    // once per build here, not per frame.
+    let texts: Vec<String> = all.iter().map(|l| l.to_string()).collect();
     TranscriptBuild {
         lines: all,
         line_raw,
         block_spans,
+        event_line_starts,
+        texts,
     }
 }
 
@@ -3198,41 +3240,78 @@ pub fn draw(
     // scrolling; the stream file and the settled log are unchanged.
     let stream_lines = stream_block_lines(app, text_w, usize::MAX);
     let stream_len = stream_lines.len();
-    // Combine the settled transcript with the live stream tail so the
-    // whole content area is one scrollable sequence. The settled lines
-    // come from the cached transcript; the stream tail is appended after
-    // them. This means `total`, the cursor clamp, and the browse layout
-    // all account for the live lines.
-    let combined: Vec<Line<'static>> = {
-        let mut v: Vec<Line<'static>> = app.transcript_lines(text_w, Some(host)).to_vec();
-        v.extend(stream_lines);
-        v
-    };
-    let total = combined.len();
+    // The settled lines come from the cached transcript (a `&[Line]`
+    // borrow); the live stream tail is a small owned Vec. We do not
+    // clone the full settled transcript each frame: the visible
+    // window (at most `h` lines) is built on demand below, so a long
+    // session costs O(visible + stream) per frame, not O(all lines).
+    // `total` still spans the settled lines plus the live tail, so the
+    // cursor clamp and the browse layout account for the live lines.
+    let settled_len = app.transcript_lines(text_w, Some(host)).len();
+    let total = settled_len + stream_len;
     // Store block spans and transcript top row for mouse-click hit-testing
     // (docs/tui-tool-display-fancy.md section 6). The spans cover only the
     // settled tool-result blocks; the live stream tail carries no block span.
     let spans = app.transcript_block_spans(text_w, Some(host));
     app.set_block_spans(spans);
     app.set_transcript_top_row(t_area.y);
-    let mut scroll = scroll0;
+    // No fixed scroll cap: the offset is bounded by the transcript.
+    // Clamp to `total - h` so a shrunk tail (a settled stream) or a
+    // long user scroll cannot overflow `scroll + h` below.
+    let mut scroll = scroll0.min(total.saturating_sub(h));
     if browse_active {
-        // A settled event landing or a live stream tail growth both
-        // count as tail growth. The browse view pins on either
-        // instead of re-centering (docs/tui-conversation-browsing.md
-        // section 4.6).
-        let grew = app.take_events_grew() || app.note_stream_grew(stream_len);
+        // A settled event landing, or a live stream tail change
+        // (growth or a settle shrink), both count as a model-driven
+        // tail change. The browse view pins on either instead of
+        // re-centering (docs/tui-conversation-browsing.md section
+        // 4.6).
+        let grew = app.take_events_grew() || app.note_stream_changed(stream_len);
         app.browse().sync(total, h, &mut scroll, grew);
         app.set_scroll(scroll);
     }
+    // View-only scroll (docs/tree-ui-design-from-human.md): the tree
+    // picker set a one-shot target, the in-memory event index. Resolve
+    // it to a transcript line and pin it at the top of the viewport.
+    // The target is consumed by this frame; the sticky scroll then
+    // holds until the user scrolls.
+    if let Some(ev_idx) = app.take_view_only_target() {
+        if let Some(line) = app
+            .transcript_event_line_starts(text_w, Some(host))
+            .get(ev_idx)
+            .copied()
+            .flatten()
+        {
+            if line < total {
+                scroll = total.saturating_sub(line + h);
+                app.set_scroll(scroll);
+            }
+        }
+    }
     let start = total.saturating_sub(scroll + h);
     app.set_transcript_visible_start(start);
+    // Build the visible window only: at most `h` lines, each read from
+    // the settled cache slice or the stream tail. This is the draw
+    // path's whole cost for a long transcript (no full-vector copy).
+    let end = (start + h).min(total);
+    let view_lines: Vec<Line<'static>> = {
+        let settled = app.transcript_lines(text_w, Some(host));
+        let mut v = Vec::with_capacity(end.saturating_sub(start));
+        for g in start..end {
+            let l: &Line<'static> = if g < settled_len {
+                &settled[g]
+            } else {
+                &stream_lines[g - settled_len]
+            };
+            v.push(l.clone());
+        }
+        v
+    };
     // The cursor col clamps to the visible cursor line length
-    // (section 4.1): read from the combined settled + stream lines.
+    // (section 4.1): read from the visible window.
     if browse_active {
         let (cl, _) = app.browse_ref().line_col();
-        if cl >= start && cl < start + h {
-            let len = combined[cl]
+        if cl >= start && cl < end {
+            let len = view_lines[cl - start]
                 .spans
                 .iter()
                 .map(|s| s.content.chars().count())
@@ -3247,7 +3326,14 @@ pub fn draw(
     // stream line (the live body is not yet a settled, shareable
     // event; yanks over it fall back to the rendered text).
     if browse_active {
-        let texts: Vec<String> = combined.iter().map(|l| l.to_string()).collect();
+        // The settled display texts come from the transcript cache
+        // (built once per build, not per frame); the live tail is
+        // stringified here (a small Vec). The combined texts keep the
+        // browse search, motions, and yank over the full transcript.
+        let settled_texts: Vec<String> = app.transcript_texts(text_w, Some(host)).clone();
+        let stream_texts: Vec<String> = stream_lines.iter().map(|l| l.to_string()).collect();
+        let mut texts = settled_texts;
+        texts.extend(stream_texts);
         let mut line_raw: Vec<Option<String>> = app.transcript_raw(text_w, Some(host));
         line_raw.extend(std::iter::repeat_n(None, stream_len));
         app.set_browse_layout(total, h, text_w, texts, line_raw);
@@ -3281,9 +3367,10 @@ pub fn draw(
         None
     };
     let sel_bg = pl.color(crate::color::Role::Selection);
-    // The visible window is a slice of the combined settled + stream
-    // tail. `start` was computed against the combined total above.
-    let window = &combined[start..];
+    // The visible window, at most `h` lines, built above from the
+    // settled cache slice and the stream tail. `start` is the global
+    // index of the first window row.
+    let window = view_lines;
     if window.is_empty() {
         let placeholder = match app.active() {
             // The placeholder in the pi `dim` tone (not a hard-coded gray).
@@ -3301,7 +3388,7 @@ pub fn draw(
     } else {
         let mut draw_lines = if browse_active {
             browse_window_lines(
-                &combined,
+                &window,
                 start,
                 h,
                 gutter_w,
