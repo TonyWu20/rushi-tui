@@ -261,15 +261,27 @@ Per-frame `O(n)` copy removal. Focus-mode churn guard.
 Both are in the tree and verified. Committed in the
 code commit `c4ee892`.
 
-### Stage 1: snapshot plus pure build.
+### Stage 1: committed.
 
-Files: `bin/tui/src/render.rs`, `bin/tui/src/app.rs`.
+Commit `5270125`. Files: `bin/tui/src/render.rs`,
+`bin/tui/src/app.rs`.
 
-Add the `TranscriptBuildInput` snapshot struct.
-Refactor `build_transcript` into
+The `TranscriptBuildInput` snapshot struct is added.
+It is `Clone` and `Send`.
+It carries every input the build reads, including
+`ext_lines`.
+`build_transcript` is refactored into
 `build_transcript_input(&TranscriptBuildInput)`.
-Keep a `&App` wrapper for tests and the main-thread
-fallback. Add the ext pre-resolution helper.
+The build is a pure function of the snapshot.
+A thin `&App` wrapper is kept for tests and the
+main-thread fallback.
+
+The ext pre-resolution helpers are `resolve_ext_lines`
+and `resolve_ext_spans`. `resolve_ext_lines` pre-resolves
+event replies. `resolve_ext_spans` pre-resolves mermaid and
+latex transform replies into an owned `ExtRenderData`.
+The per-event loop reads that owned map instead of the
+non-`Send` ext host.
 
 Test gate: a unit test asserts the snapshot build
 equals the direct `&App` build via insta snapshot.
