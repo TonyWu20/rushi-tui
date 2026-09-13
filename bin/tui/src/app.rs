@@ -336,6 +336,11 @@ pub struct App {
     transcript_build_in_flight: bool,
     /// The cache key the pending rebuild targets. The last miss's key.
     transcript_desired_key: Option<crate::transcript_worker::BuildKey>,
+    /// The deadline of the trailing 75 ms window for a pending
+    /// width-triggered rebuild (docs/tui-perf-background-build-plan.md,
+    /// stage 4). Set on a width miss, reset by every new width value.
+    /// `None` for event-commit misses, which dispatch immediately.
+    transcript_width_debounce: Option<std::time::Instant>,
     /// The cache holds the tail-window fast build, not the full
     /// transcript (docs/tui-perf-background-build-plan.md, stage 2).
     /// While set, browse yank and `gg` stay disabled.
@@ -589,6 +594,7 @@ impl App {
             transcript_rebuild_requested: false,
             transcript_build_in_flight: false,
             transcript_desired_key: None,
+            transcript_width_debounce: None,
             transcript_partial: false,
             palette: crate::color::Palette::builtin(crate::color::Level::detect()),
             tool_display: crate::tool_display::ToolDisplay::preset(
@@ -999,6 +1005,7 @@ impl App {
             self.transcript_rebuild_requested = false;
             self.transcript_desired_key = None;
             self.transcript_build_in_flight = false;
+            self.transcript_width_debounce = None;
         }
         self.active = Some(id);
         self.events = events;
@@ -1345,17 +1352,44 @@ impl App {
         // A partial tail cache matches the key but does not satisfy
         // it: the full build is still owed, so it misses too.
         if self.transcript_cache_matches(&key) && !self.transcript_partial {
-            // A hit means a pending rebuild for this key is already
-            // satisfied, so clear the request state.
-            if self.transcript_desired_key.as_ref() == Some(&key) {
-                self.transcript_rebuild_requested = false;
-                self.transcript_desired_key = None;
-            }
+            // A hit satisfies the current draw. Any pending rebuild
+            // (and its debounce deadline) is stale: the user settled
+            // back on a width we already built, so drop the state.
+            self.transcript_rebuild_requested = false;
+            self.transcript_desired_key = None;
+            self.transcript_width_debounce = None;
             return &self.transcript_cache.as_ref().unwrap().5;
         }
         // Cache-key miss: record the wanted key and ask for a
         // rebuild. The main loop dispatches one background build
         // when nothing is in flight.
+        //
+        // Stage 4: classify the miss. A width change arms the 75 ms
+        // trailing window. A new width value resets the deadline.
+        // Redraws at the pending width keep it. Misses at the
+        // built width (event commit, palette, fraction) bypass it.
+        let width_triggered = self
+            .transcript_cache
+            .as_ref()
+            .is_some_and(|c| c.1 != key.width);
+        if width_triggered {
+            // The pending key is the last miss's key. Comparing
+            // widths against it tells whether this is a new width
+            // event or a redraw at the pending width.
+            let new_width_event = self
+                .transcript_desired_key
+                .as_ref()
+                .map_or(true, |d| d.width != key.width);
+            if new_width_event {
+                self.transcript_width_debounce = Some(
+                    Instant::now()
+                        + crate::transcript_worker::TRANSCRIPT_WIDTH_DEBOUNCE,
+                );
+            }
+        } else {
+            // Same width as the last build: no window, build now.
+            self.transcript_width_debounce = None;
+        }
         self.transcript_desired_key = Some(key.clone());
         self.transcript_rebuild_requested = true;
         // The natural `if let Some(cached)` return extends the
@@ -1462,6 +1496,26 @@ impl App {
             self.transcript_rebuild_requested = false;
             return false;
         };
+        // Stage 4: width-triggered misses carry a 75 ms trailing
+        // window. Each new width value reset the deadline. While the
+        // window is open, hold the dispatch and retry on the next
+        // frame. Event-commit misses carry no deadline and build now.
+        if let Some(deadline) = self.transcript_width_debounce {
+            if Instant::now() < deadline {
+                return false;
+            }
+        }
+        self.transcript_width_debounce = None;
+        // The pending key may now match the last built cache: the
+        // user toggled back to a width we already hold. The pending
+        // width is compared to the last built width, not the last
+        // observed width. A settled width that arrived after a build
+        // still misses here, so it still builds.
+        if self.transcript_cache_matches(&key) && !self.transcript_partial {
+            self.transcript_rebuild_requested = false;
+            self.transcript_desired_key = None;
+            return false;
+        }
         let input = crate::render::TranscriptBuildInput::from_app(self, key.width, ext);
         let Some(worker) = self.transcript_worker.as_ref() else {
             self.store_transcript_build(
@@ -1542,6 +1596,7 @@ impl App {
                 self.store_transcript_build(&result.key, &result.build, false);
                 self.transcript_rebuild_requested = false;
                 self.transcript_desired_key = None;
+                self.transcript_width_debounce = None;
             }
             // A result whose key no longer matches the desired key is
             // dropped: the newer miss owns the rebuild.
@@ -3781,6 +3836,7 @@ mod background_build_tests {
     use super::{App, Key};
     use crate::event::Event;
     use crate::port::SessionId;
+    use std::time::{Duration, Instant};
 
     fn user_event(i: u32) -> Event {
         Event::parse_line(
@@ -3860,6 +3916,9 @@ mod background_build_tests {
             "the stale tail cache does not hold the old head"
         );
         assert!(app.transcript_rebuilding(), "a rebuild is requested");
+        // The width miss armed the 75 ms trailing window (stage 4).
+        // Let it close before dispatching.
+        std::thread::sleep(Duration::from_millis(100));
         assert!(app.dispatch_transcript_build(None));
         assert!(
             !app.dispatch_transcript_build(None),
@@ -3889,6 +3948,9 @@ mod background_build_tests {
         let _ = app.transcript_lines(90, None);
         let _ = app.transcript_lines(100, None);
         assert!(app.transcript_rebuilding());
+        // The width burst armed the 75 ms trailing window (stage 4).
+        // Let it close so the settled width can dispatch.
+        std::thread::sleep(Duration::from_millis(100));
         assert!(
             app.dispatch_transcript_build(None),
             "one dispatch queues the newest key"
@@ -3995,5 +4057,196 @@ mod background_build_tests {
         assert!(!app.transcript_rebuilding());
         assert!(text.contains("line 0"), "the sync build holds the head");
     }
-}
 
+    /// Stage 4 gate: a burst of width events produces one build at
+    /// the settled width. Each new width value resets the 75 ms
+    /// trailing window; redraws at the pending width do not.
+    #[test]
+    fn width_burst_produces_one_build_at_the_settled_width() {
+        let mut app = App::new();
+        app.attach_transcript_worker();
+        app.set_viewport_height(200);
+        app.set_active(
+            SessionId::new("s1"),
+            make_events(2000),
+            2000,
+        );
+        // Establish a last-built cache at width 80.
+        let _ = app.transcript_lines(80, None);
+        assert!(app.dispatch_transcript_build(None));
+        settle(&mut app);
+        assert!(!app.transcript_rebuilding());
+
+        // Burst: 90 -> 110 -> 90 -> 110 -> 110. Each new width
+        // value resets the deadline; the redraws at 110 keep it.
+        let _ = app.transcript_lines(90, None);
+        let _ = app.transcript_lines(110, None);
+        let _ = app.transcript_lines(90, None);
+        let _ = app.transcript_lines(110, None);
+        let _ = app.transcript_lines(110, None);
+        assert!(app.transcript_rebuilding());
+        assert_eq!(
+            app.transcript_desired_key.as_ref().unwrap().width,
+            110,
+            "the pending key is the settled width"
+        );
+        let deadline = app
+            .transcript_width_debounce
+            .expect("the width miss armed the debounce");
+        if Instant::now() < deadline {
+            assert!(
+                !app.dispatch_transcript_build(None),
+                "the dispatch is held inside the trailing window"
+            );
+            assert!(
+                !app.transcript_build_in_flight,
+                "no build started during the window"
+            );
+        }
+        // Let the window close, then dispatch at the settled width.
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(
+            app.dispatch_transcript_build(None),
+            "the settled width builds after the window"
+        );
+        assert!(app.transcript_build_in_flight);
+        settle(&mut app);
+        assert!(!app.transcript_rebuilding());
+        assert_eq!(
+            app.transcript_cache.as_ref().unwrap().1,
+            110,
+            "the one build landed at the settled width"
+        );
+        let _ = app.transcript_lines(110, None);
+        assert!(
+            !app.transcript_rebuilding(),
+            "the settled width is a cache hit"
+        );
+    }
+
+    /// Event-commit misses bypass the width debounce (stage 4).
+    /// An event commit at the built width builds immediately with
+    /// no 75 ms wait.
+    #[test]
+    fn event_commit_miss_bypasses_the_width_debounce() {
+        let mut app = App::new();
+        app.attach_transcript_worker();
+        app.set_viewport_height(200);
+        let sid = SessionId::new("s1");
+        app.set_active(sid.clone(), make_events(300), 300);
+        let _ = app.transcript_lines(80, None);
+        assert!(app.dispatch_transcript_build(None));
+        settle(&mut app);
+        assert!(!app.transcript_rebuilding());
+
+        // Commit an event at the same width: the events version
+        // bumps, the width is unchanged. The miss must not wait
+        // out the width window.
+        app.set_active(sid, make_events(301), 301);
+        let _ = app.transcript_lines(80, None);
+        assert!(app.transcript_rebuilding());
+        assert!(
+            app.transcript_width_debounce.is_none(),
+            "an event-commit miss carries no deadline"
+        );
+        assert!(
+            app.dispatch_transcript_build(None),
+            "the commit builds immediately, no 75 ms wait"
+        );
+        assert!(app.transcript_build_in_flight);
+        settle(&mut app);
+        assert!(!app.transcript_rebuilding());
+        let full = joined_text(&mut app, 80);
+        assert!(
+            full.contains("line 300"),
+            "the committed event is in the build"
+        );
+    }
+
+    /// Toggling back to the last built width cancels the pending
+    /// build (stage 4). The pending width is compared to the last
+    /// built width, not the last observed width.
+    #[test]
+    fn width_toggle_back_to_built_width_cancels_the_build() {
+        let mut app = App::new();
+        app.attach_transcript_worker();
+        app.set_viewport_height(200);
+        app.set_active(
+            SessionId::new("s1"),
+            make_events(500),
+            500,
+        );
+        let _ = app.transcript_lines(80, None);
+        assert!(app.dispatch_transcript_build(None));
+        settle(&mut app);
+        assert!(!app.transcript_rebuilding());
+
+        // 80 -> 120 arms a debounced build at 120.
+        let _ = app.transcript_lines(120, None);
+        assert!(app.transcript_rebuilding());
+        assert!(app.transcript_width_debounce.is_some());
+        // Toggle back to the last built width. The hit cancels the
+        // pending build and its deadline.
+        let _ = app.transcript_lines(80, None);
+        assert!(
+            !app.transcript_rebuilding(),
+            "the hit at the built width cancels the pending build"
+        );
+        assert!(
+            app.transcript_width_debounce.is_none(),
+            "the pending window is dropped"
+        );
+        // The dropped deadline lapses. Nothing dispatches.
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(
+            !app.dispatch_transcript_build(None),
+            "no build runs after the toggle-back"
+        );
+        assert_eq!(
+            app.transcript_cache.as_ref().unwrap().1,
+            80,
+            "the cache still holds the built width"
+        );
+    }
+
+    /// A settled width that arrives after a build still builds,
+    /// even though that width was built before (stage 4). The
+    /// comparison is against the last built width, not the last
+    /// observed width.
+    #[test]
+    fn settled_width_after_a_later_build_still_builds() {
+        let mut app = App::new();
+        app.attach_transcript_worker();
+        app.set_viewport_height(200);
+        app.set_active(
+            SessionId::new("s1"),
+            make_events(500),
+            500,
+        );
+        let _ = app.transcript_lines(80, None);
+        assert!(app.dispatch_transcript_build(None));
+        settle(&mut app);
+        assert_eq!(app.transcript_cache.as_ref().unwrap().1, 80);
+
+        // 80 -> 120 settles and builds. Last built width is 120.
+        let _ = app.transcript_lines(120, None);
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(app.dispatch_transcript_build(None));
+        settle(&mut app);
+        assert_eq!(app.transcript_cache.as_ref().unwrap().1, 120);
+
+        // 120 -> 80: 80 was observed and built earlier, but the
+        // last build is 120. The settled 80 builds again.
+        let _ = app.transcript_lines(80, None);
+        assert!(app.transcript_rebuilding());
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(app.dispatch_transcript_build(None));
+        settle(&mut app);
+        assert_eq!(app.transcript_cache.as_ref().unwrap().1, 80);
+        let _ = app.transcript_lines(80, None);
+        assert!(
+            !app.transcript_rebuilding(),
+            "the rebuilt width is a cache hit"
+        );
+    }
+}

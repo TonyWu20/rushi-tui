@@ -32,6 +32,13 @@ pub struct BuildResult {
     pub build: TranscriptBuild,
 }
 
+/// Trailing debounce window for width-triggered transcript rebuilds
+/// (docs/tui-perf-background-build-plan.md, stage 4). Each new width
+/// event resets the deadline. Only the settled width after a burst of
+/// resizes or browse toggles builds. Event-commit misses bypass it.
+pub const TRANSCRIPT_WIDTH_DEBOUNCE: std::time::Duration =
+    std::time::Duration::from_millis(75);
+
 /// Keep the newest queued build request, drop the older ones.
 pub fn coalesce(burst: Vec<BuildRequest>) -> Option<BuildRequest> {
     burst.into_iter().max_by_key(|r| r.seq)
