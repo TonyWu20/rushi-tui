@@ -49,6 +49,18 @@ const LABEL: &str = " ";
 /// Uniform left gutter in visual columns: label, gap, then content.
 /// Continuation lines align under the content of the first line.
 const GUTTER: usize = 12;
+/// Inner content width of the user message panel.
+/// The two border columns and one column of left pad
+/// are subtracted. The result is clamped to a minimum
+/// of four.
+fn user_box_content_w(width: usize) -> usize {
+    width.saturating_sub(4).max(4)
+}
+/// Content width of an assistant body.
+/// One cell of left pad is subtracted.
+fn assistant_body_content_w(width: usize) -> usize {
+    width.saturating_sub(1)
+}
 /// Body lines a single tool call's `command` argument may occupy.
 /// The `content` field of user and assistant messages has no cap:
 /// it displays in full (docs/tui_feature_requests_from_human.md item
@@ -315,7 +327,7 @@ fn event_lines<'a>(
     result_ids: &'a std::collections::HashSet<String>,
     width: usize,
     event_id: u64,
-    ext: Option<&'a crate::ext::ExtHost>,
+    ext: Option<&'a ExtRenderData>,
     state: &'a RenderState<'a>,
     loop_running: bool,
     compaction_last_open: bool,
@@ -360,7 +372,7 @@ fn event_lines<'a>(
             // The panel inner content width: the two border columns plus
             // one column of left padding.
             let box_w = width;
-            let box_content_w = box_w.saturating_sub(4).max(4);
+            let box_content_w = user_box_content_w(box_w);
             let (wrapped, prov) =
                 render_message_content(&content, event_id, ext, box_content_w, prose, palette);
             // Raw source lines the yank maps onto: the content split into
@@ -414,7 +426,7 @@ fn event_lines<'a>(
                         // text. One cell of left pad, then the text wraps
                         // to the remaining width. This matches the `read`
                         // and `bash` panel left pad. No content gutter.
-                        let content_w = width.saturating_sub(1);
+                        let content_w = assistant_body_content_w(width);
                         let wrapped = wrap_thinking(
                             &text,
                             content_w,
@@ -463,7 +475,7 @@ fn event_lines<'a>(
             // One cell of left pad aligns the assistant body with the
             // tool-result text (the `read`/`bash` panel left pad). The
             // body wraps to the remaining width.
-            let content_w = width.saturating_sub(1);
+            let content_w = assistant_body_content_w(width);
             let (wrapped, prov) = if content.is_empty() {
                 (Vec::new(), Vec::new())
             } else {
@@ -1609,14 +1621,14 @@ fn block_line_text(parts: &[crate::render::Part]) -> String {
 /// Render one user/assistant message with the stage 3 span
 /// extraction.
 ///
-/// - A `fence:mermaid` block: the host requests a transform for the
-///   fence body. A finished reply replaces the fence with the
-///   extension's lines, guttered like the transcript. A missing
-///   owner, a pending or timed-out request, or a dead extension
+/// - A `fence:mermaid` block: a finished transform reply replaces the
+///   fence with the extension's lines, guttered like the transcript.
+///   The reply is read from the pre-resolved span map. A missing
+///   entry, a pending or timed-out request, or a dead extension
 ///   shows the raw fence (G5 fallback).
-/// - An `inline:latex` span: the host requests a transform for the
-///   span. A finished reply replaces the span text in place (the
-///   reply lines join into one line). No owner: the raw span text
+/// - An `inline:latex` span: a finished transform reply replaces the
+///   span text in place (the
+///   reply lines join into one line). No entry: the raw span text
 ///   renders, exactly like the built-in path.
 /// - A table block: a run of consecutive `|`-separated lines draws
 ///   as a box-drawing grid, like the `ext == None` path (the
@@ -1626,10 +1638,17 @@ fn block_line_text(parts: &[crate::render::Part]) -> String {
 /// capability-aware prose color); styled runs keep their own
 /// styles. The `ext == None` path renders the content with
 /// [`wrap_markdown_p`] over the same base.
+///
+/// The transform requests are not sent here.
+/// The host is not `Send`.
+/// The main thread sends them up front.
+/// It uses [`resolve_ext_spans`] and hands the finished
+/// replies through [`ExtRenderData`]
+/// (docs/tui-perf-background-build-plan.md, stage 1).
 fn render_message_content(
     content: &str,
     event_id: u64,
-    ext: Option<&crate::ext::ExtHost>,
+    ext: Option<&ExtRenderData>,
     wrap_w: usize,
     base: Style,
     palette: &crate::color::Palette,
@@ -1688,11 +1707,15 @@ fn render_message_content(
                                     base,
                                 ));
                             }
-                            Part::Latex { idx, raw, text } => {
-                                let req =
-                                    host.request_span(event_id, *idx, "inline:latex", text, wrap_w);
-                                let replaced = req
-                                    .and_then(|_| host.span_lines(event_id, *idx))
+                            Part::Latex { idx, raw, .. } => {
+                                // The transform reply is pre-resolved
+                                // on the main thread.
+                                // A missing entry means no finished
+                                // reply yet. The raw span shows then
+                                // (G5 fallback).
+                                let replaced = host
+                                    .span_lines
+                                    .get(&(event_id, *idx))
                                     .map(|ls| {
                                         ls.iter()
                                             .map(|l| l.text.clone())
@@ -1714,12 +1737,14 @@ fn render_message_content(
                     }
                 }
             }
-            MBlock::Mermaid { idx, raw, text } => {
-                let req = host.request_span(event_id, idx, "fence:mermaid", &text, wrap_w);
-                // An empty reply erases the block: treat it as no
-                // reply and show the raw fence.
-                let art = req
-                    .and_then(|_| host.span_lines(event_id, idx))
+            MBlock::Mermaid { idx, raw, .. } => {
+                // The transform reply is pre-resolved on the main
+                // thread. An empty or missing entry erases the
+                // block: show the raw fence (G5 fallback).
+                let art = host
+                    .span_lines
+                    .get(&(event_id, idx))
+                    .cloned()
                     .filter(|ls| !ls.is_empty());
                 match art {
                     Some(lines) => {
@@ -2539,6 +2564,7 @@ fn draw_position_bar(
 /// for the event, the extension's styled lines replace the built-in
 /// render. A missing, stale, or timed-out reply falls back to the
 /// built-in render (per-op G5 fallback).
+#[derive(Clone, Debug, PartialEq)]
 pub struct TranscriptBuild {
     /// The rendered transcript lines, oldest first.
     pub lines: Vec<Line<'static>>,
@@ -2615,17 +2641,212 @@ pub fn raw_event_text(e: &crate::event::Event) -> String {
     }
 }
 
-/// Build the transcript: the rendered lines plus the line-to-event
-/// map a browse yank needs (docs/tui-conversation-browsing.md
-/// section 11.3).
-pub fn build_transcript(
-    app: &App,
-    width: usize,
+/// The input snapshot of one transcript build
+/// (docs/tui-perf-background-build-plan.md, stage 1).
+///
+/// It carries every input the build reads from the app.
+/// The width is part of the snapshot.
+/// Ext replies are pre-resolved on the main thread.
+///
+/// Every field is `Clone` and `Send`.
+/// The snapshot is a cheap move, not a borrow.
+/// Stage 2 sends it to the background worker.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TranscriptBuildInput {
+    /// Events of the active session, oldest first.
+    pub events: Vec<Event>,
+    /// 1-based log seq of the first in-memory event.
+    pub events_base_seq: usize,
+    /// Tool-call details: call id to (name, arguments).
+    pub call_details: std::collections::HashMap<String, (String, serde_json::Value)>,
+    /// The oldest pending approval, if any.
+    pub pending: Option<crate::app::PendingApproval>,
+    /// The palette the built-in styles lower to.
+    pub palette: crate::color::Palette,
+    /// The tool-result display config.
+    pub tool_display: crate::tool_display::ToolDisplay,
+    /// The global tool fold/expand toggle.
+    pub tool_expanded: bool,
+    /// Thinking-block visibility.
+    pub thinking_shown: bool,
+    /// Thinking-block expand state.
+    pub thinking_expanded: bool,
+    /// Per-block expand fractions for animations.
+    pub expand_fracs: std::collections::HashMap<String, f64>,
+    /// Active-path ranges of the log.
+    /// `None` means no rewind marker.
+    pub rewind_active_ranges: Option<Vec<(usize, usize)>>,
+    /// The active session, if any.
+    pub active: Option<crate::port::SessionId>,
+    /// Whether the active session loop is running.
+    pub loop_running: bool,
+    /// The render width for this build.
+    pub width: usize,
+    /// Ext render state. `None` means no ext host was supplied and
+    /// the plain markdown engine renders the message content.
+    /// `Some` activates the block markdown engine and carries the
+    /// pre-resolved transform replies.
+    pub ext_data: Option<ExtRenderData>,
+    /// Pre-resolved ext reply lines, keyed by event id.
+    /// The key is the in-memory event index.
+    pub ext_lines: std::collections::HashMap<u64, Vec<crate::ext::ExtLine>>,
+}
+
+/// The ext-side inputs of a transcript build, decoupled from the
+/// ext host (docs/tui-perf-background-build-plan.md, stage 1).
+///
+/// The host holds an `mpsc` receiver and is not `Send`.
+/// This owned value carries everything the build reads from it.
+/// The main thread pre-resolves the fields before dispatching
+/// the snapshot.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExtRenderData {
+    /// Pre-resolved transform replies for the mermaid and latex
+    /// spans, keyed by (event id, span index). A missing entry
+    /// renders the raw span (G5 fallback).
+    pub span_lines: std::collections::HashMap<(u64, u32), Vec<crate::ext::ExtLine>>,
+}
+
+impl TranscriptBuildInput {
+    /// Snapshot every input the build reads from the app.
+    ///
+    /// The ext lines are pre-resolved against the host.
+    /// The result is usable without the host.
+    pub fn from_app(
+        app: &crate::app::App,
+        width: usize,
+        ext: Option<&crate::ext::ExtHost>,
+    ) -> Self {
+        let events = app.events();
+        Self {
+            events: events.to_vec(),
+            events_base_seq: app.events_base_seq(),
+            call_details: app.call_details(),
+            pending: app.oldest_pending_approval(),
+            palette: app.palette().clone(),
+            tool_display: *app.tool_display(),
+            tool_expanded: app.tool_expanded(),
+            thinking_shown: app.thinking_shown(),
+            thinking_expanded: app.thinking_expanded(),
+            expand_fracs: app.expand_fracs().clone(),
+            rewind_active_ranges: app.rewind_active_ranges(),
+            active: app.active().cloned(),
+            loop_running: app.active().is_some_and(|s| app.loop_running(s)),
+            width,
+            ext_data: ext.as_ref().map(|host| ExtRenderData {
+                span_lines: resolve_ext_spans(host, events, width),
+            }),
+            ext_lines: resolve_ext_lines(ext, events),
+        }
+    }
+}
+
+/// Pre-resolve ext reply lines for a set of events.
+///
+/// The ext host is not `Send`.
+/// It cannot cross to the background worker.
+/// The main thread resolves cached replies up front.
+/// Each read is a synchronous cache lookup.
+/// It returns an owned `Vec<ExtLine>`.
+/// Events without a valid reply add no entry.
+/// The build falls back to the built-in render.
+pub fn resolve_ext_lines(
     ext: Option<&crate::ext::ExtHost>,
+    events: &[Event],
+) -> std::collections::HashMap<u64, Vec<crate::ext::ExtLine>> {
+    let mut out: std::collections::HashMap<u64, Vec<crate::ext::ExtLine>> =
+        std::collections::HashMap::new();
+    if let Some(host) = ext {
+        for (i, e) in events.iter().enumerate() {
+            if let Some(owner) = host.owner_for_kind(e.kind()) {
+                if let Some(lines) = host.lookup_lines(owner, i as u64) {
+                    out.insert(i as u64, lines);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Pre-resolve the transform replies of the message spans
+/// (docs/tui-perf-background-build-plan.md, stage 1).
+///
+/// The host's `request_span` is a request to the extension process.
+/// It must fire on the main thread.
+/// Each span's finished reply is cached in the host.
+/// This helper fires the requests and copies the finished replies
+/// into an owned map the pure build can read.
+/// Spans without a finished reply add no entry.
+/// The build shows the raw span then (G5 fallback).
+pub fn resolve_ext_spans(
+    host: &crate::ext::ExtHost,
+    events: &[Event],
+    width: usize,
+) -> std::collections::HashMap<(u64, u32), Vec<crate::ext::ExtLine>> {
+    use std::collections::HashMap;
+    let mut out: HashMap<(u64, u32), Vec<crate::ext::ExtLine>> = HashMap::new();
+    // The same width the build passes to `event_lines`.
+    let ew = width.max(GUTTER + 8);
+    for (i, e) in events.iter().enumerate() {
+        let event_id = i as u64;
+        let (content, wrap_w) = match e.kind() {
+            EventKind::UserMessage => (
+                e.get_str("content").unwrap_or("[missing content]").to_string(),
+                user_box_content_w(ew),
+            ),
+            EventKind::AssistantMessage => (
+                e.get_str("content").unwrap_or("").to_string(),
+                assistant_body_content_w(ew),
+            ),
+            _ => continue,
+        };
+        for block in message_blocks(&content) {
+            match block {
+                MBlock::Mermaid { idx, text, .. } => {
+                    if host
+                        .request_span(event_id, idx, "fence:mermaid", &text, wrap_w)
+                        .is_some()
+                    {
+                        if let Some(lines) = host.span_lines(event_id, idx) {
+                            out.insert((event_id, idx), lines);
+                        }
+                    }
+                }
+                MBlock::Text { parts, .. } => {
+                    for line_parts in parts {
+                        for part in line_parts {
+                            if let Part::Latex { idx, text, .. } = part {
+                                if host
+                                    .request_span(event_id, idx, "inline:latex", text, wrap_w)
+                                    .is_some()
+                                {
+                                    if let Some(lines) = host.span_lines(event_id, idx) {
+                                        out.insert((event_id, idx), lines);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Build the transcript from an input snapshot.
+///
+/// This is a pure function of the snapshot.
+/// The per-event loop of [`event_lines`] is unchanged.
+/// No app or ext-host state is read.
+/// The build can run on the background worker.
+/// (docs/tui-perf-background-build-plan.md, stage 1.)
+pub fn build_transcript_input(
+    input: &TranscriptBuildInput,
 ) -> TranscriptBuild {
-    let details = app.call_details();
-    let pending = app.oldest_pending_approval().is_some();
-    let events = app.events();
+    let events = &input.events;
+    let details = &input.call_details;
+    let pending = input.pending.is_some();
     // No render cap: every in-memory event renders so the whole
     // session history stays reachable (docs/tui-conversation-
     // browsing.md section 4.6). The log file is the record.
@@ -2639,19 +2860,17 @@ pub fn build_transcript(
         .filter_map(|e| e.get_str("id").map(String::from))
         .collect();
     // The render state (docs/tui-tool-display-port.md section 2, the
-    // config part, plus the fold and thinking toggles): the palette,
-    // the tool display config, and the app's toggle states.
+    // config part, plus the fold and thinking toggles).
     let state = RenderState {
-        palette: app.palette(),
-        tool_display: app.tool_display(),
-        tool_expanded: app.tool_expanded(),
-        thinking_shown: app.thinking_shown(),
-        thinking_expanded: app.thinking_expanded(),
-        expand_fracs: app.expand_fracs(),
+        palette: &input.palette,
+        tool_display: &input.tool_display,
+        tool_expanded: input.tool_expanded,
+        thinking_shown: input.thinking_shown,
+        thinking_expanded: input.thinking_expanded,
+        expand_fracs: &input.expand_fracs,
     };
-    // The loop supervision (docs/auto-compact-plan.md section 4.6):
-    // the transcript session's loop process running bit.
-    let running = app.active().is_some_and(|s| app.loop_running(s));
+    // The loop running bit, precomputed on the main thread.
+    let running = input.loop_running;
     // The last open compaction marker: a `compaction_started` with
     // no later `compaction_summary` or `compaction_failed` in the
     // visible window. A restarted loop may add more open markers;
@@ -2684,8 +2903,11 @@ pub fn build_transcript(
     // design.md section 3, docs/tree-ui-design-from-human.md). When a
     // rewind marker exists, abandoned-branch events are dimmed. `None`
     // when there is no marker: the full log is active.
-    let active_ranges = app.rewind_active_ranges();
-    let base = app.events_base_seq();
+    let active_ranges = &input.rewind_active_ranges;
+    let base = input.events_base_seq;
+    // The ext-side state for the built-in fallback path. `None` keeps
+    // the plain markdown engine.
+    let ext_data: Option<&ExtRenderData> = input.ext_data.as_ref();
     for (i, e) in events[start..].iter().enumerate() {
         // ext_status is shared UI state: suppressed from the transcript
         // by default. ext_status events add no rows, and add no blank
@@ -2715,48 +2937,28 @@ pub fn build_transcript(
             .as_ref()
             .is_some_and(|r| !rushi_common::rewind::seq_in_ranges(gseq, r));
         let (mut segs, raws): (Vec<Line<'static>>, Vec<Option<String>>) =
-            if let Some(owner) = ext.and_then(|h| h.owner_for_kind(e.kind())) {
-                match ext.unwrap().lookup_lines(owner, event_id) {
-                    Some(lines) => {
-                        let lines = ext_lines_guttered(&lines, width);
-                        let raws: Vec<Option<String>> = vec![None; lines.len()];
-                        (lines, raws)
-                    }
-                    // No valid reply for this event: the built-in render
-                    // is the fallback.
-                    None => {
-                        let builder = event_lines()
-                            .e(e)
-                            .pending(pending)
-                            .call_details(&details)
-                            .result_ids(&result_ids)
-                            .width(width.max(GUTTER + 8))
-                            .event_id(event_id)
-                            .state(&state)
-                            .loop_running(running)
-                            .compaction_last_open(last_open.get(i).copied().unwrap_or(false));
-                        if let Some(h) = ext {
-                            builder.ext(h).call()
-                        } else {
-                            builder.call()
-                        }
-                    }
-                }
+            if let Some(lines) = input.ext_lines.get(&event_id) {
+                // Pre-resolved ext reply: the extension's styled lines
+                // replace the built-in render.
+                let lines = ext_lines_guttered(lines, input.width);
+                let raws: Vec<Option<String>> = vec![None; lines.len()];
+                (lines, raws)
             } else {
+                // No valid reply for this event: the built-in render
+                // is the fallback (per-op G5 fallback).
                 let builder = event_lines()
                     .e(e)
                     .pending(pending)
-                    .call_details(&details)
+                    .call_details(details)
                     .result_ids(&result_ids)
-                    .width(width.max(GUTTER + 8))
+                    .width(input.width.max(GUTTER + 8))
                     .event_id(event_id)
                     .state(&state)
                     .loop_running(running)
                     .compaction_last_open(last_open.get(i).copied().unwrap_or(false));
-                if let Some(h) = ext {
-                    builder.ext(h).call()
-                } else {
-                    builder.call()
+                match ext_data {
+                    Some(data) => builder.ext(data).call(),
+                    None => builder.call(),
                 }
             };
         if masked {
@@ -2786,6 +2988,23 @@ pub fn build_transcript(
         event_line_starts,
         texts,
     }
+}
+
+/// Build the transcript from the app: the rendered lines plus the
+/// line-to-event map a browse yank needs
+/// (docs/tui-conversation-browsing.md section 11.3).
+///
+/// The `&App` form kept for tests and the main-thread fallback.
+/// It snapshots the app on the spot, then runs the pure build.
+/// The background worker calls [`build_transcript_input`] with a
+/// dispatched [`TranscriptBuildInput`] instead.
+pub fn build_transcript(
+    app: &App,
+    width: usize,
+    ext: Option<&crate::ext::ExtHost>,
+) -> TranscriptBuild {
+    let input = TranscriptBuildInput::from_app(app, width, ext);
+    build_transcript_input(&input)
 }
 
 /// The transcript lines, oldest first (the legacy signature: the map
@@ -4544,5 +4763,168 @@ mod wrap_hard_lines_tests {
         assert_eq!(display_row_hard_line(&wrapped, 4), 2);
         // Past the end clamps to the last hard line.
         assert_eq!(display_row_hard_line(&wrapped, 99), 2);
+    }
+}
+
+// ── stage 1: snapshot plus pure build ───────────────────────────────
+
+/// Tests for the transcript snapshot of
+/// docs/tui-perf-background-build-plan.md stage 1. The pure build
+/// must equal the direct `&App` build.
+#[cfg(test)]
+mod transcript_snapshot_tests {
+    use ratatui::style::Style;
+
+    use crate::app::App;
+    use crate::event::Event;
+    use crate::ext::ExtLine;
+    use crate::port::SessionId;
+    use crate::render::{
+        build_transcript, build_transcript_input, resolve_ext_lines, TranscriptBuild,
+        TranscriptBuildInput,
+    };
+
+    fn ev(json: &str) -> Event {
+        Event::parse_line(json).expect("test event parses")
+    }
+
+    /// A session that exercises the main render paths.
+    /// It covers a user message, an assistant reply,
+    /// a tool call with result, and an open approval.
+    fn rich_events() -> Vec<Event> {
+        vec![
+            ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u1","content":"Hello, world"}"#),
+            ev(
+                r#"{"v":1,"type":"assistant_message","ts":"t","id":"a1","content":"Here is the output.","tool_calls":[],"stop_reason":"stop","usage":{"input_tokens":10,"output_tokens":5},"reasoning":[{"content":[{"type":"reasoning_text","text":"Step one: think about it."}]}]}"#,
+            ),
+            ev(
+                r#"{"v":1,"type":"tool_call","ts":"t","id":"c1","name":"bash","arguments":{"command":"make"}}"#,
+            ),
+            ev(
+                r#"{"v":1,"type":"tool_result","ts":"t","id":"c1","value":{"text":"Compiling tui v0.1.0\nFinished in 3.2s\n","exit_code":0,"stdout":"Compiling tui v0.1.0\nFinished in 3.2s\n","stderr":"","timed_out":false,"truncated":false},"is_error":false}"#,
+            ),
+            ev(
+                r#"{"v":1,"type":"approval_request","ts":"t","id":"appr-1","call_id":"c2","prompt":"Allow the command?"}"#,
+            ),
+        ]
+    }
+
+    fn app_with_rich_session() -> App {
+        let mut app = App::new();
+        let events = rich_events();
+        let log_lines = events.len() as u64;
+        app.set_active(SessionId::new("s1"), events, log_lines);
+        app
+    }
+
+    /// Stage 1 test gate: the snapshot build equals the direct
+    /// `&App` build. The insta snapshot is the golden reference
+    /// for the rendered transcript.
+    #[test]
+    fn snapshot_build_equals_direct_build() {
+        let app = app_with_rich_session();
+        let width = 100;
+        let direct = build_transcript(&app, width, None);
+        let input = TranscriptBuildInput::from_app(&app, width, None);
+        let pure = build_transcript_input(&input);
+        assert_eq!(
+            pure, direct,
+            "the snapshot build must equal the direct &App build"
+        );
+        let joined: Vec<&str> = pure.texts.iter().map(String::as_str).collect();
+        insta::assert_snapshot!(joined.join("\n"));
+    }
+
+    /// `from_app` captures every field the build reads.
+    #[test]
+    fn from_app_captures_app_state() {
+        let mut app = app_with_rich_session();
+        app.toggle_block_expand("c1");
+        let width = 80;
+        let input = TranscriptBuildInput::from_app(&app, width, None);
+        assert_eq!(input.events.as_slice(), app.events());
+        assert_eq!(input.events_base_seq, app.events_base_seq());
+        assert_eq!(input.call_details, app.call_details());
+        assert!(
+            input.pending.is_some(),
+            "the open approval request must be captured as pending"
+        );
+        assert_eq!(input.palette, app.palette().clone());
+        assert_eq!(input.tool_display, *app.tool_display());
+        assert!(!input.tool_expanded);
+        assert_eq!(input.thinking_shown, app.thinking_shown());
+        assert!(input.thinking_expanded);
+        assert_eq!(input.expand_fracs, app.expand_fracs().clone());
+        assert_eq!(input.rewind_active_ranges, app.rewind_active_ranges());
+        assert_eq!(input.active, app.active().cloned());
+        assert!(
+            !input.loop_running,
+            "no loop is attached, so the running bit is false"
+        );
+        assert_eq!(input.width, width);
+        assert!(
+            input.ext_lines.is_empty(),
+            "no ext host means no pre-resolved lines"
+        );
+    }
+
+    /// The running-loop bit is captured and reaches the build.
+    /// With the bit set, the snapshot build still equals the
+    /// direct build on the same app.
+    #[test]
+    fn running_loop_bit_flows_through_snapshot() {
+        let mut app = app_with_rich_session();
+        let sid = app.active().cloned().expect("the helper sets an active session");
+        app.attach_external_loop(sid);
+        let direct = build_transcript(&app, 100, None);
+        let input = TranscriptBuildInput::from_app(&app, 100, None);
+        assert!(input.loop_running, "the running bit must be captured");
+        assert_eq!(
+            build_transcript_input(&input),
+            direct,
+            "the snapshot build must equal the direct &App build"
+        );
+    }
+
+    /// Without an ext host the pre-resolution yields an empty map.
+    #[test]
+    fn resolve_ext_lines_without_host_is_empty() {
+        let events = rich_events();
+        let got = resolve_ext_lines(None, &events);
+        assert!(got.is_empty());
+    }
+
+    /// A pre-resolved ext line replaces the built-in render of the
+    /// event it is keyed by.
+    /// A missing key keeps the built-in render.
+    #[test]
+    fn pure_build_uses_pre_resolved_ext_lines() {
+        let app = app_with_rich_session();
+        let mut input = TranscriptBuildInput::from_app(&app, 80, None);
+        input
+            .ext_lines
+            .insert(0, vec![ExtLine::styled("EXT RENDERED", Style::default())]);
+        let build = build_transcript_input(&input);
+        let joined = build.texts.join("\n");
+        assert!(
+            joined.contains("EXT RENDERED"),
+            "the ext line must replace the built-in render: {joined:?}"
+        );
+        // Drop the entry: the built-in render of event 0 comes back.
+        let bare = TranscriptBuildInput::from_app(&app, 80, None);
+        let bare_build = build_transcript_input(&bare);
+        assert!(
+            !bare_build.texts.join("\n").contains("EXT RENDERED"),
+            "without the ext entry the built-in render must render"
+        );
+    }
+
+    /// Stage 2 sends the snapshot and the finished build across a
+    /// thread boundary. Both must be `Send`.
+    #[test]
+    fn snapshot_and_build_are_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<TranscriptBuildInput>();
+        assert_send::<TranscriptBuild>();
     }
 }

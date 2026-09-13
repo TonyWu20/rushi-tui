@@ -1289,6 +1289,12 @@ impl App {
     /// rewrapping every line. A new extension reply (or a session
     /// switch that clears the replies) bumps the ext version and
     /// rebuilds the lines.
+    ///
+    /// The miss path builds the lines synchronously on the main
+    /// thread through the snapshot pure build
+    /// (docs/tui-perf-background-build-plan.md stage 1).
+    /// Stage 2 moves the build to the background worker and returns
+    /// the last good cache on a miss.
     pub fn transcript_lines(
         &mut self,
         width: usize,
