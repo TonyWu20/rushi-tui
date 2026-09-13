@@ -281,8 +281,12 @@ macchiato` as the first internal color scheme. Shipped in
       `empty_user_box_is_three_rows`,
       `assistant_message_has_no_marker_or_gutter`). The layout snapshots were
       regenerated.
-- [ ] When in browse mode, updates from model response should not flush the
+- [x] When in browse mode, updates from model response should not flush the
       screen to the latest position of the conversation.
+      Shipped: `Browse::sync` pins the view on any model-driven tail
+      change, stream growth and the settle shrink alike. The cursorline
+      holds through the whole streaming lifecycle. Detail:
+      `bin/tui/src/browse.rs` `sync`, tests `stream_pin_tests`.
 - [x] The `@` picker respects `.gitignore` by default, but sometimes the
       human needs to point at ignored files or directories (e.g. a
       specific session in `@sessions`). Shipped 2026-09-06: `Ctrl+I`
@@ -419,7 +423,17 @@ macchiato` as the first internal color scheme. Shipped in
 
 - [x] Pin the browse view on streaming growth. The live tail
       growth flushed the viewport and re-centered it. The stream
-      growth now pins the view like a settled event.
+      growth now pins the view like a settled event. Shipped
+      2026-09-13: the settle shrink pins too, so the cursorline
+      holds through the whole streaming lifecycle. Tests:
+      `stream_pin_tests` in `bin/tui/src/browse.rs`.
+- [x] No cap on the number of replayed events. The session start
+      must stay reachable in browse mode and the `tree` list.
+      Shipped 2026-09-13: the `TRANSCRIPT_EVENT_CAP`,
+      `EVENTS_CAP`, `MAX_LOG_READ_BYTES`, and `SCROLL_CAP` limits
+      are gone. `read_events` replays the whole log and the
+      transcript renders every in-memory event. Detail:
+      `docs/tui-conversation-browsing.md` section 4.6.
 
 - [ ] Yank returns the raw source (message bodies and thinking
       blocks) instead of the rendered text.

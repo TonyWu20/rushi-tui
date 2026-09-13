@@ -37,8 +37,8 @@ section 7.
   tail."
 - `Ctrl+U` / `Ctrl+D`: half a page up / down. `half_page()`
   is `(viewport - 1) / 2`, fallback `10`. The wheel moves
-  three lines. `PgUp` / `PgDn` move ten. `SCROLL_CAP` is
-  `100_000`.
+  three lines. `PgUp` / `PgDn` move ten. There is no scroll
+  cap. The view clamps to the rendered total at draw time.
 - `render.rs` computes `start = total - scroll - h`. The
   window is the last `h` lines of the wrapped transcript.
 - Nothing indicates the position. No bar, no line numbers,
@@ -86,11 +86,10 @@ oldest):
   names.
 - cursor marker (browse mode only): one accent cell at the
   cursor line.
-- the loaded window: the transcript holds the last `2000`
-  events (`TRANSCRIPT_EVENT_CAP`, `bin/tui/src/render.rs`),
-  and the log read keeps the last `50 MB`
-  (`MAX_LOG_READ_BYTES`, `bin/tui/src/port_file.rs`). The
-  track maps that window, not the full log.
+- the loaded window: the transcript renders every in-memory
+  event, and the log read keeps the full log. There is no
+  replay cap (docs/tui_feature_requests_from_human.md). The
+  track maps the full log, not a window.
 
 Column ownership: while the bar shows, it owns the
 rightmost transcript column. The text width drops one
@@ -271,19 +270,21 @@ The transcript grows: `total` rises and the wrap cache
 rebuilds (existing behavior; the `transcript_cache` field
 of `bin/tui/src/app.rs`). The cursor pins to its line
 number: existing lines keep their numbers, and new lines
-append. Under the `2000`-event cap, `total` holds: each
-new event drops the oldest line, and every number shifts
-down one. The view does not auto-follow new events in browse
-mode. The bar's tail marker shows the live position moving
-past the view. Leaving browse mode lands the view on the
-grown tail.
+append. There is no replay cap, so `total` only grows. The
+view does not auto-follow new events in browse mode. The
+bar's tail marker shows the live position moving past the
+view. Leaving browse mode lands the view on the grown tail.
 
-Live streaming growth follows the same rule. While the model
+Live streaming change follows the same rule. While the model
 streams, the live tail extends the transcript every frame.
-The stream-grew flag is ORed into the grew flag. A pure
-stream growth therefore pins the view: the cursor keeps its
-line number and screen position. New stream lines land below
-the view. They do not flush or re-center the viewport.
+The stream-change flag is ORed into the grew flag. A growth
+pins the view: the cursor keeps its line number and screen
+position, and new lines land below the view without flushing
+it.
+
+A shrink pins the view too. The thinking block sliding its
+window or the stream settling into a shorter event shrinks
+the tail. The view stays pinned and the cursorline holds.
 
 The fold and thinking toggles keep their host roles in
 browse mode. They change the line count. The cursor clamps
@@ -300,7 +301,8 @@ redraws.
 | `:N` with `N = 0`, an empty input, or a non-number | no move; the command line hints `line: 1..total` |
 | pane resize while browsing | the transcript rewraps, `total` changes, the cursor col clamps, the view re-centers on the cursor with the scrolloff margins |
 | a fold or thinking toggle changes `total` under the cursor | the cursor clamps to the new total |
-| the event cap | `total` holds; each new event drops the oldest line; every number shifts down one; the cursor keeps its number and rebinds to the shifted line |
+| no replay cap | `total` only grows. The oldest line never drops. The cursor keeps its number. |
+| the live stream tail shrinks (window slide, reflow, settle) | `total` shrinks. The view stays pinned. The cursorline holds. |
 | a session switch | the browse state resets with the scroll (section 4.2) |
 | a TUI restart | no browse state, no scroll position: both reset to the tail (the TUI is a view, `docs/tui.md` section 1) |
 | the arm window | a second `s` after `3 s` re-arms; any other key disarms; the armed `s` drops (the FT-012 disarm) |
