@@ -64,7 +64,8 @@ extension-host lifecycle. Method and conventions:
 | `tui-insta-snapshot-testing.md` | Implemented | 2026-09-11 | The insta-snapshot test method: harness, snapshot set, determinism rules. |
 | `tui-perf-freeze-investigation.md` | Investigation | 2026-09-13 | Freeze root cause: the synchronous full transcript build on each cache-key miss. |
 | `tui-large-content-research.md` | Research | 2026-09-13 | Ecosystem survey: how ratatui apps (helix, atuin, zellij, gitui, codex-TUI, yazi, more) keep large content off the render thread. Maps patterns onto Option A and B. |
-| `tui-perf-background-build-plan.md` | Plan | 2026-09-13 | Fix plan decided from the two docs above: Option A background build worker with Option B width-keyed memo as the worker fast path. Staged breakdown with test gates. |
+| `tui-perf-background-build-plan.md` | Implemented | 2026-09-13 | Option A background build worker plus Option B width-keyed memo. Staged and committed. Test gates in the audit doc. |
+| `tui-perf-background-build-audit.md` | Audit | 2026-09-13 | Audit of the background build plan and the independent perf test for the 100 ms frame budget. |
 
 ## Status legend
 

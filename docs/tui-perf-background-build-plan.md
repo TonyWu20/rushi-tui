@@ -1,6 +1,8 @@
 # TUI background transcript build: decision and fix plan
 
-Status: Plan.
+Status: Implemented. All five stages (0-4) are committed. See
+`docs/tui-perf-background-build-audit.md` for the audit and perf
+test record.
 Last updated: 2026-09-13.
 Scope: `bin/tui` transcript build and cache.
 Basis: `docs/tui-perf-freeze-investigation.md` and
