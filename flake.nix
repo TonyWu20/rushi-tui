@@ -8,25 +8,14 @@
       url = "github:nix-community/fenix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    # Bootstrap (local path-dep split, docs/tui-ext-repo-split.md section
-    # 4): `rushi-common` is a *path* dep on the sibling kernel checkout
-    # (../rust-unix-harness/crates/rushi), so a hermetic flake build
-    # cannot see it. At hosting time, add the kernel as a flake input
-    # (a pinned git source) and feed it into a `buildRustPackage`:
-    #   rushi = { url = "<kernel git URL>"; };
-    # The devShell below is the current dev path.
-    #
-    # Local dev path: the sibling kernel checkout is a path input, so
-    # the devShell can put the Nix-built `rushi` launcher on PATH.
-    rushi-kernel = { url = "git+file:/home/tony/programming/rust-unix-harness"; };
-    # Kernel *source* (not a flake) for the `rushi-common` path dep in
-    # bin/tui/Cargo.toml. The bootstrap sibling path
-    #   rushi-common = { path = "../../../rust-unix-harness/crates/rushi" }
-    # does not exist in a hermetic Nix build; the `packages` output
-    # rewrites it to this input during the build. At hosting time,
-    # flip both kernel inputs to a pinned `github:` ref.
+    # The Nix-built `rushi` launcher (kernel flake packages.default)
+    # and the raw kernel source tree, both fetched from GitHub so the
+    # flake is hostable (no local sibling checkout required).
+    rushi-kernel = { url = "github:TonyWu20/rushi"; };
+    # Raw source tree (not a flake) so `builtins.toPath` can hand the
+    # crates/ subtree to the sed rewrite in patchPhase.
     rushi-kernel-src = {
-      url = "path:/home/tony/programming/rust-unix-harness";
+      url = "github:TonyWu20/rushi";
       flake = false;
     };
   };

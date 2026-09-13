@@ -11,6 +11,9 @@ sessions/
 ## Python bytecode
 __pycache__/
 
+## Nix build output symlink
+result
+
 ## direnv
 .direnv/
 config*.toml
