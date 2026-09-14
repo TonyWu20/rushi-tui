@@ -1179,6 +1179,12 @@ pub struct ExtHost {
     inner: Arc<HostInner>,
     disc: Discovery,
     config_path: PathBuf,
+    /// The working directory of the TUI process. This is where the
+    /// user launched the harness. It is host-owned state. Extensions
+    /// learn it from the tick `cwd` field and the `RUSHI_CWD` spawn
+    /// env var. They must not guess it from `CONFIG`. Under Nix that
+    /// is a read-only store path, not the user project.
+    working_dir: PathBuf,
     out_rx: mpsc::Receiver<ExtItem>,
     stop_flag: Arc<AtomicBool>,
     /// Backoff between restart attempts. The spec values are 1 s /
@@ -1244,6 +1250,7 @@ impl ExtHost {
             }),
             disc: disc.clone(),
             config_path: cfg.config_path.clone(),
+            working_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             out_rx,
             stop_flag: Arc::new(AtomicBool::new(false)),
             restart_delays: RESTART_DELAYS,
@@ -1288,7 +1295,7 @@ impl ExtHost {
                     .spawn(move || writer_thread(wslot))
                     .ok();
             }
-            match spawn_gen(&slot, &m, &self.config_path) {
+            match spawn_gen(&slot, &m, &self.config_path, &self.working_dir) {
                 Ok(gen) => {
                     ext_log(&format!(
                         "spawn {} gen=0 pid={}",
@@ -1306,6 +1313,7 @@ impl ExtHost {
                     let delays = self.restart_delays;
                     let m2 = m.clone();
                     let cfg_path = self.config_path.clone();
+                    let mon_cwd = self.working_dir.clone();
                     std::thread::Builder::new()
                         .name(format!("tui-ext-mon-{}", m.name))
                         .spawn(move || {
@@ -1316,6 +1324,7 @@ impl ExtHost {
                                 .delays(delays)
                                 .manifest(m2)
                                 .config_path(cfg_path)
+                                .working_dir(mon_cwd)
                                 .idx(i)
                                 .first(gen)
                                 .call()
@@ -1475,6 +1484,10 @@ impl ExtHost {
             if let Some(m) = p.model {
                 obj["model"] = json!(m);
             }
+            // Host working directory: where the user launched the TUI.
+            // Extensions display it instead of guessing from CONFIG,
+            // which under Nix is a read-only store path.
+            obj["cwd"] = json!(self.working_dir.to_string_lossy());
             self.send_op(i, &obj);
         }
     }
@@ -1516,6 +1529,7 @@ impl ExtHost {
         if let Some(m) = p.model {
             obj["model"] = json!(m);
         }
+        obj["cwd"] = json!(self.working_dir.to_string_lossy());
         self.send_op(i, &obj);
     }
 
@@ -1558,6 +1572,7 @@ impl ExtHost {
             if let Some(m) = p.model {
                 obj["model"] = json!(m);
             }
+            obj["cwd"] = json!(self.working_dir.to_string_lossy());
             self.send_op(i, &obj);
         }
     }
@@ -2571,14 +2586,15 @@ fn ext_log_path() -> Option<std::path::PathBuf> {
 
 /// Spawn one extension generation. The child joins its own process
 /// group via `setsid`, so [`ExtHost::stop`] kills the whole group,
-/// not just the top process (docs/tui.md section 13.3). The working
-/// directory is the manifest dir; `CONFIG` and `EXT_DIR` are
-/// exported. Stderr is not part of the protocol: it goes to
-/// /dev/null.
+/// not just the top process (docs/tui.md section 13.3). The child
+/// chdir is the manifest dir. The exported env vars are `CONFIG`,
+/// `EXT_DIR`, and `RUSHI_CWD` (the host working directory). Stderr
+/// is not part of the protocol. It goes to /dev/null.
 fn spawn_gen(
     slot: &Arc<SlotShared>,
     m: &Manifest,
     config_path: &Path,
+    working_dir: &Path,
 ) -> Result<(ExtChild, Option<std::fs::File>), String> {
     let mut in_pipe = [0i32; 2];
     let mut out_pipe = [0i32; 2];
@@ -2606,6 +2622,8 @@ fn spawn_gen(
         CString::new(config_path.as_os_str().as_bytes().to_vec()).map_err(|e| e.to_string())?;
     let ext_dir_c =
         CString::new(m.dir.as_os_str().as_bytes().to_vec()).map_err(|e| e.to_string())?;
+    let host_cwd_c =
+        CString::new(working_dir.as_os_str().as_bytes().to_vec()).map_err(|e| e.to_string())?;
 
     unsafe {
         let pid = libc::fork();
@@ -2645,6 +2663,7 @@ fn spawn_gen(
                 let _ = libc::chdir(cwd_c.as_ptr());
                 libc::setenv(c"CONFIG".as_ptr(), config_c.as_ptr(), 1);
                 libc::setenv(c"EXT_DIR".as_ptr(), ext_dir_c.as_ptr(), 1);
+                libc::setenv(c"RUSHI_CWD".as_ptr(), host_cwd_c.as_ptr(), 1);
                 libc::execvp(argv[0].as_ptr(), argv_ptrs.as_ptr());
                 // execvp failed: 127 marks a generation that never
                 // started; the monitor counts it as a failed attempt.
@@ -2673,6 +2692,7 @@ fn monitor_thread(
     delays: [Duration; 3],
     manifest: Manifest,
     config_path: PathBuf,
+    working_dir: PathBuf,
     idx: usize,
     first: (ExtChild, Option<std::fs::File>),
 ) {
@@ -2712,7 +2732,7 @@ fn monitor_thread(
         }
         // A failed spawn consumes the attempt; the loop backs off
         // again on the next pass and dies when the budget is spent.
-        gen = match spawn_gen(&slot, &manifest, &config_path) {
+        gen = match spawn_gen(&slot, &manifest, &config_path, &working_dir) {
             Ok(g) => {
                 ext_log(&format!(
                     "respawn {} gen={} pid={}",
