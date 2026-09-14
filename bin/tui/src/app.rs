@@ -2916,7 +2916,7 @@ impl App {
                 label: "Rewind without summary".into(),
                 kind: CmdKind::Run,
                 hint: String::new(),
-                help: "Append a rewind marker here (reason tui_pick) and dim the abandoned branch. Requires the loop to be idle.".into(),
+                help: "Append a rewind marker here (reason tui_pick). The abandoned branch drops out of the transcript; the fork marker stays. Requires the loop to be idle.".into(),
                 options: Vec::new(),
                 ext: None,
             },
@@ -4196,7 +4196,7 @@ fn tree_event_preview(e: &Event) -> String {
             .map(|v| v.to_string())
             .unwrap_or_default(),
         EventKind::Rewind => format!(
-            "target_seq={} mode={}",
+            "rewound to seq {} ({})",
             e.get("target_seq")
                 .map(|v| v.to_string())
                 .unwrap_or_default(),
@@ -4226,7 +4226,7 @@ fn tree_event_body(e: &Event) -> String {
             .map(|v| v.to_string())
             .unwrap_or_default(),
         EventKind::Rewind => format!(
-            "rewound to seq {} ({} mode)",
+            "rewound to seq {} ({})",
             e.get("target_seq")
                 .map(|v| v.to_string())
                 .unwrap_or_default(),
@@ -4331,6 +4331,50 @@ mod full_history_tests {
             items[0].label
         );
         assert_eq!(items.last().unwrap().id, n.to_string());
+    }
+
+    /// The transcript's rewind marker line reads "rewound to seq N
+    /// (mode)". The tree row for the marker reuses that exact wording.
+    /// What the user saw in the transcript is findable in the fuzzy
+    /// box of the tree palette (docs/tree-ui-design-from-human.md,
+    /// "Rewind transcript masking (hide, not dim)").
+    #[test]
+    fn tree_row_labels_rewind_marker_like_the_transcript() {
+        use crate::picker::fuzzy::rank_fuzzy;
+        let events = vec![
+            Event::parse_line(
+                r#"{"v":1,"type":"user_message","ts":"t","id":"u1","content":"hello"}"#,
+            )
+            .unwrap(),
+            Event::parse_line(
+                r#"{"v":1,"type":"assistant_message","ts":"t","id":"a1","content":"hi","tool_calls":[],"stop_reason":"stop","usage":{"input_tokens":1,"output_tokens":1},"reasoning":{}}"#,
+            )
+            .unwrap(),
+            Event::parse_line(
+                r#"{"v":1,"type":"rewind","ts":"t","id":"w1","target_seq":2,"mode":"before","reason":"tui_pick"}"#,
+            )
+            .unwrap(),
+        ];
+        let mut app = App::new();
+        app.set_active(SessionId::new("s1"), events, 3);
+        let items = app.tree_event_items("");
+        let marker = items
+            .iter()
+            .find(|it| it.label.contains("rewind"))
+            .expect("the rewind marker row is in the tree list");
+        assert_eq!(marker.id, "3", "the marker's 1-based log seq is the row id");
+        assert!(
+            marker.label.contains("rewound to seq 2 (before)"),
+            "the row reuses the transcript marker wording: {}",
+            marker.label
+        );
+        // Typing what the transcript line shows finds the marker row.
+        let labels: Vec<String> = items.iter().map(|it| it.label.clone()).collect();
+        let ranked = rank_fuzzy(&labels, "rewound to seq 2");
+        assert!(
+            ranked.iter().any(|&i| labels[i].contains("rewound to seq 2 (before)")),
+            "the fuzzy box finds the marker from the transcript wording"
+        );
     }
 
     /// The rendered transcript starts at the first event, not at a

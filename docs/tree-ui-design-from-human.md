@@ -60,7 +60,9 @@ Target behaviors:
   to the picked event so it is visible. This is navigation of the existing log,
   not a change to the conversation.
 - `Rewind without summary`: Close the palette floating window, directly go to the picked event. TUI updates the rendering, only
-  show history up to the picked event.
+  show history up to the picked event. Off-path events are dropped from
+  the main transcript. The rewind marker stays as the fork-boundary line.
+  Branch visibility is owned by the `tree` palette and its preview.
 - `Summarize the branch`: Close the palette floating window, the TUI sends command to `rushi` kernel to compact the context up
   to the selected event.
 - `Summarize with custom prompt`: Close the palette floating window, user write
@@ -128,8 +130,9 @@ outcomes below all fork.
   main viewport scrolls to the picked event so it is visible. This is
   navigation of the existing log; nothing is dimmed or masked.
 - `Rewind without summary`: close the palette, go to the picked event. The TUI re-renders
-  the active path. Masked events stay visible but dimmed, per the kernel
-  marker rendering.
+  the active path. Off-path events are dropped from the main transcript. The
+  rewind marker stays as the fork-boundary line. Branch visibility is owned
+  by the `tree` palette and its preview pane.
 - `Summarize the branch`: append the rewind marker, spawn
   `bin/compact --up-to <picked_seq>` as a child process. The status line
   shows a compacting indicator while it runs. On the `compaction_summary`
@@ -149,6 +152,26 @@ outcomes below all fork.
   JSON of the picked event for debugging. Search typing never triggers
   the toggle.
 
+### Rewind transcript masking (hide, not dim)
+
+- With a rewind marker in the log, the main transcript shows the active
+  path only. Abandoned-branch events are dropped from it entirely. They
+  are not rendered dimmed. Branch visibility is owned by the `tree`
+  palette and its preview pane.
+- The `rewind` marker event is the exception. It stays rendered as the
+  fork-boundary line. It shows even when its seq is off the active path
+  and even when it sits in a collapsed turn's span.
+- The marker line is kept only if it helps find the marker in the
+  fuzzy palette. The transcript line and the palette row share the
+  exact wording "rewound to seq N (mode)". What the user sees is what
+  they search. The row also shows the marker's own log seq as its
+  `#N` hint.
+- This is a user decision from the discussion. The dimming approach was
+  rejected. The user said the dim does not work. Option A, full
+  removal, is what the user wanted all along.
+- Deferred follow-up: improve the tree palette and preview UI for branch
+  visibility and filtering. That work is a separate task.
+
 ### Confirmed behaviors
 
 - On a `before`-mode user-message pick, the TUI loads that message text
@@ -164,11 +187,12 @@ outcomes below all fork.
   next draw pins the picked event's first line at the top of the
   viewport. No marker appended, no state change; allowed mid-step.
 - **Rewind without summary** — wired end to end. Committing it appends a
-  `rewind` marker (`reason` `tui_pick`) via the port; the active-path
-  mask (kernel `active_ranges`) dims abandoned-branch events in the
-  transcript. A `user_message` target uses `before` mode and restores the
-  message to the input box unsent; every other target uses `on`. A busy
-  loop blocks the commit with the "loop busy, wait for the step" hint.
+  `rewind` marker (`reason` `tui_pick`) via the port. The active-path
+  mask (kernel `active_ranges`) drops abandoned-branch events from the
+  transcript. The rewind marker stays as the fork-boundary line. A
+  `user_message` target uses `before` mode and restores the message to the
+  input box unsent. Every other target uses `on`. A busy loop blocks the
+  commit with the "loop busy, wait for the step" hint.
 - **Summarize the branch / with custom prompt** — shown in the option
   list as "pending kernel"; committing flashes that the kernel
   `bin/compact --up-to [--prompt]` flags are pending. No-op until the

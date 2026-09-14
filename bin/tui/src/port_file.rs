@@ -1569,6 +1569,41 @@ mod tests {
         drop(rx);
     }
 
+    /// The live tree-rewind path: the TUI appends its own `rewind` marker
+    /// through the port (`LogLine::commit`), not via a raw write. The
+    /// tailer must still deliver it. If it does not, the in-memory
+    /// mask never updates and the abandoned branch keeps rendering
+    /// (docs/tree-ui-design-from-human.md).
+    #[test]
+    fn watch_sees_self_appended_rewind_marker() {
+        let c = make_cfg(None);
+        let rt = runtime();
+        let sid = SessionId::new("s1");
+        for i in 0..4 {
+            let ev = Event::Json {
+                obj: serde_json::json!({"v":1,"type":"user_message","ts":"t","id":format!("u{i}"),"content":format!("m{i}")}),
+            };
+            block_on(&rt, c.port.append_event(&sid, &ev)).unwrap();
+        }
+        let rx = c.port.watch(&sid, TailCursor::end());
+        std::thread::sleep(Duration::from_millis(200)); // let the tailer attach
+        let marker = Event::Json {
+            obj: serde_json::json!({"v":1,"type":"rewind","ts":"t","target_seq":2,"mode":"on","reason":"tui_pick"}),
+        };
+        block_on(&rt, c.port.append_event(&sid, &marker)).unwrap();
+        match wait_item(&rx) {
+            WatchItem::Event { event, .. } => {
+                assert_eq!(
+                    event.kind(),
+                    EventKind::Rewind,
+                    "the self-appended marker must be delivered to the watch"
+                );
+            }
+            other => panic!("expected rewind event, got {other:?}"),
+        }
+        drop(rx);
+    }
+
     #[test]
     fn watch_holds_partial_line_until_newline() {
         let c = make_cfg(None);

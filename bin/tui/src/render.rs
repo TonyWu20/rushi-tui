@@ -3601,12 +3601,14 @@ pub fn build_transcript_input(input: &TranscriptBuildInput) -> TranscriptBuild {
     // First screen-line index of each in-memory event, indexed by its
     // position in the full log window. `None` for events outside the
     // build window (the tail-window fast build keeps the head `None`,
-    // docs/tui-perf-background-build-plan.md stage 2).
+    // docs/tui-perf-background-build-plan.md stage 2) and for events
+    // dropped by the active-path mask (rewind, see below).
     let mut event_line_starts: Vec<Option<usize>> = vec![None; offset + events.len()];
     // The active-path ranges of the current log (docs/rewind-fork-
     // design.md section 3, docs/tree-ui-design-from-human.md). When a
-    // rewind marker exists, abandoned-branch events are dimmed. `None`
-    // when there is no marker: the full log is active.
+    // rewind marker exists, off-path events are dropped from the
+    // transcript; only the active path renders. `None` when there is
+    // no marker: the full log is active.
     let active_ranges = &input.rewind_active_ranges;
     let base = input.events_base_seq;
     // The ext-side state for the built-in fallback path. `None` keeps
@@ -3629,7 +3631,27 @@ pub fn build_transcript_input(input: &TranscriptBuildInput) -> TranscriptBuild {
             continue;
         }
         let w = start + i;
-        if !fold.visible(w) {
+        // Active-path mask (docs/rewind-fork-design.md section 3,
+        // docs/tree-ui-design-from-human.md): with a rewind marker in
+        // the log, off-path events are dropped from the transcript.
+        // The transcript shows the active path only. Branch visibility
+        // is owned by the `tree` palette and its preview pane. Rewind
+        // markers still render: they mark the fork boundary. The log
+        // seq of this in-memory event is `base + (start + i)` (base is
+        // the 1-based seq of the first in-memory event).
+        let gseq = base + start + i;
+        let off_path = active_ranges
+            .as_ref()
+            .is_some_and(|r| !rushi_common::rewind::seq_in_ranges(gseq, r));
+        // A rewind marker is a structural fork boundary, not
+        // conversation content. It always renders: even when it sits
+        // off the active path, and even when a collapsed turn's span
+        // would fold it away. Every other off-path event is dropped.
+        let is_rewind = e.kind() == EventKind::Rewind;
+        if off_path && !is_rewind {
+            continue;
+        }
+        if !is_rewind && !fold.visible(w) {
             continue;
         }
         let turn_start_summary: Option<crate::fold::SummaryLine> =
@@ -3654,16 +3676,7 @@ pub fn build_transcript_input(input: &TranscriptBuildInput) -> TranscriptBuild {
         } else {
             None
         };
-        // Mask the abandoned-branch events: when a rewind marker exists,
-        // an event whose 1-based log seq sits off the active path is
-        // dimmed (docs/rewind-fork-design.md section 3). The seq of this
-        // in-memory event is `base + (start + i)` (base is the 1-based
-        // seq of the first in-memory event).
-        let gseq = base + start + i;
-        let masked = active_ranges
-            .as_ref()
-            .is_some_and(|r| !rushi_common::rewind::seq_in_ranges(gseq, r));
-        let (mut segs, raws): (Vec<Line<'static>>, Vec<Option<String>>) =
+        let (segs, raws): (Vec<Line<'static>>, Vec<Option<String>>) =
             if let Some(lines) = input.ext_lines.get(&event_id) {
                 // Pre-resolved ext reply: the extension's styled lines
                 // replace the built-in render.
@@ -3689,13 +3702,6 @@ pub fn build_transcript_input(input: &TranscriptBuildInput) -> TranscriptBuild {
                     None => builder.call(),
                 }
             };
-        if masked {
-            for seg in segs.iter_mut() {
-                for s in seg.spans.iter_mut() {
-                    s.style = s.style.add_modifier(Modifier::DIM);
-                }
-            }
-        }
         event_line_starts[offset + start + i] = Some(all.len());
         all.extend(segs);
         line_raw.extend(raws);

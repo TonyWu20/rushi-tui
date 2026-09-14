@@ -1067,12 +1067,12 @@ fn transcript_event_line_starts_maps() {
     assert!(starts[1] > Some(0));
 }
 
-/// A rewind marker masks the abandoned branch: events outside the
-/// active-path ranges render dim; active-path events do not.
+/// A rewind marker drops the abandoned branch from the transcript.
+/// Off-path events render no lines. The active path and the fork
+/// marker stay (docs/tree-ui-design-from-human.md).
 #[test]
-fn rewind_marker_masks_abandoned_branch() {
+fn rewind_marker_drops_abandoned_branch() {
     use crate::render::build_transcript;
-    use ratatui::style::Modifier;
     let events = vec![
         ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u1","content":"hello"}"#),
         ev(r#"{"v":1,"type":"assistant_message","ts":"t","id":"a1","content":"hi","tool_calls":[],"stop_reason":"stop","usage":{"input_tokens":1,"output_tokens":1},"reasoning":{}}"#),
@@ -1080,17 +1080,95 @@ fn rewind_marker_masks_abandoned_branch() {
         ev(r#"{"v":1,"type":"rewind","ts":"t","id":"w1","target_seq":2,"mode":"on","reason":"tui_pick"}"#),
     ];
     let app = app_with_session(events);
+    // Events 0,1 (seqs 1..=2) are on the active path: rendered.
     let build = build_transcript(&app, 80, None);
-    let dim = |li: usize| build.lines[li]
-        .spans
-        .iter()
-        .any(|s| s.style.add_modifier.contains(Modifier::DIM));
-    // Events 0 and 1 are on the active path (seqs 1..=2): not dimmed.
-    for idx in 0..2 {
-        let li = build.event_line_starts[idx].expect("active-path event rendered");
-        assert!(!dim(li), "active-path event {idx} must not be dimmed");
-    }
+    assert!(build.event_line_starts[0].is_some(), "active-path event 0 must render");
+    assert!(build.event_line_starts[1].is_some(), "active-path event 1 must render");
     // Event 2 (seq 3, the abandoned "question") is off the active path.
-    let li = build.event_line_starts[2].expect("abandoned event rendered");
-    assert!(dim(li), "the abandoned event must be dimmed");
+    assert!(build.event_line_starts[2].is_none(), "the abandoned event must be dropped");
+    assert!(!build.lines.iter().any(|l| l.to_string().contains("question")));
+    // The rewind marker stays as the fork-boundary line.
+    assert!(build.event_line_starts[3].is_some(), "the fork marker must render");
+    assert!(build.lines.iter().any(|l| l.to_string().contains("rewound to seq 2")));
+}
+
+/// Live delivery of the TUI's own rewind append. The marker is not in
+/// the initial `set_active` load. It arrives via `on_watch_item`, like
+/// the real tailer path (docs/tree-ui-design-from-human.md). The drop
+/// must apply from that state alone.
+#[test]
+fn rewind_marker_delivered_via_watch_drops_branch() {
+    use crate::port::{TailCursor, WatchItem};
+    use crate::render::build_transcript;
+    let events = vec![
+        ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u1","content":"hello"}"#),
+        ev(r#"{"v":1,"type":"assistant_message","ts":"t","id":"a1","content":"hi","tool_calls":[],"stop_reason":"stop","usage":{"input_tokens":1,"output_tokens":1},"reasoning":{}}"#),
+        ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u2","content":"question"}"#),
+    ];
+    let mut app = app_with_session(events);
+    // No marker yet: the full log is active (`None`).
+    assert!(app.rewind_active_ranges().is_none());
+    // The marker the TUI appended for target seq 2 arrives via the
+    // tailer, exactly like the main-loop `drain_watch` path.
+    app.on_watch_item(WatchItem::Event {
+        event: ev(
+            r#"{"v":1,"type":"rewind","ts":"t","id":"w1","target_seq":2,"mode":"on","reason":"tui_pick"}"#,
+        ),
+        cursor: TailCursor::end(),
+    });
+    // The active path now ends at seq 2. The marker is at seq 4.
+    assert_eq!(app.rewind_active_ranges(), Some(vec![(1, 2)]));
+    let build = build_transcript(&app, 80, None);
+    // Active-path events 0,1 (seqs 1..=2) render.
+    assert!(build.event_line_starts[0].is_some(), "event 0 must render");
+    assert!(build.event_line_starts[1].is_some(), "event 1 must render");
+    // The abandoned user message (seq 3) is dropped from the transcript.
+    assert!(build.event_line_starts[2].is_none(), "the abandoned event must be dropped");
+    assert!(!build.lines.iter().any(|l| l.to_string().contains("question")));
+    // The marker stays as the fork-boundary line.
+    assert!(build.event_line_starts[3].is_some(), "the fork marker must render");
+    assert!(build.lines.iter().any(|l| l.to_string().contains("rewound to seq 2")));
+}
+
+/// The actual draw path: `transcript_lines` is cached, so the drop must
+/// survive a cache miss triggered by the marker's `events_version` bump.
+/// Without this the TUI keeps the stale cache after a live rewind.
+#[test]
+fn cached_transcript_drops_offpath_after_live_marker() {
+    use crate::port::{TailCursor, WatchItem};
+    let events = vec![
+        ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u1","content":"AAA first question"}"#),
+        ev(r#"{"v":1,"type":"assistant_message","ts":"t","id":"a1","content":"BBB first answer","tool_calls":[],"stop_reason":"stop","usage":{"input_tokens":1,"output_tokens":1},"reasoning":{}}"#),
+        ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u2","content":"CCC second question"}"#),
+        ev(r#"{"v":1,"type":"assistant_message","ts":"t","id":"a2","content":"DDD second answer","tool_calls":[],"stop_reason":"stop","usage":{"input_tokens":1,"output_tokens":1},"reasoning":{}}"#),
+    ];
+    let mut app = app_with_session(events);
+    // Prime the cache with no marker: all four events render.
+    let starts = app.transcript_event_line_starts(80, None);
+    assert!(starts.iter().all(|s| s.is_some()), "no drop before the marker");
+    // The marker arrives live, exactly like the tailer delivers it.
+    app.on_watch_item(WatchItem::Event {
+        event: ev(
+            r#"{"v":1,"type":"rewind","ts":"t","id":"w1","target_seq":3,"mode":"before","reason":"tui_pick"}"#,
+        ),
+        cursor: TailCursor::end(),
+    });
+    assert_eq!(app.rewind_active_ranges(), Some(vec![(1, 2)]));
+    // Mirror the main loop: a cache miss requests a rebuild; the next
+    // frame dispatches it and polls the result before the draw.
+    let _ = app.transcript_lines(80, None); // miss, requests rebuild
+    app.dispatch_transcript_build(None);
+    app.poll_transcript_worker();
+    // Events 2,3 (seqs 3,4) are off the active path: dropped.
+    let starts = app.transcript_event_line_starts(80, None);
+    assert!(starts[0].is_some(), "active event 0 must render");
+    assert!(starts[1].is_some(), "active event 1 must render");
+    assert!(starts[2].is_none(), "abandoned event 2 must be dropped");
+    assert!(starts[3].is_none(), "abandoned event 3 must be dropped");
+    // The marker (index 4) stays as the fork-boundary line.
+    assert!(starts[4].is_some(), "the fork marker must render");
+    let lines = app.transcript_lines(80, None);
+    assert!(!lines.iter().any(|l| l.to_string().contains("CCC")));
+    assert!(!lines.iter().any(|l| l.to_string().contains("DDD")));
+    assert!(lines.iter().any(|l| l.to_string().contains("rewound to seq 3")));
 }
