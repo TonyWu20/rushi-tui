@@ -425,6 +425,37 @@ impl Browse {
         self.col = self.col.min(line_len);
     }
 
+    pub fn goto(&mut self, total: usize, h: usize, line: usize, scroll: &mut usize) {
+        if total == 0 {
+            self.line = 0;
+            self.col = 0;
+            *scroll = 0;
+            return;
+        }
+        self.line = line.min(total - 1);
+        self.col = 0;
+        *scroll = follow_view(total, h, self.line, *scroll);
+    }
+
+    pub fn goto_line(
+        &mut self,
+        total: usize,
+        h: usize,
+        line: usize,
+        col: usize,
+        scroll: &mut usize,
+    ) {
+        if total == 0 {
+            self.line = 0;
+            self.col = 0;
+            *scroll = 0;
+            return;
+        }
+        self.line = line.min(total - 1);
+        self.col = col;
+        *scroll = follow_view(total, h, self.line, *scroll);
+    }
+
     // ── the key table (sections 4.4 and 7.3) ─────────────────────
 
     /// One browse-owned key. Returns the flash hint to show, if any.

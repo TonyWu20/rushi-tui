@@ -1577,6 +1577,93 @@ pub fn box_bg(palette: &crate::color::Palette, err: bool) -> Color {
 /// segment, the optional dim label segment, the status segment, and
 /// the background pad; a body row is one or more segments plus the
 /// background pad.
+/// The collapsed one-line header of a tool-result panel
+/// (docs/tui-turn-fold.md, L2): the name, the optional label and
+/// the status on the panel background.
+/// No body rows and no margin rows.
+/// The browse fold renders a result in this state unless the
+/// result is individually opened (L3).
+/// The same cells form the header row of the full panel.
+pub fn header_row(
+    name: &str,
+    label: &str,
+    status: &str,
+    width: usize,
+    palette: &crate::color::Palette,
+    err: bool,
+) -> BodyRow {
+    let bg = box_bg(palette, err);
+    // The tool name: purple accent, bold.
+    // The user pass of 2026-09-14 moved the name out of the top
+    // border. Now it is the header row of the borderless panel.
+    let name_style = Style::default()
+        .fg(palette.color(crate::color::Role::ToolName))
+        .add_modifier(Modifier::BOLD)
+        .bg(bg);
+    // The status tone: the pi `error` accent on a failed result.
+    // The muted hint on a success.
+    let status_style = if err {
+        palette.style(crate::color::Role::Error, Modifier::BOLD).bg(bg)
+    } else {
+        Style::default()
+            .fg(palette.color(crate::color::Role::Hint))
+            .add_modifier(Modifier::DIM)
+            .bg(bg)
+    };
+    // One cell of left padding.
+    // The panel content starts one column in, the panel spans the
+    // full `width`.
+    let inner_w = width.saturating_sub(1).max(1);
+    let mut cells: Vec<(Style, String)> = Vec::new();
+    let mut used = 0usize;
+    let mut name_cell = format!(" {name}");
+    let avail = inner_w.saturating_sub(used);
+    if name_cell.chars().count() > avail {
+        let keep = avail.saturating_sub(1);
+        let cut: String = name_cell.chars().take(keep).collect();
+        name_cell = format!("{cut}…");
+    }
+    used = used.saturating_add(name_cell.chars().count());
+    cells.push((name_style, name_cell.clone()));
+    // The optional dim label sits between the name and the status.
+    // For a read result it is the file it read.
+    if !label.is_empty() {
+        let label_style = Style::default()
+            .fg(palette.color(crate::color::Role::Hint))
+            .add_modifier(Modifier::DIM)
+            .bg(bg);
+        let mut label_cell = format!(" {label}");
+        let avail = inner_w.saturating_sub(used);
+        if label_cell.chars().count() > avail {
+            let keep = avail.saturating_sub(1);
+            let cut: String = label_cell.chars().take(keep).collect();
+            label_cell = format!("{cut}…");
+        }
+        used = used.saturating_add(label_cell.chars().count());
+        cells.push((label_style, label_cell));
+    }
+    let mut st_cell = format!("  {status}");
+    let avail = inner_w.saturating_sub(used);
+    if st_cell.chars().count() > avail {
+        let keep = avail.saturating_sub(1);
+        let cut: String = st_cell.chars().take(keep).collect();
+        st_cell = format!("{cut}…");
+    }
+    used = used.saturating_add(st_cell.chars().count());
+    cells.push((status_style, st_cell));
+    // The background pad to the panel width.
+    // Every panel row is exactly `width` columns so the band fills
+    // the transcript row edge to edge.
+    let pad = width.saturating_sub(used);
+    cells.push((Style::default().bg(bg), " ".repeat(pad)));
+    cells
+}
+
+/// One panel row is one terminal line.
+/// The margin rows are the background pad to the full width.
+/// The header row carries the name, the optional dim label and the
+/// status. A body row is one or more segments plus the background
+/// pad.
 pub fn box_rows(
     name: &str,
     label: &str,
@@ -1587,81 +1674,14 @@ pub fn box_rows(
     err: bool,
 ) -> Vec<BodyRow> {
     let bg = box_bg(palette, err);
-    // The tool name in the purple accent, bold (the user pass of
-    // 2026-09-14: the name stood in the top border before, now it is
-    // the header row of the borderless panel).
-    let name_style = Style::default()
-        .fg(palette.color(crate::color::Role::ToolName))
-        .add_modifier(Modifier::BOLD)
-        .bg(bg);
-    // The status tone: the pi `error` accent (not a hard-coded red)
-    // on a failed result; the muted hint on a success.
-    let status_style = if err {
-        palette.style(crate::color::Role::Error, Modifier::BOLD).bg(bg)
-    } else {
-        Style::default()
-            .fg(palette.color(crate::color::Role::Hint))
-            .add_modifier(Modifier::DIM)
-            .bg(bg)
-    };
-    // One cell of left padding: the panel content starts one column
-    // in, the panel spans the full `width`.
-    let inner_w = width.saturating_sub(1).max(1);
     let mut out: Vec<BodyRow> = Vec::new();
-    // One row of top margin: a background-filled empty row so the
-    // content sits inside the lighter band with breathing room above
-    // it (the 2026-09-14 user pass: the two freed border rows become
-    // one top and one bottom margin).
+    // One row of top margin: a background-filled empty row.
+    // It gives the content breathing room above it.
+    // The 2026-09-14 user pass: the two freed border rows became
+    // one top and one bottom margin.
     out.push(vec![(Style::default().bg(bg), " ".repeat(width))]);
-    // The header row: one cell of padding + the tool name + two
-    // spaces + the status + the background pad to the panel width.
-    // The old `tool:<name>` title prefix is gone: the name stands
-    // alone in the purple accent.
-    {
-        let mut cells: Vec<(Style, String)> = Vec::new();
-        let mut used = 0usize;
-        let mut name_cell = format!(" {name}");
-        let avail = inner_w.saturating_sub(used);
-        if name_cell.chars().count() > avail {
-            let keep = avail.saturating_sub(1);
-            let cut: String = name_cell.chars().take(keep).collect();
-            name_cell = format!("{cut}…");
-        }
-        used = used.saturating_add(name_cell.chars().count());
-        cells.push((name_style, name_cell.clone()));
-        // The optional dim label (for a read result, the file it
-        // read) sits between the name and the status.
-        if !label.is_empty() {
-            let label_style = Style::default()
-                .fg(palette.color(crate::color::Role::Hint))
-                .add_modifier(Modifier::DIM)
-                .bg(bg);
-            let mut label_cell = format!(" {label}");
-            let avail = inner_w.saturating_sub(used);
-            if label_cell.chars().count() > avail {
-                let keep = avail.saturating_sub(1);
-                let cut: String = label_cell.chars().take(keep).collect();
-                label_cell = format!("{cut}…");
-            }
-            used = used.saturating_add(label_cell.chars().count());
-            cells.push((label_style, label_cell));
-        }
-        let mut st_cell = format!("  {status}");
-        let avail = inner_w.saturating_sub(used);
-        if st_cell.chars().count() > avail {
-            let keep = avail.saturating_sub(1);
-            let cut: String = st_cell.chars().take(keep).collect();
-            st_cell = format!("{cut}…");
-        }
-        used = used.saturating_add(st_cell.chars().count());
-        cells.push((status_style, st_cell));
-        // The background pad to the panel width: every panel row is
-        // exactly `width` columns so the band fills the transcript
-        // row edge to edge.
-        let pad = width.saturating_sub(used);
-        cells.push((Style::default().bg(bg), " ".repeat(pad)));
-        out.push(cells);
-    }
+    // The header row: the name, the optional label, the status.
+    out.push(header_row(name, label, status, width, palette, err));
     // The body rows: one cell of left padding (the leading space of
     // the first segment) and no border cells. A body row may hold
     // several segments (the split diff panes). Each segment keeps its

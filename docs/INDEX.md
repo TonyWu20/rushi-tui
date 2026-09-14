@@ -4,7 +4,7 @@ Authoritative entry point for any agent starting a new session in
 this repo. Read this first. It tells you what exists, what is
 shipped, and what is next.
 
-## Repo state (2026-09-11)
+## Repo state (2026-09-14)
 
 **Working.** `bin/tui` is the swappable Ratatui TUI front-end for
 the `rushi` kernel. It compiles and runs against a sibling
@@ -16,12 +16,13 @@ the `rushi` kernel. It compiles and runs against a sibling
 `../rust-unix-harness`; UI extensions live in `../rushi-exts`.
 This repo has no build-time dependency on either.
 
-**Tests.** The suite now centres on 25 insta snapshot tests
-(`bin/tui/src/snapshot_tests.rs`) that capture the rendered
-terminal grid for each major state. Pure-logic tests remain for
-event parsing, config, port-file tailing, fuzzy matching, and the
-extension-host lifecycle. Method and conventions:
-`tui-insta-snapshot-testing.md`.
+**Tests.** The suite centres on 42 insta snapshot tests.
+They live in `bin/tui/src/snapshot_tests.rs` (41) and
+`render.rs` (1), capturing the rendered terminal grid for each
+major state. The turn fold contributes five (`snap_turn_fold_*`).
+Pure-logic tests remain for event parsing, config, port-file
+tailing, fuzzy matching, and the extension-host lifecycle.
+Method and conventions: `tui-insta-snapshot-testing.md`.
 
 ## Doc inventory
 
@@ -68,6 +69,7 @@ extension-host lifecycle. Method and conventions:
 | `tui-perf-background-build-audit.md` | Audit | 2026-09-13 | Audit of the background build plan and the independent perf test for the 100 ms frame budget. |
 | `tui-perf-streaming-incremental-plan.md` | Spec | 2026-09-13 | Incremental cache for the live streaming block (thinking + text). Eliminates per-frame O(n) re-wrap/re-highlight; subsumes the keep-highlighter-alive optimisation. |
 | `tui-preview-pane-plan.md` | Spec | 2026-09-24 | No-truncation picker preview pane: windowed highlight (only the visible window), cancellable background load, and a size guard so huge ignored files never freeze the TUI. |
+| `tui-turn-fold.md` | Implemented | 2026-09-14 | Browse-mode three-level fold: per-turn and per-tool-result collapse, neovim-style z keys. |
 
 ## Status legend
 

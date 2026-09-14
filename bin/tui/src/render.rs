@@ -318,6 +318,11 @@ pub struct RenderState<'a> {
     /// "no animation: use the `tool_expanded` bool as-is".
     /// (docs/tui-tool-display-fancy.md section 6)
     pub expand_fracs: &'a std::collections::HashMap<String, f64>,
+    /// The browse fold is active (docs/tui-turn-fold.md): tool
+    /// results render as a one-line header unless their per-block
+    /// fraction in `expand_fracs` is >= 0.5. The main-view builds
+    /// keep this off.
+    pub fold_results: bool,
 }
 
 #[builder]
@@ -563,8 +568,8 @@ fn event_lines<'a>(
         EventKind::ToolResult => {
             let id = e.get_str("id").unwrap_or("?");
             // The call details hold the tool name and the call
-            // arguments (the write diff needs the write `content`
-            // argument; docs/tui-tool-result-truncation.md).
+            // arguments. The write diff needs the write `content`
+            // argument (docs/tui-tool-result-truncation.md).
             let (name, args) = call_details
                 .get(id)
                 .cloned()
@@ -572,63 +577,16 @@ fn event_lines<'a>(
             let value = e.get("value");
             let err = e.get_bool("is_error").unwrap_or(false);
             let status = result_status(value, err);
-            // The result body in its lighter panel (docs/tui-tool-
-            // display-port.md section 2, the box; the 2026-09-14 user
-            // pass dropped the border lines: the panel is the lighter
-            // background only). The body is the tool-specific compact
-            // output (docs/tui-tool-result-truncation.md section 1,
-            // the content layer), folded to the output mode's lines,
-            // with the global Ctrl+O expansion to the full body. The
-            // panel header row carries the tool name (the purple
-            // `tool_name` accent, bold) and the status, so no
-            // separate header line above the panel.
             let value_ref = value.unwrap_or(&serde_json::Value::Null);
-            // The body content budget: the panel inner width minus the
-            // left padding cell. The panel truncates overflow with a
-            // trailing ellipsis, so the content fills the panel
-            // instead of leaving dead columns (the 2026-09-03 user
-            // directive: truncate, never wrap). The borderless panel
-            // (2026-09-14) keeps one cell of left padding, so the
-            // budget is `width - 1` instead of the old `width - 3`.
             let body_w = width.saturating_sub(1);
             // The per-block expand fraction (docs/tui-tool-display-
-            // fancy.md section 6): when the animation system has a
-            // value for this event ID, it interpolates the body cap
-            // between the collapsed and expanded caps. An empty map
-            // means "no animation: use the `tool_expanded` bool".
+            // fancy.md section 6). When the animation system has a
+            // value for this event ID it interpolates the body cap.
+            // An empty map means "use the `tool_expanded` bool".
             let expand_frac = state.expand_fracs.get(id).copied().unwrap_or(-1.0);
-            let mut body = crate::tool_display::body_rows()
-                .tool(&name)
-                .value(value_ref)
-                .call_args(&args)
-                .err(err)
-                .cfg(state.tool_display)
-                .palette(palette)
-                .expanded(state.tool_expanded)
-                .width(body_w)
-                .expand_frac(expand_frac)
-                .call();
-            // The JSON-document body (docs/tui-color-tones.md): a
-            // read result whose content is a complete JSON document,
-            // or an unknown tool whose result is JSON, keeps the
-            // JSON token colors instead of the plain code tone.
-            let body_text = value_ref.get("text").and_then(|v| v.as_str()).unwrap_or("");
-            let known = matches!(name.as_str(), "read" | "write" | "edit" | "bash");
-            if (name == "read" || !known) && highlight::looks_like_json(body_text) {
-                body = crate::tool_display::json_body_rows(
-                    &name,
-                    value_ref,
-                    state.tool_display,
-                    palette,
-                    state.tool_expanded,
-                    body_w,
-                    expand_frac,
-                );
-            }
-            // The panel header names the tool. A `read` result also
-            // carries the file it read as a dim label after the name
-            // (the `file_path` of its call arguments; the kernel knows
-            // the argument shape of its own read tool).
+            // The panel header names the tool.
+            // A `read` result adds a dim label after the name.
+            // The label is the read `file_path` or `path` argument.
             let label = if name == "read" {
                 args.get("file_path")
                     .or_else(|| args.get("path"))
@@ -637,22 +595,77 @@ fn event_lines<'a>(
             } else {
                 ""
             };
-            let rows =
-                crate::tool_display::box_rows(&name, label, &status, &body, width, palette, err);
-            // The shareable raw source of a result is its raw output
-            // text (section 11.3); assign it to the box's first row so
-            // a yank of the box returns the full output, not the
-            // truncated/boxed display.
-            let raw_output = raw_event_text(e);
-            for (i, row) in rows.into_iter().enumerate() {
+            // The browse fold L2/L3 (docs/tui-turn-fold.md).
+            // When the fold is active, an unopened result renders as
+            // a one-line header. Opened results render the full body.
+            // The per-result frac is the open state. The `zA`, click,
+            // `zM`, and `zR` keys set it. The Ctrl+O toggle is ignored
+            // in this mode.
+            let fold_open = state.fold_results && expand_frac >= 0.5;
+            let fold_closed = state.fold_results && !fold_open;
+            if fold_closed {
+                // The one-line header. No body, no margin rows.
+                // The raw output stays the yankable source of the row
+                // (section 11.3).
+                let row = crate::tool_display::header_row(
+                    &name, label, &status, width, palette, err,
+                );
                 let spans: Vec<Span<'static>> =
                     row.into_iter().map(|(s, t)| Span::styled(t, s)).collect();
                 out.push(Line::from(spans));
-                owns.push(if i == 0 {
-                    Some(raw_output.clone())
-                } else {
-                    None
-                });
+                owns.push(Some(raw_event_text(e)));
+            } else {
+                let expanded_use = state.tool_expanded || fold_open;
+                // The result body in its lighter panel (docs/tui-tool-
+                // display-port.md section 2). The body is the tool-
+                // specific compact output folded to the output mode's
+                // lines. In fold mode the per-result open state takes
+                // the place of the global toggle.
+                let mut body = crate::tool_display::body_rows()
+                    .tool(&name)
+                    .value(value_ref)
+                    .call_args(&args)
+                    .err(err)
+                    .cfg(state.tool_display)
+                    .palette(palette)
+                    .expanded(expanded_use)
+                    .width(body_w)
+                    .expand_frac(expand_frac)
+                    .call();
+                // The JSON-document body (docs/tui-color-tones.md).
+                // A read result with a JSON-document body keeps the
+                // JSON token colors. So does an unknown tool whose
+                // result is JSON. The plain code tone is otherwise
+                // used for the body.
+                let body_text = value_ref.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                let known = matches!(name.as_str(), "read" | "write" | "edit" | "bash");
+                if (name == "read" || !known) && highlight::looks_like_json(body_text) {
+                    body = crate::tool_display::json_body_rows(
+                        &name,
+                        value_ref,
+                        state.tool_display,
+                        palette,
+                        expanded_use,
+                        body_w,
+                        expand_frac,
+                    );
+                }
+                let rows =
+                    crate::tool_display::box_rows(&name, label, &status, &body, width, palette, err);
+                // The raw output is the shareable source of a result
+                // (section 11.3). The box's first row owns it so a
+                // yank returns the full output, not the display.
+                let raw_output = raw_event_text(e);
+                for (i, row) in rows.into_iter().enumerate() {
+                    let spans: Vec<Span<'static>> =
+                        row.into_iter().map(|(s, t)| Span::styled(t, s)).collect();
+                    out.push(Line::from(spans));
+                    owns.push(if i == 0 {
+                        Some(raw_output.clone())
+                    } else {
+                        None
+                    });
+                }
             }
         }
         EventKind::ApprovalRequest => {
@@ -3126,6 +3139,7 @@ pub struct TranscriptBuild {
     /// the string form of every line on each frame
     /// (docs/tui-conversation-browsing.md section 4.6).
     pub texts: Vec<String>,
+    pub live_summary: Option<usize>,
 }
 
 /// The shareable source text of one event (docs/tui-conversation-
@@ -3234,6 +3248,7 @@ pub struct TranscriptBuildInput {
     /// Pre-resolved ext reply lines, keyed by event id.
     /// The key is the in-memory event index.
     pub ext_lines: std::collections::HashMap<u64, Vec<crate::ext::ExtLine>>,
+    pub turn_fold: Option<std::collections::HashSet<u64>>,
 }
 
 /// The ext-side inputs of a transcript build, decoupled from the
@@ -3298,6 +3313,7 @@ impl TranscriptBuildInput {
                 span_lines: resolve_ext_spans_at(host, events, width, offset),
             }),
             ext_lines: resolve_ext_lines_at(ext, events, offset),
+            turn_fold: app.fold_input(),
         }
     }
 }
@@ -3432,6 +3448,27 @@ pub fn resolve_ext_spans_at(
 /// No app or ext-host state is read.
 /// The build can run on the background worker.
 /// (docs/tui-perf-background-build-plan.md, stage 1.)
+fn fold_summary_line(
+    sl: &crate::fold::SummaryLine,
+    state: &RenderState,
+    width: usize,
+) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> =
+        vec![Span::raw(" ".repeat(width.min(GUTTER)))];
+    if sl.spinner {
+        let spinner = Span::styled(
+            format!("{} ", WORKING_SPINNER_FRAMES[0]),
+            Style::default().fg(state.palette.color(crate::color::Role::Status)),
+        );
+        spans.push(spinner);
+    }
+    if !sl.text.is_empty() {
+        let dim = state.palette.style(crate::color::Role::Hint, Modifier::DIM);
+        spans.push(Span::styled(sl.text.clone(), dim));
+    }
+    Line::from(spans)
+}
+
 pub fn build_transcript_input(input: &TranscriptBuildInput) -> TranscriptBuild {
     let events = &input.events;
     let details = &input.call_details;
@@ -3461,6 +3498,7 @@ pub fn build_transcript_input(input: &TranscriptBuildInput) -> TranscriptBuild {
         thinking_shown: input.thinking_shown,
         thinking_expanded: input.thinking_expanded,
         expand_fracs: &input.expand_fracs,
+        fold_results: input.turn_fold.is_some(),
     };
     // The loop running bit, precomputed on the main thread.
     let running = input.loop_running;
@@ -3502,6 +3540,10 @@ pub fn build_transcript_input(input: &TranscriptBuildInput) -> TranscriptBuild {
     // The ext-side state for the built-in fallback path. `None` keeps
     // the plain markdown engine.
     let ext_data: Option<&ExtRenderData> = input.ext_data.as_ref();
+    let fold: Option<crate::fold::FoldState> = input.turn_fold.as_ref().map(|open| {
+        crate::fold::FoldState::new(events, input.events_base_seq, running, open.clone())
+    });
+    let mut live_summary: Option<usize> = None;
     for (i, e) in events[start..].iter().enumerate() {
         // ext_status is shared UI state: suppressed from the transcript
         // by default. ext_status events add no rows, and add no blank
@@ -3510,6 +3552,18 @@ pub fn build_transcript_input(input: &TranscriptBuildInput) -> TranscriptBuild {
         if e.kind() == EventKind::ExtStatus {
             continue;
         }
+        let w = start + i;
+        if let Some(fs) = &fold {
+            if !fs.visible(w) {
+                continue;
+            }
+        }
+        let turn_start_summary: Option<crate::fold::SummaryLine> =
+            fold.as_ref().and_then(|fs| {
+                fs.turn_for_event(w).filter(|t| w == t.start).and_then(|t| {
+                    fs.collapsed_summary(events, t)
+                })
+            });
         if !all.is_empty() {
             all.push(Line::from(""));
             line_raw.push(None);
@@ -3571,6 +3625,26 @@ pub fn build_transcript_input(input: &TranscriptBuildInput) -> TranscriptBuild {
                 block_spans.insert(id.to_string(), (s, all.len()));
             }
         }
+        if let Some(sl) = turn_start_summary {
+            all.push(fold_summary_line(&sl, &state, input.width));
+            line_raw.push(None);
+            if sl.spinner {
+                live_summary = Some(all.len() - 1);
+            }
+        }
+    }
+    if let Some(fs) = &fold {
+        if let Some(t) = fs.turns.last() {
+            if let Some(sl) = fs.open_in_progress_line(events, t) {
+                if !all.is_empty() {
+                    all.push(Line::from(""));
+                    line_raw.push(None);
+                }
+                all.push(fold_summary_line(&sl, &state, input.width));
+                line_raw.push(None);
+                live_summary = Some(all.len() - 1);
+            }
+        }
     }
     // The display text of each line, for the browse layout. Computed
     // once per build here, not per frame.
@@ -3581,6 +3655,7 @@ pub fn build_transcript_input(input: &TranscriptBuildInput) -> TranscriptBuild {
         block_spans,
         event_line_starts,
         texts,
+        live_summary,
     }
 }
 
@@ -4073,7 +4148,11 @@ pub fn draw(
     // disables the sliding-window cap so the whole streamed body
     // (thinking + text + partial tool calls) stays reachable by
     // scrolling; the stream file and the settled log are unchanged.
-    let stream_lines = stream_block_lines(app, text_w, usize::MAX);
+    let stream_lines = if browse_active {
+        StreamBlockView::empty()
+    } else {
+        stream_block_lines(app, text_w, usize::MAX)
+    };
     let stream_len = stream_lines.len();
     // The settled lines come from the cached transcript (a `&[Line]`
     // borrow); the live stream tail is a small owned Vec. We do not
@@ -4128,7 +4207,7 @@ pub fn draw(
     // the settled cache slice or the stream tail. This is the draw
     // path's whole cost for a long transcript (no full-vector copy).
     let end = (start + h).min(total);
-    let view_lines: Vec<Line<'static>> = {
+    let mut view_lines: Vec<Line<'static>> = {
         let settled = app.transcript_lines(text_w, Some(host));
         let mut v = Vec::with_capacity(end.saturating_sub(start));
         for g in start..end {
@@ -4172,6 +4251,24 @@ pub fn draw(
         let mut line_raw: Vec<Option<String>> = app.transcript_raw(text_w, Some(host));
         line_raw.extend(std::iter::repeat_n(None, stream_len));
         app.set_browse_layout(total, h, text_w, texts, line_raw);
+        let starts = app.transcript_event_line_starts(text_w, Some(host));
+        app.set_event_line_starts(starts);
+        app.apply_fold_cursor_target();
+    }
+    if browse_active {
+        if let Some(ls) = app.transcript_live_summary(text_w, Some(host)) {
+            if ls >= start && ls < end {
+                let idx = ls - start;
+                let spans = &mut view_lines[idx].spans;
+                if spans.len() > 1 {
+                    let style = spans[1].style;
+                    spans[1] = Span::styled(
+                        format!("{} ", spinner_frame(&chrono::Utc::now())),
+                        style,
+                    );
+                }
+            }
+        }
     }
     // The owned browse draw inputs: the cursor, the match-line
     // cache, the highlight styles. The cache clone is one pass per
@@ -4965,6 +5062,7 @@ mod tool_call_line_tests {
             thinking_shown: false,
             thinking_expanded: false,
             expand_fracs: &fracs,
+            fold_results: false,
         };
         let details: HashMap<String, (String, serde_json::Value)> = HashMap::new();
         let result_ids: HashSet<String> = HashSet::new();
@@ -5071,6 +5169,7 @@ mod user_box_tests {
             thinking_shown: false,
             thinking_expanded: false,
             expand_fracs: &fracs,
+            fold_results: false,
         };
         let details: HashMap<String, (String, serde_json::Value)> = HashMap::new();
         let result_ids: HashSet<String> = HashSet::new();
@@ -5129,6 +5228,7 @@ mod user_box_tests {
             thinking_shown: true,
             thinking_expanded: true,
             expand_fracs: &fracs,
+            fold_results: false,
         };
         let details: HashMap<String, (String, serde_json::Value)> = HashMap::new();
         let result_ids: HashSet<String> = HashSet::new();

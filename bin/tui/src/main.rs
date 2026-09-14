@@ -13,6 +13,7 @@ mod color;
 mod config;
 mod editor;
 mod event;
+mod fold;
 mod ext;
 mod float;
 mod highlight;
@@ -670,22 +671,35 @@ fn main() {
                         let transcript_line = (m.row as usize)
                             .saturating_sub(top_row)
                             .saturating_add(visible_start);
-                        let expand_mode = app.tool_display().expand_mode;
-                        match expand_mode {
-                            crate::tool_display::ExpandMode::Click => {
-                                if let Some(id) = app.block_at_transcript_line(transcript_line).map(|s| s.to_string()) {
-                                    app.toggle_block_expand(&id);
+                        if app.browse_ref().active() {
+                            // Browse mode: click moves the cursor and
+                            // toggles the L3 result fold under it
+                            // (docs/tui-turn-fold.md key table).
+                            app.browse_click(transcript_line, m.column as usize);
+                        } else {
+                            let expand_mode = app.tool_display().expand_mode;
+                            match expand_mode {
+                                crate::tool_display::ExpandMode::Click => {
+                                    if let Some(id) = app
+                                        .block_at_transcript_line(transcript_line)
+                                        .map(|s| s.to_string())
+                                    {
+                                        app.toggle_block_expand(&id);
+                                    }
                                 }
-                            }
-                            crate::tool_display::ExpandMode::Focus => {
-                                // In focus mode a click sets focus to the
-                                // nearest block. The draw loop will
-                                // animate it open.
-                                if let Some(id) = app.block_at_transcript_line(transcript_line).map(|s| s.to_string()) {
-                                    app.set_focus_block(&id);
+                                crate::tool_display::ExpandMode::Focus => {
+                                    // In focus mode a click sets focus to the
+                                    // nearest block. The draw loop will
+                                    // animate it open.
+                                    if let Some(id) = app
+                                        .block_at_transcript_line(transcript_line)
+                                        .map(|s| s.to_string())
+                                    {
+                                        app.set_focus_block(&id);
+                                    }
                                 }
+                                crate::tool_display::ExpandMode::Global => {}
                             }
-                            crate::tool_display::ExpandMode::Global => {}
                         }
                     }
                     _ => {}

@@ -387,6 +387,145 @@ fn snap_browse_mode_active() {
     insta::assert_snapshot!(out);
 }
 
+// ── turn fold (docs/tui-turn-fold.md) ─────────────────────────────
+
+/// Two completed turns.
+/// Each is user, mid assistant, tool call, tool result, final assistant.
+/// The second turn uses an extension tool name so the tally picks it up.
+fn fold_session_events() -> Vec<Event> {
+    // Multi-line result bodies so the L2 (results folded to the
+    // collapsed cap, plus the "... more lines" hint) and L3
+    // (result fully expanded) frames differ.
+    let c1_body: String = (0..14)
+        .map(|i| format!("out {i:02}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let c2_body: String = (0..12)
+        .map(|i| format!("ext {i:02}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    vec![
+        ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u1","content":"first question"}"#),
+        ev(r#"{"v":1,"type":"assistant_message","ts":"t","id":"a1","content":"let me look","tool_calls":[],"stop_reason":"stop"}"#),
+        ev(r#"{"v":1,"type":"tool_call","ts":"t","id":"c1","name":"bash","arguments":{"command":"ls"}}"#),
+        ev(&format!(
+            r#"{{"v":1,"type":"tool_result","ts":"t","id":"c1","value":{{"text":{},"exit_code":0,"stdout":{},"stderr":"","timed_out":false,"truncated":false}},"is_error":false}}"#,
+            serde_json::to_string(&c1_body).unwrap(),
+            serde_json::to_string(&c1_body).unwrap(),
+        )),
+        ev(r#"{"v":1,"type":"assistant_message","ts":"t","id":"a2","content":"final one","tool_calls":[],"stop_reason":"stop"}"#),
+        ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u2","content":"second question"}"#),
+        ev(r#"{"v":1,"type":"assistant_message","ts":"t","id":"a3","content":"thinking out loud","tool_calls":[],"stop_reason":"stop"}"#),
+        ev(r#"{"v":1,"type":"tool_call","ts":"t","id":"c2","name":"mymcp__ext","arguments":{}}"#),
+        ev(&format!(
+            r#"{{"v":1,"type":"tool_result","ts":"t","id":"c2","value":{{"text":{}}},"is_error":false}}"#,
+            serde_json::to_string(&c2_body).unwrap(),
+        )),
+        ev(r#"{"v":1,"type":"assistant_message","ts":"t","id":"a4","content":"final two","tool_calls":[],"stop_reason":"stop"}"#),
+    ]
+}
+
+/// The settled fold frame: mirror the main loop, where the first
+/// draw registers the cache miss, `dispatch_transcript_build`
+/// rebuilds the cache on the main thread (no worker in tests), and
+/// the final draw shows the fresh build with no build indicator.
+fn render_fold(app: &mut App, host: &ExtHost) -> String {
+    let _ = render(app, host, 80, 24);
+    // Let the 75 ms width-debounce window elapse so the dispatch is
+    // not held (docs/tui-perf-background-build-plan.md stage 4).
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    app.dispatch_transcript_build(Some(host));
+    render(app, host, 80, 24)
+}
+
+/// Enter browse on a fold session and run one settled frame.
+/// The frame primes the layout, the event starts, and the block spans.
+fn primed_browse_fold_app(events: Vec<Event>) -> (App, ExtHost, TempDir) {
+    let mut app = app_with_session(events);
+    app.set_viewport_height(24);
+    app.browse().enter();
+    let (host, tmp) = empty_host();
+    let _ = render_fold(&mut app, &host);
+    (app, host, tmp)
+}
+
+/// The L1 default. Entering browse renders every turn folded.
+/// Each turn shows the user box, a summary tally, and the final box.
+#[test]
+fn snap_turn_fold_all_folded() {
+    let (mut app, host, _tmp) = primed_browse_fold_app(fold_session_events());
+    let out = render_fold(&mut app, &host);
+    insta::assert_snapshot!(out);
+}
+
+/// `zo` opens the turn under the cursor.
+/// The intermediate message shows and the result stays a one-line header.
+#[test]
+fn snap_turn_fold_l2_open_results_folded() {
+    let (mut app, host, _tmp) = primed_browse_fold_app(fold_session_events());
+    app.press(Key::Char('z'));
+    app.press(Key::Char('o'));
+    // Settle: apply the pending fold-cursor remap so the next move is
+    // not clobbered by it.
+    let _ = render_fold(&mut app, &host);
+    // `G` to the tail: the folded result's "more lines" hint shows.
+    app.press(Key::Char('G'));
+    let out = render_fold(&mut app, &host);
+    insta::assert_snapshot!(out);
+}
+
+/// `zA` toggles every tool-result fold in the cursor turn.
+/// The cursor turn result expands while the other turn stays folded.
+#[test]
+fn snap_turn_fold_l3_open() {
+    let (mut app, host, _tmp) = primed_browse_fold_app(fold_session_events());
+    app.press(Key::Char('z'));
+    app.press(Key::Char('o'));
+    app.press(Key::Char('z'));
+    app.press(Key::Char('A'));
+    // Settle: apply the pending fold-cursor remap so the next move is
+    // not clobbered by it.
+    let _ = render_fold(&mut app, &host);
+    // `G` to the tail: the expanded result body shows in full.
+    app.press(Key::Char('G'));
+    let out = render_fold(&mut app, &host);
+    insta::assert_snapshot!(out);
+}
+
+/// A running loop renders the in-progress turn with the spinner line.
+/// The time-dependent braille frame is masked for determinism.
+#[test]
+fn snap_turn_fold_in_progress_spinner() {
+    let mut app = app_with_session(fold_session_events());
+    app.set_viewport_height(24);
+    let sid = app.active().cloned().unwrap();
+    app.attach_external_loop(sid);
+    app.browse().enter();
+    let (host, _tmp) = empty_host();
+    let out = render_fold(&mut app, &host);
+    let out = regex::Regex::new(r"[\u{2800}-\u{28ff}]+")
+        .unwrap()
+        .replace_all(&out, "[SPINNER]")
+        .into_owned();
+    insta::assert_snapshot!(out);
+}
+
+/// The cursor sits on the second turn summary; `zM` remaps it to
+/// the containing turn top (the remap the fold-state change owes).
+#[test]
+fn snap_turn_fold_cursor_remap() {
+    let (mut app, host, _tmp) = primed_browse_fold_app(fold_session_events());
+    app.press(Key::Char('j'));
+    app.press(Key::Char('j'));
+    app.press(Key::Char('j'));
+    app.press(Key::Char('j'));
+    app.press(Key::Char('j'));
+    app.press(Key::Char('z'));
+    app.press(Key::Char('M'));
+    let out = render_fold(&mut app, &host);
+    insta::assert_snapshot!(out);
+}
+
 // ── picker ──────────────────────────────────────────────────────────
 
 #[test]

@@ -468,6 +468,10 @@ pub struct App {
         Vec<Option<usize>>,
         u64,
         Vec<String>,
+        u64,
+        bool,
+        bool,
+        Option<usize>,
     )>,
     /// The incremental live-stream block cache. See
     /// docs/tui-perf-streaming-incremental-plan.md. None until the
@@ -559,6 +563,11 @@ pub struct App {
     /// Bumped whenever `block_fracs` changes so the transcript cache
     /// is invalidated and rebuilt with the new per-block expand state.
     frac_epoch: u64,
+    turn_fold: std::collections::HashSet<u64>,
+    turn_fold_epoch: u64,
+    z_fold_arm: Option<std::time::Instant>,
+    fold_cursor_target: Option<crate::fold::FoldCursorTarget>,
+    last_event_line_starts: Vec<Option<usize>>,
     /// The thinking-block visibility (Ctrl+T, docs/tui-thinking-block.md
     /// section 4). `true` renders the block; `false` hides it
     /// entirely.
@@ -778,6 +787,11 @@ impl App {
             transcript_top_row: 0,
             transcript_visible_start: 0,
             frac_epoch: 0,
+            turn_fold: std::collections::HashSet::new(),
+            turn_fold_epoch: 0,
+            z_fold_arm: None,
+            fold_cursor_target: None,
+            last_event_line_starts: Vec::new(),
             thinking_shown: true,
             thinking_expanded: true,
             follow_queue: false,
@@ -1108,6 +1122,292 @@ impl App {
         best.map(|(id, _)| id)
     }
 
+    pub fn fold_input(&self) -> Option<std::collections::HashSet<u64>> {
+        if self.browse.active() {
+            Some(self.turn_fold.clone())
+        } else {
+            None
+        }
+    }
+
+    pub fn set_event_line_starts(&mut self, starts: Vec<Option<usize>>) {
+        self.last_event_line_starts = starts;
+    }
+
+    fn cursor_turn(&self) -> Option<crate::fold::Turn> {
+        let (line, _) = self.browse.line_col();
+        let idx = crate::fold::event_at_line(&self.last_event_line_starts, line)?;
+        let running = self.active().is_some_and(|s| self.loop_running(s));
+        let turns = crate::fold::turns(self.events(), self.events_base_seq(), running);
+        let ti = crate::fold::turn_at(&turns, idx)?;
+        Some(turns[ti].clone())
+    }
+
+    fn fold_cursor_hit(&self) -> Option<crate::fold::FoldCursorTarget> {
+        let (line, _) = self.browse.line_col();
+        if let Some(id) = self.block_at_transcript_line(line) {
+            return Some(crate::fold::FoldCursorTarget::Block(id.to_string()));
+        }
+        self.cursor_turn()
+            .map(|t| crate::fold::FoldCursorTarget::Turn(t.seq))
+    }
+
+    fn bump_turn_fold(&mut self) {
+        self.turn_fold_epoch = self.turn_fold_epoch.wrapping_add(1);
+    }
+
+    fn fold_toggle_cursor(&mut self) {
+        let hit = match self.fold_cursor_hit() {
+            Some(h) => h,
+            None => return,
+        };
+        match hit {
+            crate::fold::FoldCursorTarget::Block(id) => {
+                self.toggle_block_expand(&id);
+                self.fold_cursor_target =
+                    Some(crate::fold::FoldCursorTarget::Block(id));
+            }
+            crate::fold::FoldCursorTarget::Turn(seq) => {
+                if self.turn_fold.contains(&seq) {
+                    self.turn_fold.remove(&seq);
+                } else {
+                    self.turn_fold.insert(seq);
+                }
+                self.bump_turn_fold();
+                self.fold_cursor_target =
+                    Some(crate::fold::FoldCursorTarget::Turn(seq));
+            }
+        }
+    }
+
+    fn fold_set_cursor_turn(&mut self, open: bool) {
+        let hit = match self.fold_cursor_hit() {
+            Some(h) => h,
+            None => return,
+        };
+        match hit {
+            crate::fold::FoldCursorTarget::Block(id) => {
+                let v: f64 = if open { 1.0 } else { 0.0 };
+                self.block_targets.insert(id.clone(), v);
+                self.block_fracs.insert(id.clone(), v);
+                self.frac_epoch = self.frac_epoch.wrapping_add(1);
+                self.fold_cursor_target =
+                    Some(crate::fold::FoldCursorTarget::Block(id));
+            }
+            crate::fold::FoldCursorTarget::Turn(seq) => {
+                if open {
+                    self.turn_fold.insert(seq);
+                } else {
+                    self.turn_fold.remove(&seq);
+                }
+                self.bump_turn_fold();
+                self.fold_cursor_target =
+                    Some(crate::fold::FoldCursorTarget::Turn(seq));
+            }
+        }
+    }
+
+    fn fold_toggle_results_in_turn(&mut self) {
+        let Some(t) = self.cursor_turn() else {
+            return;
+        };
+        let ids = crate::fold::tool_ids(self.events(), t.start + 1, t.end);
+        let any_open = ids.iter().any(|id| {
+            self.block_fracs
+                .get(id)
+                .copied()
+                .unwrap_or(0.0)
+                > 0.5
+                || self
+                    .block_targets
+                    .get(id)
+                    .copied()
+                    .unwrap_or(0.0)
+                    > 0.5
+        });
+        let target: f64 = if any_open { 0.0 } else { 1.0 };
+        for id in &ids {
+            self.block_targets.insert(id.clone(), target);
+            self.block_fracs.insert(id.clone(), target);
+        }
+        if !ids.is_empty() {
+            self.frac_epoch = self.frac_epoch.wrapping_add(1);
+        }
+        self.fold_cursor_target =
+            Some(crate::fold::FoldCursorTarget::Turn(t.seq));
+    }
+
+    fn fold_open_all(&mut self) {
+        let running = self.active().is_some_and(|s| self.loop_running(s));
+        let turns =
+            crate::fold::turns(self.events(), self.events_base_seq(), running);
+        for t in &turns {
+            self.turn_fold.insert(t.seq);
+        }
+        for id in self.all_tool_call_ids() {
+            self.block_targets.insert(id.clone(), 1.0);
+            self.block_fracs.insert(id.clone(), 1.0);
+        }
+        self.bump_turn_fold();
+        self.frac_epoch = self.frac_epoch.wrapping_add(1);
+        if let Some(t) = self.cursor_turn() {
+            self.fold_cursor_target =
+                Some(crate::fold::FoldCursorTarget::Turn(t.seq));
+        }
+    }
+
+    fn fold_close_all(&mut self) {
+        self.turn_fold.clear();
+        for id in self.all_tool_call_ids() {
+            self.block_targets.insert(id.clone(), 0.0);
+            self.block_fracs.insert(id.clone(), 0.0);
+        }
+        self.bump_turn_fold();
+        self.frac_epoch = self.frac_epoch.wrapping_add(1);
+        if let Some(t) = self.cursor_turn() {
+            self.fold_cursor_target =
+                Some(crate::fold::FoldCursorTarget::Turn(t.seq));
+        }
+    }
+
+    fn all_tool_call_ids(&self) -> Vec<String> {
+        self.events()
+            .iter()
+            .filter(|e| e.kind() == crate::event::EventKind::ToolCall)
+            .filter_map(|e| e.get_str("id").map(String::from))
+            .collect()
+    }
+
+    fn fold_jump(&mut self, total: usize, h: usize, next: bool) {
+        let (line, _) = self.browse.line_col();
+        let idx = match crate::fold::event_at_line(&self.last_event_line_starts, line) {
+            Some(i) => i,
+            None => return,
+        };
+        let running = self.active().is_some_and(|s| self.loop_running(s));
+        let turns =
+            crate::fold::turns(self.events(), self.events_base_seq(), running);
+        if turns.is_empty() {
+            return;
+        }
+        let cur = crate::fold::turn_at(&turns, idx).unwrap_or(0);
+        let target = if next {
+            if cur + 1 >= turns.len() {
+                return;
+            }
+            cur + 1
+        } else if cur > 0 {
+            cur - 1
+        } else {
+            return;
+        };
+        let Some(line) = self
+            .last_event_line_starts
+            .get(turns[target].start)
+            .copied()
+            .flatten()
+        else {
+            return;
+        };
+        self.browse.goto(total, h, line, &mut self.scroll);
+    }
+
+    pub fn apply_fold_cursor_target(&mut self) {
+        let Some(target) = self.fold_cursor_target.take() else {
+            return;
+        };
+        let line = match target {
+            crate::fold::FoldCursorTarget::Turn(seq) => {
+                let running =
+                    self.active().is_some_and(|s| self.loop_running(s));
+                let turns =
+                    crate::fold::turns(self.events(), self.events_base_seq(), running);
+                turns
+                    .iter()
+                    .find(|t| t.seq == seq)
+                    .and_then(|t| self.last_event_line_starts.get(t.start))
+                    .and_then(|s| *s)
+            }
+            crate::fold::FoldCursorTarget::Block(id) => {
+                let ev_idx = self.events().iter().position(|e| {
+                    e.kind() == crate::event::EventKind::ToolResult
+                        && e.get_str("id") == Some(id.as_str())
+                });
+                ev_idx
+                    .and_then(|i| self.last_event_line_starts.get(i))
+                    .and_then(|s| *s)
+            }
+        };
+        let Some(line) = line else {
+            return;
+        };
+        let Some((total, h, _, _, _)) = self.browse_layout.as_ref() else {
+            return;
+        };
+        self.browse.goto(*total, *h, line, &mut self.scroll);
+    }
+
+    pub fn fold_key(&mut self, c: char, total: usize, h: usize) -> bool {
+        if c == 'z' {
+            if self.browse.typing()
+                || self.browse.visual_selection().is_some()
+            {
+                return false;
+            }
+            self.z_fold_arm = Some(std::time::Instant::now());
+            self.flash("fold: z + a o c A R M j k");
+            return true;
+        }
+        let Some(armed_at) = self.z_fold_arm.take() else {
+            return false;
+        };
+        if armed_at.elapsed() > SS_ARM_TTL {
+            return false;
+        }
+        match c {
+            'a' => self.fold_toggle_cursor(),
+            'o' => self.fold_set_cursor_turn(true),
+            'c' => self.fold_set_cursor_turn(false),
+            'A' => self.fold_toggle_results_in_turn(),
+            'R' => self.fold_open_all(),
+            'M' => self.fold_close_all(),
+            'j' => self.fold_jump(total, h, true),
+            'k' => self.fold_jump(total, h, false),
+            _ => {
+                self.flash(format!("z{c} unbound"));
+            }
+        }
+        true
+    }
+
+    /// Browse-mode click: move the cursor to the clicked transcript
+    /// line and toggle the L3 tool-result fold under it
+    /// (docs/tui-turn-fold.md, key table: "click").
+    pub fn browse_click(&mut self, line: usize, col: usize) {
+        if !self.browse.active() {
+            return;
+        }
+        let Some((total, h, _, _, _)) = self.browse_layout.as_ref() else {
+            return;
+        };
+        self.browse
+            .goto_line(*total, *h, line, col, &mut self.scroll);
+        let id = self.block_at_transcript_line(line).map(str::to_owned);
+        if let Some(id) = id {
+            self.toggle_block_expand(&id);
+            self.fold_cursor_target = Some(crate::fold::FoldCursorTarget::Block(id));
+        }
+    }
+
+    pub fn transcript_live_summary(
+        &mut self,
+        width: usize,
+        ext: Option<&crate::ext::ExtHost>,
+    ) -> Option<usize> {
+        let _ = self.transcript_lines(width, ext);
+        self.transcript_cache.as_ref().and_then(|c| c.14)
+    }
+
     /// The input queue toggle state (Ctrl+F): the next draft sends
     /// to the follow queue when `true`.
     pub fn follow_queue(&self) -> bool {
@@ -1173,6 +1473,19 @@ impl App {
             self.transcript_desired_key = None;
             self.transcript_build_in_flight = false;
             self.transcript_width_debounce = None;
+            self.turn_fold.clear();
+            self.turn_fold_epoch = self.turn_fold_epoch.wrapping_add(1);
+            // A fresh session starts all folded at every level
+            // (docs/tui-turn-fold.md): clear the per-result expand
+            // state of the old session too.
+            self.block_fracs.clear();
+            self.block_targets.clear();
+            self.block_anim_from.clear();
+            self.block_anim_start.clear();
+            self.frac_epoch = self.frac_epoch.wrapping_add(1);
+            self.z_fold_arm = None;
+            self.fold_cursor_target = None;
+            self.last_event_line_starts.clear();
         }
         self.active = Some(id);
         self.events = events;
@@ -1550,6 +1863,9 @@ impl App {
             palette_level: self.palette.level(),
             palette: self.palette.clone(),
             frac_epoch: self.frac_epoch,
+            turn_fold_epoch: self.turn_fold_epoch,
+            fold_active: self.browse.active(),
+            loop_running: self.active().is_some_and(|s| self.loop_running(s)),
         };
         // A partial tail cache matches the key but does not satisfy
         // it: the full build is still owed, so it misses too.
@@ -1650,6 +1966,9 @@ impl App {
                 && c.3 == key.palette_level
                 && c.4 == key.palette
                 && c.9 == key.frac_epoch
+                && c.11 == key.turn_fold_epoch
+                && c.12 == key.fold_active
+                && c.13 == key.loop_running
         })
     }
 
@@ -1672,6 +1991,10 @@ impl App {
             build.event_line_starts.clone(),
             key.frac_epoch,
             build.texts.clone(),
+            key.turn_fold_epoch,
+            key.fold_active,
+            key.loop_running,
+            build.live_summary,
         ));
         self.transcript_partial = partial;
     }
@@ -1710,8 +2033,14 @@ impl App {
     /// One-line render of a build key for the trace log.
     fn fmt_key(key: &crate::transcript_worker::BuildKey) -> String {
         format!(
-            "ev={} w={} ext={} frac={}",
-            key.events_version, key.width, key.ext_ver, key.frac_epoch
+            "ev={} w={} ext={} frac={} fold={} za={} run={}",
+            key.events_version,
+            key.width,
+            key.ext_ver,
+            key.frac_epoch,
+            key.turn_fold_epoch,
+            key.fold_active,
+            key.loop_running
         )
     }
 
@@ -2175,13 +2504,17 @@ impl App {
             self.flash("building: y and gg wait for the full build");
             return;
         }
-        let (total, h, texts, line_raw) = match &self.browse_layout {
-            Some((total, h, _w, texts, line_raw)) => (
-                *total,
-                *h,
-                texts.as_slice(),
-                line_raw.as_slice(),
-            ),
+        let (total, h) = match &self.browse_layout {
+            Some((total, h, _w, _t, _r)) => (*total, *h),
+            None => return,
+        };
+        if let Key::Char(c) = key {
+            if self.fold_key(c, total, h) {
+                return;
+            }
+        }
+        let (texts, line_raw) = match &self.browse_layout {
+            Some((_, _, _, texts, line_raw)) => (texts.as_slice(), line_raw.as_slice()),
             None => return,
         };
         let half = self.half_page();
