@@ -2,7 +2,7 @@
 
 Status: Spec (approved for build).
 
-Last updated: 2026-09-13.
+Last updated: 2026-09-14.
 
 Scope: eliminate the per-frame O(n) cost of rendering the live
 stream block (thinking + response text) when the content grows to
@@ -15,7 +15,7 @@ optimisation (#2) as a prerequisite.
 
 `stream_block_lines` (`bin/tui/src/render.rs:1972`) is called on
 every draw. While a response is streaming the main loop ticks at
-16 ms (about 60 FPS, `main.rs:604`). Each call does:
+16 ms (about 60 FPS, `main.rs:605`). Each call does:
 
 1. `wrap_thinking` — creates a **new** `CodeHl` (tree-sitter or
    builtin) and re-highlights **every** hard line in the entire
@@ -103,8 +103,46 @@ pub(crate) struct StreamBlockCache {
     palette_level: crate::color::Level,
     engine: crate::tool_display::HighlightEngine,
     thinking_expanded: bool,
+
+    // ── join-skip fingerprint ───────────────────────────
+    /// Cheap way to detect that the `reasoning` map is unchanged
+    /// without re-joining it. `think_reasoning_keys` is the sorted
+    /// id set; `think_reasoning_len` is the total char length
+    /// across all values. If both match the previous frame, the
+    /// O(T) join is skipped (see "Join-skip optimisation").
+    think_reasoning_keys: Vec<String>,
+    think_reasoning_len: usize,
+}
+
+impl StreamBlockCache {
+    /// Construct the cache for the active highlight engine.
+    /// `CodeHl` is engine-dependent and has no `Default`, so the
+    /// cache must be built with the engine it will use.
+    fn new(engine: crate::tool_display::HighlightEngine) -> Self {
+        // `think_hl` starts fresh; all other fields start empty /
+        // default and are filled on the first build.
+        Self {
+            think_src: String::new(),
+            think_lines: Vec::new(),
+            think_hl: crate::tool_display::CodeHl::new(engine),
+            think_in_fence: false,
+            think_fence_lang: None,
+            text_src: String::new(),
+            text_lines: Vec::new(),
+            width: 0,
+            palette_level: crate::color::Level::DEFAULT,
+            engine,
+            thinking_expanded: false,
+            think_reasoning_keys: Vec::new(),
+            think_reasoning_len: 0,
+        }
+    }
 }
 ```
+
+Note: `StreamBlockCache` is `!Send` (it owns `CodeHl`, which may
+hold a tree-sitter parser). That is fine — it lives on the main
+thread alongside `App`.
 
 Add to `App`:
 
@@ -125,10 +163,10 @@ Split it into two functions:
 ```rust
 /// Wrap an **incremental suffix** of thinking text.
 ///
-/// `prev_lines` are the already-wrapped lines for the prefix.
 /// `hl`, `in_fence`, `fence_lang` carry the state from the
-/// previous call. Returns the new lines for the suffix plus the
-/// updated state.
+/// previous call (the already-wrapped prefix lines live in the
+/// cache, not as a parameter). Returns the new lines for the
+/// suffix plus the updated fence state.
 pub(crate) fn wrap_thinking_delta(
     suffix: &str,
     wrap_w: usize,
@@ -155,7 +193,16 @@ settled-transcript builds, which are non-incremental).
 ### Refactor `stream_block_lines`
 
 ```
-fn stream_block_lines(app, width, max_body_lines) -> Vec<Line> {
+struct StreamBlockView<'a> {
+    header:    Vec<Line<'static>>,   // 1 line, built fresh
+    think:     &'a [Line<'static>],  // borrowed from cache
+    text:      &'a [Line<'static>],  // borrowed from cache
+    tool_args: Vec<Line<'static>>,   // a few lines, built fresh
+    cursor:    Option<Line<'static>>,
+}
+
+fn stream_block_lines<'a>(app: &'a App, width, max_body_lines)
+    -> StreamBlockView<'a> {
     buf = app.stream_buf()?;
     cache = app.stream_block_cache_mut();
 
@@ -169,57 +216,98 @@ fn stream_block_lines(app, width, max_body_lines) -> Vec<Line> {
         );
 
     if needs_invalidate {
-        cache = Some(StreamBlockCache::default());
+        cache = Some(StreamBlockCache::new(app.tool_display().highlight_engine));
     }
+
+    // Record the config snapshot AFTER the decision, so the next
+    // frame's `needs_invalidate` check reads the current values.
+    // Without this, the sentinel `width = 0` from `new()` would
+    // never match and the cache would rebuild every frame.
+    cache.width = width;
+    cache.palette_level = app.palette().level();
+    cache.engine = *app.tool_display().highlight_engine;
+    cache.thinking_expanded = app.thinking_expanded();
 
     // ── thinking section ──────────────────────────────
-    let mut think_lines: Vec<Line> = Vec::new();
-    if app.thinking_shown() && !buf.reasoning.is_empty() {
-        let joined = thinking_text(Some(&buf.reasoning_values())).unwrap_or_default();
-        if joined.starts_with(&cache.think_src) {
-            // Incremental: wrap only the suffix.
-            let suffix = &joined[cache.think_src.len()..];
-            let (new_lines, in_fence, fence_lang) =
-                wrap_thinking_delta(suffix, wrap_w, palette, style,
-                                    &mut cache.think_hl,
-                                    cache.think_in_fence,
-                                    cache.think_fence_lang.as_deref());
-            cache.think_lines.extend(new_lines);
-            cache.think_in_fence = in_fence;
-            cache.think_fence_lang = fence_lang;
-            cache.think_src = joined;
-            think_lines = cache.think_lines.clone();
+    let think_lines: &[Line] = if app.thinking_shown() && !buf.reasoning.is_empty() {
+        // Join-skip: fingerprint the reasoning map cheaply.
+        // `StreamBuf.reasoning` is a `HashMap<String, String>`.
+        // If the key set and total length are unchanged, the joined
+        // string is unchanged, so skip the O(T) join entirely.
+        let mut cur_keys: Vec<String> =
+            buf.reasoning.keys().cloned().collect();
+        cur_keys.sort();
+        let cur_len: usize =
+            buf.reasoning.values().map(|s| s.len()).sum();
+
+        if cur_keys == cache.think_reasoning_keys
+            && cur_len == cache.think_reasoning_len
+        {
+            // Fingerprint unchanged: borrow the cached lines.
+            &cache.think_lines[..]
         } else {
-            // Full rebuild (first call, invalidation, or re-order).
-            let (lines, in_fence, fence_lang) =
-                wrap_thinking_full(&joined, wrap_w, palette, style,
-                                   &mut cache.think_hl,
-                                   cache.think_in_fence,
-                                   cache.think_fence_lang.as_deref());
-            cache.think_lines = lines.clone();
-            cache.think_in_fence = in_fence;
-            cache.think_fence_lang = fence_lang;
-            cache.think_src = joined;
-            think_lines = cache.think_lines.clone();
+            // Re-join (O(T)) only when the map actually changed.
+            let joined = buf.reasoning_text();
+            cache.think_reasoning_keys = cur_keys;
+            cache.think_reasoning_len = cur_len;
+
+            if joined.starts_with(&cache.think_src) {
+                // Incremental: wrap only the suffix.
+                let suffix = &joined[cache.think_src.len()..];
+                let (new_lines, in_fence, fence_lang) =
+                    wrap_thinking_delta(suffix, wrap_w, palette, style,
+                                         &mut cache.think_hl,
+                                         cache.think_in_fence,
+                                         cache.think_fence_lang.as_deref());
+                cache.think_lines.extend(new_lines);
+                cache.think_in_fence = in_fence;
+                cache.think_fence_lang = fence_lang;
+                cache.think_src = joined;
+            } else {
+                // Full rebuild (first call, invalidation, or re-order).
+                let (lines, in_fence, fence_lang) =
+                    wrap_thinking_full(&joined, wrap_w, palette, style,
+                                       &mut cache.think_hl,
+                                       cache.think_in_fence,
+                                       cache.think_fence_lang.as_deref());
+                cache.think_lines = lines;
+                cache.think_in_fence = in_fence;
+                cache.think_fence_lang = fence_lang;
+                cache.think_src = joined;
+            }
+            &cache.think_lines[..]
         }
-    }
+    } else {
+        &[]
+    };
 
     // ── response-text section ─────────────────────────
-    let text_lines: Vec<Line> = if buf.text.is_empty() {
-        Vec::new()
+    let text_lines: &[Line] = if buf.text.is_empty() {
+        &[]
     } else if cache.text_src == buf.text {
-        cache.text_lines.clone()          // unchanged: reuse
+        &cache.text_lines[..]          // unchanged: borrow, no clone
     } else {
         let lines = wrap_markdown_p(&buf.text, wrap_w, palette, prose);
         cache.text_src = buf.text.clone();
-        cache.text_lines = lines.clone();
-        cache.text_lines.clone()
+        cache.text_lines = lines;
+        &cache.text_lines[..]
     };
 
-    // Sliding window, tool_args, header — same as today.
-    …
+    // Build the view: borrow the big cached sections, and build the
+    // small fresh pieces (header, tool_args, cursor) as owned lines.
+    // The sliding-window / tool_args / header logic is unchanged.
+    StreamBlockView {
+        header, think: think_lines, text: text_lines, tool_args, cursor,
+    }
 }
 ```
+
+The cached `think` / `text` sections are returned as **borrowed
+slices** (per the "Clone avoidance" decision), so an idle frame
+copies nothing. Only the small fresh pieces (header, tool-args,
+cursor) are allocated per frame. The caller (render.rs) renders the
+pieces in order instead of a single flat `Vec`, which is a modest
+change at render.rs:3558.
 
 ### Invalidation rules
 
@@ -247,26 +335,101 @@ transcript via the `assistant_message` event) must set
 the `CodeHl` (which holds a tree-sitter parser) so memory returns
 to the baseline.
 
+### Join-skip optimisation (in scope)
+
+The wrapped-line cache still recomputes the source join every frame.
+`StreamBuf::reasoning_text()` sorts the `reasoning` keys and joins
+the values, which is an O(T) copy even on a pure cache hit.
+The fix fingerprints the `reasoning` map so the join is skipped
+when nothing changed.
+
+Two new cache fields track the key set and total value length:
+
+```rust
+think_reasoning_keys: Vec<String>,   // sorted id set
+think_reasoning_len: usize,          // total chars across all values
+```
+
+In `stream_block_lines`, compare the fingerprint before joining.
+On a match, skip the join and reuse the cached lines.
+On a mismatch, re-join once, refresh the fingerprint, then run
+the prefix-vs-suffix check as before.
+
+The fingerprint is exact for the streaming path.
+Reasoning values grow only via `push_str`, and the id set only
+grows within a stream. The pair (sorted keys, total length)
+changes only when the map changes. The check costs O(k log k)
+where k is the number of reasoning ids, usually 1 to 2.
+
+### Clone avoidance: borrowed slices (decided)
+
+The wrapped-line cache still copies O(T) memory on every frame.
+`stream_block_lines` returns an owned `Vec<Line<'static>>`, so a
+cache hit clones the whole vector. Each `Line` owns a `Vec<Span>`,
+and each `Span` owns its content string. That copy happens every
+idle frame for no benefit.
+
+**Decision: return a `StreamBlockView<'a>` with borrowed slices.**
+
+`StreamBlockView` borrows the big `think` and `text` sections
+from the cache as `&'a [Line<'static>]`. The lifetime `'a` is tied
+to `&'a App`. The small fresh pieces (header, tool_args, cursor)
+are owned `Vec`s built per frame. On a cache hit the big sections
+cost nothing. The caller renders the pieces in order at
+render.rs:3558.
+
+Considered and rejected:
+
+- **`Rc<Vec<Line<'static>>>` in the cache.** Cloning the `Rc`
+  on a hit is O(1), but the caller still calls `rc.to_vec()`,
+  paying the O(T) copy again. Not a fix on its own.
+- **Per-line `Cow<'a, Line<'static>>`.** Adds indirection.
+  A section is either fully fresh or fully cached, so per-line
+  ownership adds no benefit over a plain slice.
+
+The incremental-append path still builds a new `Vec` from old
+lines plus the new delta, at O(T+D). That copy is unavoidable
+with a `Vec`. Structural sharing (a persistent deque) would
+remove it, but that is out of scope. The dominant win is
+removing the per-frame O(T) clone on idle frames.
+
+### Residual caveats
+
+The prefix check `starts_with` on the joined thinking string
+succeeds only when the growing value is last in sorted-key order.
+If an earlier id gains text, the join changes at a non-suffix
+position. The `starts_with` check then fails, so the thinking
+section does a full O(T) rebuild. That is correct but not
+incremental. The common streaming case (one growing reasoning
+item) stays incremental.
+
+`wrap_thinking_delta` processes hard lines, so the suffix must
+start at a hard-line boundary. This holds today because deltas
+append to whole reasoning values via `push_str`. Each value's hard
+lines are separated by a newline. Document the assumption so a
+future mid-line edit path cannot silently corrupt wrapping.
+
 ## Performance model
 
 Let `T` = total thinking chars, `D` = new chars this frame,
-`W` = total response-text chars.
+`W` = total response-text chars, `k` = reasoning id count.
 
 | Frame type | Before (current) | After (incremental) |
 |---|---|---|
-| Streaming (D > 0) | O(T) highlight + O(W) markdown parse | O(D) highlight + O(W) markdown parse (text still re-parses) |
-| Idle (D = 0, W unchanged) | O(T) + O(W) | O(1) (cache hit, no work) |
-| Idle (D = 0, W growing) | O(T) + O(W) | O(T) cached + O(W) re-parse |
+| Streaming (D > 0) | O(T) highlight + O(W) markdown parse | O(D) highlight + O(W) markdown parse + O(k log k) fingerprint |
+| Idle (D = 0, W unchanged) | O(T) + O(W) | O(k log k) fingerprint + O(1) borrow (no join, no clone) |
+| Idle (D = 0, W growing) | O(T) + O(W) | O(k log k) fingerprint + O(W) re-parse |
 | Width change | O(T) + O(W) | O(T) + O(W) (full rebuild, same as before) |
 
 For a 50 KB thinking block at 60 FPS, the before cost is
-~50 KB × 60 = 3 MB/s of tree-sitter work. After, it is
+~50 KB × 60 = 3 MB/s of tree-sitter work. After, highlighting is
 O(D × 60) where D is the per-frame delta (a few hundred chars).
-The idle cost drops from O(T+W) to O(1).
+The join-skip fingerprint reduces the idle cost to O(k log k).
+The borrowed-slice return eliminates the per-frame O(T) clone.
 
 The response-text path still re-parses on every frame where the
 text changed (pacing releases chars every frame). A true
-incremental markdown parser is a future improvement; the
+incremental markdown parser is a future improvement. The
 `cache-if-unchanged` optimisation at least avoids the re-parse
 on frames where no new text was released.
 
@@ -303,19 +466,31 @@ All tests live in `bin/tui/src/render.rs` (or a new
      side-channel counter on `render_markdown_lines`).
 
 5. **`reasoning_reorder_triggers_full_rebuild`**
-   - Start with reasoning id `"a"`. Add reasoning id `"a"` more
-     text (append — fine, incremental). Then add a new reasoning
-     id `"b"` that sorts before `"a"`. The joined text changes
-     at a position before the prefix end, so `starts_with` fails
-     → full rebuild. Assert output matches a full rebuild.
+   - Start with reasoning ids `"a"` and `"b"`. Append more text to
+     `"b"` (the last in sort order) — incremental, `starts_with`
+     holds. Then append text to `"a"` (earlier in sort order): the
+     joined string changes at a non-suffix position, so
+     `starts_with` fails → full rebuild. Assert output matches a
+     full rebuild.
 
 6. **`clear_stream_drops_cache`**
    - Build the cache, call `clear_stream()`, assert
      `stream_block_cache` is `None`.
 
+7. **`join_skip_on_unchanged_reasoning`**
+   - Build the cache with reasoning text, then call again with
+     the same `reasoning` map (no new deltas).
+   - Assert `reasoning_text()` was not called (via a counter or
+     spy). The cached `think_lines` are returned as-is.
+
+8. **`join_triggers_on_reasoning_change`**
+   - Build the cache, then append to a reasoning value.
+   - Assert the fingerprint mismatch causes a re-join and the
+     incremental path picks up the new suffix.
+
 ### Perf gate (in `perf_bgbuild_tests` or a new mod)
 
-7. **`streaming_thinking_per_frame_stays_under_budget`**
+9. **`streaming_thinking_per_frame_stays_under_budget`**
    - Create 200 KB of thinking text (with code fences).
    - Simulate 60 frames: each frame appends ~3 KB (1/60 of total),
      calls `stream_block_lines`, times it.
@@ -323,13 +498,17 @@ All tests live in `bin/tui/src/render.rs` (or a new
    - Also assert the *average* per-frame time is < 10 ms,
      proving the incremental path is not doing O(total) work.
 
-8. **`idle_frame_is_o1`**
+10. **`idle_frame_is_cached`**
    - After the cache is warm and no new deltas arrive, a frame
      (cache hit, no text change) should complete in < 2 ms.
+     With the join-skip and borrowed-slice optimisations, the
+     residual cost is O(k log k) fingerprint comparison. No
+     highlighting, join, or markdown re-parse runs on the hot
+     path.
 
 ### Integration / snapshot
 
-9. **Existing insta snapshots** for the stream block must stay
+11. **Existing insta snapshots** for the stream block must stay
    green. The incremental path must produce byte-identical output
    to the current full-rebuild path for the same input.
 
@@ -337,8 +516,8 @@ All tests live in `bin/tui/src/render.rs` (or a new
 
 | File | Change |
 |---|---|
-| `bin/tui/src/app.rs` | Add `StreamBlockCache` struct + `stream_block_cache` field. Init in `App::new`. Clear in `clear_stream`. Expose `stream_block_cache_mut()` for the render fn. |
-| `bin/tui/src/render.rs` | Split `wrap_thinking` into `wrap_thinking_full` (non-incremental, used by settled builds) and `wrap_thinking_delta` (incremental). Rewrite `stream_block_lines` to use the cache. |
+| `bin/tui/src/app.rs` | Add `StreamBlockCache` struct (with `think_reasoning_keys` / `think_reasoning_len` fingerprint fields) + `stream_block_cache` field + `StreamBuf::reasoning_text()` helper (joins the sorted `reasoning` map). Init in `App::new`. Clear in `clear_stream`. Expose `stream_block_cache_mut()` for the render fn. `StreamBlockCache` is `!Send` (owns `CodeHl`) — fine, lives on the main thread. |
+| `bin/tui/src/render.rs` | Split `wrap_thinking` into `wrap_thinking_full` (non-incremental, used by settled builds) and `wrap_thinking_delta` (incremental). Rewrite `stream_block_lines` to use the cache and return a `StreamBlockView<'a>` (borrowed `think` / `text` slices + fresh `header` / `tool_args` / `cursor`). Update the call site at render.rs:3558 to render the view's pieces in order. |
 | `bin/tui/src/tool_display.rs` | No change. `CodeHl` is already stateful and `Send`-free (lives on the main thread). |
 | `bin/tui/src/main.rs` | No change. |
 | `bin/tui/src/render.rs` tests | New test mod or extend existing. |
