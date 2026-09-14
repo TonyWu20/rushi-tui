@@ -314,8 +314,11 @@ impl TuiConfig {
         let active_model = raw.active.as_ref().and_then(|a| a.model.clone());
 
         // An explicit `[tui] color` forces the level; unknown names are a
-        // hard error, like the other keys. Absent means detect.
+        // hard error, like the other keys. Absent or empty means detect.
+        // A generator that materializes every key (Nix) writes `""` for
+        // keys the kernel does not set, so an empty value reads as absent.
         let color = match raw.tui.as_ref().and_then(|t| t.color.clone()) {
+            Some(c) if c.trim().is_empty() => None,
             Some(c) => {
                 let lvl = Level::from_cfg(&c).ok_or_else(|| {
                     format!(
@@ -379,7 +382,15 @@ impl TuiConfig {
             }
             custom_schemes.insert(name, roles);
         }
-        if let Some(name) = raw.tui.as_ref().and_then(|t| t.color_scheme.clone()) {
+        // An empty `color_scheme` is the "unset" marker a generator
+        // writes for a key the kernel does not set. It reads as absent:
+        // the built-in palette stands.
+        let raw_scheme = raw
+            .tui
+            .as_ref()
+            .and_then(|t| t.color_scheme.clone())
+            .filter(|n| !n.trim().is_empty());
+        if let Some(name) = raw_scheme.clone() {
             let normalized = name.replace('-', " ");
             let known = name == crate::color::SCHEME_CATPPUCCIN_MACCHIATO
                 || normalized == crate::color::SCHEME_CATPPUCCIN_MACCHIATO
@@ -393,13 +404,15 @@ impl TuiConfig {
                 ));
             }
         }
-        let color_scheme = raw.tui.as_ref().and_then(|t| t.color_scheme.clone());
+        let color_scheme = raw_scheme;
 
         // The `[tui] clipboard` flag (docs/tui-conversation-browsing.md
         // section 11.3): `unnamed` routes a bare browse `y` to the
         // host clipboard (the OSC 52 write). An unknown value is a
-        // hard error at load, like the other keys.
+        // hard error at load, like the other keys. An empty value is
+        // the "unset" marker and reads as the default.
         let clipboard_unnamed = match raw.tui.as_ref().and_then(|t| t.clipboard.clone()) {
+            Some(v) if v.trim().is_empty() => false,
             Some(v) if v.eq_ignore_ascii_case("unnamed") => true,
             Some(v) => {
                 return Err(format!(
@@ -782,6 +795,71 @@ plain_text = "#cdd6f4"
             "no scheme: the built-in palette stands"
         );
         assert!(cfg.custom_schemes.is_empty());
+    }
+
+    // A config generator that writes every key (Nix, `rushi setup`)
+    // emits `""` for fields the kernel does not set. Empty values must
+    // read as absent, not as unknown values.
+
+    #[test]
+    fn empty_color_value_reads_as_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "config.toml", "[tui]\ncolor = \"\"\n");
+        let cfg = TuiConfig::load(dir.path().join("config.toml").to_str().unwrap()).unwrap();
+        assert!(cfg.color.is_none(), "empty color means detect");
+    }
+
+    #[test]
+    fn empty_color_scheme_value_reads_as_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "config.toml", "[tui]\ncolor_scheme = \"\"\n");
+        let cfg = TuiConfig::load(dir.path().join("config.toml").to_str().unwrap()).unwrap();
+        assert!(
+            cfg.color_scheme.is_none(),
+            "empty scheme means the built-in palette stands"
+        );
+    }
+
+    #[test]
+    fn empty_clipboard_value_reads_as_default() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "config.toml", "[tui]\nclipboard = \"\"\n");
+        let cfg = TuiConfig::load(dir.path().join("config.toml").to_str().unwrap()).unwrap();
+        assert!(!cfg.clipboard_unnamed, "empty clipboard means the default");
+    }
+
+    #[test]
+    fn generated_full_materialized_tui_section_loads() {
+        // Mirrors the `[tui]` block a Nix `rushi-configured` package
+        // generates: empty strings for the kernel-unset keys, real
+        // values for the module-set ones. Loading must succeed.
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "config.toml",
+            r#"
+[tui]
+binary = ""
+clipboard = "unnamed"
+color = ""
+color_scheme = ""
+ext_dirs = []
+
+[tui.tool_display]
+preset = "opencode"
+bash_collapsed_lines = 5
+highlight_engine = "tree-sitter"
+expand_mode = "click"
+anim_ms = 400
+diff_collapsed_lines = 12
+diff_view = "auto"
+"#,
+        );
+        let cfg = TuiConfig::load(dir.path().join("config.toml").to_str().unwrap()).unwrap();
+        assert!(cfg.color.is_none());
+        assert!(cfg.color_scheme.is_none());
+        assert!(cfg.clipboard_unnamed, "unnamed keeps the flag on");
+        assert!(cfg.ext_dirs.is_empty());
     }
 
     // The `custom_schemes` TOML key is an alias for `color_schemes`;
