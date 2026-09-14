@@ -93,22 +93,22 @@
 
           devShells = {
             default = pkgs.mkShell.override { stdenv = moldStdenv; } {
-              buildInputs = [
+              buildInputs = with pkgs;[
                 rustToolchain
                 # The tree-sitter grammar crates (tui-highlight) compile
                 # C parser sources via the `cc` build-dep; the fenix
                 # Rust toolchain does not ship a C compiler.
-                pkgs.stdenv.cc
-                pkgs.jq
-                pkgs.python3
-                pkgs.file
+                stdenv.cc
+                jq
+                python3
+                file
                 # Lean toolchain for the DRT gate (`lake build` +
                 # `lean-verify` op=drt against bin/tui-stream-drt):
                 # `lean`, `lake`, and `z3` on PATH. `leanPackages.mathlib`
                 # exports LEAN_PATH with the Nix-prebuilt oleans.
-                pkgs.lean4
-                pkgs.z3
-                pkgs.leanPackages.mathlib
+                lean4
+                z3
+                leanPackages.mathlib
                 # The Nix-built `rushi` launcher (kernel flake packages.default).
                 # The launcher finds `tui` on PATH after its side-by-side
                 # check (resolve_tui_binary); the .envrc export of
