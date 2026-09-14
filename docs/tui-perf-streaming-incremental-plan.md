@@ -304,12 +304,18 @@ fn stream_block_lines<'a>(app: &'a App, width, max_body_lines)
 }
 ```
 
-The call site at render.rs:3558 uses only `.len()`, index access,
-and ordered iteration. `StreamBlockView` provides all three, so no
-flat `Vec` is needed. On an idle frame the borrowed slices cost
-nothing. The only per-frame mutation is the cursor, which blinks by
-overlaying a span on the last body line. That overlay is O(1), not
-O(T).
+The single call site (render.rs:3558) consumes the value three
+ways: `.len()` at 3559, index access at 3620, and `.iter()` at
+3651. `StreamBlockView` implements all three over the header,
+think, text, tool_args order, so no flat `Vec` is needed. The
+browse/yank path at 3651 is unaffected. On an idle frame the
+borrowed slices cost nothing.
+
+One subtlety: the cursor is a span overlaid on the last body line
+(render.rs:2140). `iter()` and `get()` must yield that last line
+with the cursor span applied. This keeps the 3651 stringification
+byte-identical to today's flat `Vec`. When the body is empty the
+cursor is its own line instead.
 
 ### Invalidation rules
 
