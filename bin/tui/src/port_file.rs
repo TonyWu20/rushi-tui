@@ -69,7 +69,7 @@ const TAIL_CHUNK_BYTES: u64 = 64 * 1024;
 pub struct FileSessionPort {
     sessions_root: PathBuf,
     loop_cmd: Option<LoopCommand>,
-    config_dir: PathBuf,
+    working_dir: PathBuf,
     config_path: PathBuf,
 }
 
@@ -78,7 +78,13 @@ impl FileSessionPort {
         FileSessionPort {
             sessions_root: cfg.sessions_root.clone(),
             loop_cmd: cfg.loop_cmd.clone(),
-            config_dir: cfg.config_dir.clone(),
+            // The loop runs where the user launched the TUI, not where
+            // the config file lives. Under Nix the config dir is the
+            // read-only store path; the loop's cwd (and so its
+            // relative session paths and tool working directories)
+            // must stay in the user's project.
+            working_dir: std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from(".")),
             config_path: cfg.config_path.clone(),
         }
     }
@@ -595,7 +601,10 @@ impl SessionPort for FileSessionPort {
         let program = argv[0].clone();
         let mut cmd = tokio::process::Command::new(&program);
         cmd.args(&argv[1..]);
-        cmd.current_dir(&self.config_dir);
+        // The loop inherits the user's working directory (see the
+        // working_dir field). The CONFIG env var still points the loop
+        // at the packaged config file.
+        cmd.current_dir(&self.working_dir);
         cmd.env("CONFIG", &self.config_path);
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());

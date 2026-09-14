@@ -2,7 +2,8 @@
 //!
 //! The TUI reads these parts of the shared harness config file:
 //! - `[paths] sessions_root` — where session directories live
-//!   (shared with the kernel; the TUI only re-reads this key)
+//!   (shared with the kernel; the TUI only re-reads this key). A
+//!   relative value resolves against the process working directory.
 //! - `[active] model` — the active model name (shared with the kernel;
 //!   the TUI re-reads it for the extension `tick` payload)
 //! - `[loop]` — the opaque loop command (docs/tui.md section 2.3)
@@ -11,9 +12,10 @@
 //!   `color_scheme`, `color_schemes`, `tool_display`, `clipboard`
 //!
 //! The kernel-owned sections (`[model]`, `[limits]`, `[hooks]`,
-//! `[system_prompt]`) are ignored here. Relative paths resolve against
-//! the config file's directory, so the TUI behaves the same no matter
-//! where it is launched from.
+//! `[system_prompt]`) are ignored here. Tool and extension paths
+//! resolve against the config file's directory. `sessions_root`
+//! resolves against the process working directory, so a Nix store
+//! install keeps sessions in the user's project.
 
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
@@ -58,7 +60,10 @@ impl LoopCommand {
 /// Everything the TUI needs from the config file.
 #[derive(Debug, Clone)]
 pub struct TuiConfig {
-    /// Absolute directory that contains session directories.
+    /// Directory that contains session directories. A relative
+    /// `sessions_root` resolves against the process working
+    /// directory, so a Nix install keeps sessions in the user's
+    /// project, not the read-only store.
     pub sessions_root: PathBuf,
     /// The opaque loop command, if configured.
     pub loop_cmd: Option<LoopCommand>,
@@ -282,7 +287,15 @@ impl TuiConfig {
             .as_ref()
             .and_then(|p| p.sessions_root.clone())
             .unwrap_or_else(|| "sessions".to_string());
-        let sessions_root = resolve(&config_dir, sessions_root);
+        // Sessions are project state, not package state. A relative
+        // sessions_root resolves against the process working
+        // directory (the user's project), not the config dir. Under
+        // Nix the config dir is a read-only store path, so sessions
+        // must stay in the user's project. The kernel resolves a
+        // relative sessions_root the same way (bin/rushi/src/config.rs
+        // keeps it relative and joins it against the loop cwd at use
+        // time). An absolute value is kept as given.
+        let sessions_root = resolve_cwd(&sessions_root);
 
         let loop_cmd = match raw.loop_cmd {
             Some(l) => {
@@ -528,7 +541,7 @@ impl TuiConfig {
                     .unwrap_or_else(|| PathBuf::from("."))
             });
         TuiConfig {
-            sessions_root: config_dir.join("sessions"),
+            sessions_root: resolve_cwd("sessions"),
             loop_cmd: None,
             config_dir,
             config_path: path.to_path_buf(),
@@ -554,6 +567,22 @@ fn resolve(base: &Path, p: String) -> PathBuf {
     }
 }
 
+/// Resolve a `sessions_root` value: an absolute path is kept as
+/// given, a relative path anchors to the process working directory.
+/// The config dir is wrong for sessions: a Nix install keeps
+/// `config.toml` in the read-only store, and session directories must
+/// be writable inside the user's project.
+fn resolve_cwd(p: &str) -> PathBuf {
+    let p = PathBuf::from(p);
+    if p.is_absolute() {
+        p
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(p)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -568,7 +597,7 @@ mod tests {
         let p = dir.path().join("config.toml");
         let cfg = TuiConfig::load(p.to_str().unwrap()).unwrap();
         assert!(cfg.loop_cmd.is_none());
-        assert_eq!(cfg.sessions_root, dir.path().join("sessions"));
+        assert_eq!(cfg.sessions_root, std::env::current_dir().unwrap().join("sessions"));
     }
 
     #[test]
@@ -588,7 +617,7 @@ arg_style = "append_session"
 "#,
         );
         let cfg = TuiConfig::load(dir.path().join("config.toml").to_str().unwrap()).unwrap();
-        assert_eq!(cfg.sessions_root, dir.path().join("my-sessions"));
+        assert_eq!(cfg.sessions_root, std::env::current_dir().unwrap().join("my-sessions"));
         let lc = cfg.loop_cmd.as_ref().unwrap();
         let argv = lc.argv(&crate::port::SessionId::new("s1"));
         assert_eq!(argv, vec!["bash", "scripts/loop.sh", "s1"]);
@@ -599,7 +628,17 @@ arg_style = "append_session"
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "config.toml", "[loop]\ncommand = \"bash\"\n");
         let cfg = TuiConfig::load(dir.path().join("config.toml").to_str().unwrap()).unwrap();
-        assert_eq!(cfg.sessions_root, dir.path().join("sessions"));
+        assert_eq!(cfg.sessions_root, std::env::current_dir().unwrap().join("sessions"));
+    }
+
+    #[test]
+    fn sessions_root_absolute_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let abs = dir.path().join("abs-sessions");
+        let body = format!("[paths]\nsessions_root = \"{}\"\n", abs.display());
+        write(dir.path(), "config.toml", &body);
+        let cfg = TuiConfig::load(dir.path().join("config.toml").to_str().unwrap()).unwrap();
+        assert_eq!(cfg.sessions_root, abs);
     }
 
     #[test]
