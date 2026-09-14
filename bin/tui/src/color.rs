@@ -737,7 +737,7 @@ pub fn palette_from_config(
         .or_else(|| {
             custom
                 .iter()
-                .find_map(|(k, t)| (norm(k) == norm_name).then(|| t))
+                .find_map(|(k, t)| (norm(k) == norm_name).then_some(t))
         });
     match table {
         Some(hexes) => Ok(Palette::overlay(&base, hexes)),

@@ -288,4 +288,8 @@ All open items verified resolved against the working tree:
    HEAD. The one warning the re-scope added, an indexed loop in
    `render.rs`, was fixed.
 7. Nothing was committed. The user has not asked for one.
+8. A later session cleared the whole clippy backlog. All 28
+   pre-existing warnings plus the `tui-highlight` and `tui-stream-drt`
+   warnings were fixed. `cargo clippy` across the workspace now
+   reports zero warnings.
 

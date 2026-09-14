@@ -169,7 +169,7 @@ fn owns_raw_line(k: usize, prov: &[Option<usize>], hard: &[String]) -> Option<St
         _ => return None,
     };
     if k == 0 || prov.get(k - 1) != Some(&Some(p)) {
-        hard.get(p).map(String::clone)
+        hard.get(p).cloned()
     } else {
         None
     }
@@ -1223,7 +1223,7 @@ fn gutter_line(line: Line<'static>, gutter: &str) -> Line<'static> {
     let has_gutter = line
         .spans
         .first()
-        .map_or(false, |s| s.content.starts_with(gutter));
+        .is_some_and(|s| s.content.starts_with(gutter));
     if has_gutter {
         line
     } else {
@@ -2407,11 +2407,11 @@ fn stream_block_lines(app: &mut App, width: usize, max_body_lines: usize) -> Str
             engine: app.tool_display().highlight_engine,
             thinking_expanded: app.thinking_expanded(),
         };
-        let cfg_invalid_full = cached.map_or(true, |c| {
+        let cfg_invalid_full = cached.is_none_or(|c| {
             c.width != cfg.width || c.palette_level != cfg.palette_level || c.engine != cfg.engine
         });
         let think_toggle_invalid =
-            cached.map_or(true, |c| c.thinking_expanded != cfg.thinking_expanded);
+            cached.is_none_or(|c| c.thinking_expanded != cfg.thinking_expanded);
         // A thinking re-wrap is needed when the fingerprint moved,
         // the expand toggle flipped, or the config invalidated the
         // cache.
@@ -2905,7 +2905,7 @@ fn browse_window_lines(
     cursor_bg: Color,
     match_style: Style,
     active_style: Style,
-    selection: Option<((usize, usize), (usize, usize), bool)>,
+    selection: Option<crate::browse::VisualSelection>,
     sel_bg: Color,
 ) -> Vec<Line<'static>> {
     let (cl, cc) = cursor;
@@ -2941,7 +2941,7 @@ fn browse_window_lines(
                 let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
                 vec![Span::styled(text, style)]
             } else {
-                l.spans.iter().cloned().collect()
+                l.spans.to_vec()
             };
             // The visual-selection shading over the base spans: the
             // `Role::Selection` background on the selected chars,
@@ -2988,10 +2988,15 @@ fn browse_window_lines(
 /// edge to the col, the middle rows whole). `None` outside the
 /// selection.
 fn selection_row_range(
-    sel: &((usize, usize), (usize, usize), bool),
+    sel: &crate::browse::VisualSelection,
     abs: usize,
 ) -> Option<(usize, Option<usize>)> {
-    let ((al, ac), (el, ec), linewise) = *sel;
+    use crate::browse::VisualSelection;
+    let VisualSelection {
+        anchor: (al, ac),
+        active: (el, ec),
+        linewise,
+    } = *sel;
     if linewise {
         let (lo, hi) = if al <= el { (al, el) } else { (el, al) };
         return (abs >= lo && abs <= hi).then_some((0, None));
@@ -4308,7 +4313,7 @@ pub fn draw(
         texts.extend(stream_texts);
         let mut line_raw: Vec<Option<String>> = app.transcript_raw(text_w, Some(host));
         line_raw.extend(std::iter::repeat_n(None, stream_len));
-        app.set_browse_layout(total, h, text_w, texts, line_raw);
+        app.set_browse_layout(total, h, texts, line_raw);
         let starts = app.transcript_event_line_starts(text_w, Some(host));
         app.set_event_line_starts(starts);
         app.apply_fold_cursor_target();

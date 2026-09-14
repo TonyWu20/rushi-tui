@@ -384,7 +384,7 @@ fn snap_browse_mode_active() {
     app.press(Key::Char('s'));
     app.press(Key::Char('s'));
     // Prime the browse layout so the renderer has data.
-    app.set_browse_layout(50, 24, 76, vec!["line".to_string(); 50], Vec::new());
+    app.set_browse_layout(50, 24, vec!["line".to_string(); 50], Vec::new());
     let (host, _tmp) = empty_host();
     let out = render(&mut app, &host, 80, 30);
     insta::assert_snapshot!(out);

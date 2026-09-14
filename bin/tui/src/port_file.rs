@@ -317,7 +317,7 @@ fn read_tail(
     // this poll. A partial tail (no newline yet) cannot make progress
     // until new bytes arrive, so skip the clone-and-retry work that
     // would spin on an idle file.
-    if want == 0 && !carry.iter().any(|b| *b == b'\n') {
+    if want == 0 && !carry.contains(&b'\n') {
         return Ok(());
     }
 

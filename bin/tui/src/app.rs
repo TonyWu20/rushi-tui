@@ -382,6 +382,52 @@ struct PendingStreamDelta {
 /// out instead of jumping the view.
 const STREAM_PACE_FRAMES: usize = 15;
 
+/// The last rendered browse layout (docs/tui-conversation-browsing.md
+/// section 4.6): total line count, window height `h`, display text
+/// per line, and raw source per line. The renderer refreshes it each
+/// frame while browse is active. Browse motions and the search read
+/// it. Tests prime it by hand.
+#[derive(Debug, Clone)]
+pub(crate) struct BrowseLayout {
+    pub total: usize,
+    pub h: usize,
+    pub texts: Vec<String>,
+    pub line_raw: Vec<Option<String>>,
+}
+
+/// The cached transcript build, plus every key field the
+/// invalidation check reads. A scroll redraw reuses the cache, so it
+/// is O(viewport) instead of O(total lines).
+#[derive(Debug, Clone)]
+pub(crate) struct TranscriptCache {
+    /// The event version the build consumed.
+    pub events_version: u64,
+    /// The terminal width (columns) the lines were wrapped at.
+    pub width: usize,
+    /// The extension reply version at build time; 0 with no ext host.
+    pub ext_ver: u64,
+    /// The palette capability level at build time.
+    pub palette_level: crate::color::Level,
+    /// The palette the lines were colored with.
+    pub palette: crate::color::Palette,
+    /// The wrapped, rendered transcript lines.
+    pub lines: Vec<Line<'static>>,
+    /// Per-line raw source map, in step with `lines`.
+    pub line_raw: Vec<Option<String>>,
+    /// Tool-result block spans: tool id to (start, end) line.
+    pub block_spans: std::collections::HashMap<String, (usize, usize)>,
+    /// The first rendered line of each in-memory event.
+    pub event_line_starts: Vec<Option<usize>>,
+    /// The fraction epoch at build time.
+    pub frac_epoch: u64,
+    /// The per-block display texts.
+    pub texts: Vec<String>,
+    /// The turn-fold epoch at build time.
+    pub turn_fold_epoch: u64,
+    /// Whether the loop was running when the build was keyed.
+    pub loop_running: bool,
+}
+
 pub struct App {
     sessions: Vec<SessionId>,
     active: Option<SessionId>,
@@ -426,17 +472,8 @@ pub struct App {
     /// enters or leaves browse mode. Any other key disarms. Mirrors
     /// the `q q` arm of FT-012 for the `s s` gate (section 4.2).
     ss_arm: Option<Instant>,
-    /// The last rendered browse layout: `(total, h, text_w, line`
-    /// `raw, texts)` — refreshed by the renderer each frame while
-    /// browse is active. Browse motions and the search read it;
-    /// tests prime it by hand.
-    browse_layout: Option<(
-        usize,
-        usize,
-        usize,
-        Vec<String>,
-        Vec<Option<String>>,
-    )>,
+    /// The last rendered browse layout (see `BrowseLayout`).
+    browse_layout: Option<BrowseLayout>,
     /// A rendered event landed since the last browse sync
     /// (section 4.6): the transcript growth is event growth, not a
     /// pane rewrap, so the browse view does not follow.
@@ -450,27 +487,8 @@ pub struct App {
     events_version: u64,
     events_base_seq: usize,
     view_only_target: Option<usize>,
-    /// Cached wrapped transcript lines, keyed by (events_version,
-    /// width, ext reply version, palette). A scroll redraw reuses the
-    /// cache: O(viewport) instead of O(total lines). The extension
-    /// reply version folds in, so a new reply rebuilds the lines
-    /// (ui-extension-plan stage 1). The palette folds in, so a
-    /// scheme change rebuilds the lines (docs/tui-color-scheme.md).
-    transcript_cache: Option<(
-        u64,
-        usize,
-        u64,
-        crate::color::Level,
-        crate::color::Palette,
-        Vec<Line<'static>>,
-        Vec<Option<String>>,
-        std::collections::HashMap<String, (usize, usize)>,
-        Vec<Option<usize>>,
-        u64,
-        Vec<String>,
-        u64,
-        bool,
-    )>,
+    /// The cached transcript build (see `TranscriptCache`).
+    transcript_cache: Option<TranscriptCache>,
     /// The incremental live-stream block cache. See
     /// docs/tui-perf-streaming-incremental-plan.md. None until the
     /// first draw of a stream. Cleared in clear_stream so the held
@@ -726,9 +744,9 @@ const QUIT_ARM_TTL: std::time::Duration = std::time::Duration::from_secs(3);
 /// (docs/tui-conversation-browsing.md section 4.2, the FT-012
 /// mirror).
 const SS_ARM_TTL: std::time::Duration = std::time::Duration::from_secs(3);
-/// No cap on the scroll distance or on the events held in memory: the
-/// whole session log stays reachable (docs/tui-conversation-browsing.md
-/// section 4.6). The view clamps to the rendered total at draw time.
+// No cap on the scroll distance or on the events held in memory: the
+// whole session log stays reachable (docs/tui-conversation-browsing.md
+// section 4.6). The view clamps to the rendered total at draw time.
 
 impl App {
     pub fn new() -> Self {
@@ -900,7 +918,7 @@ impl App {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
-        let dur = self.tool_display.anim_ms.max(1) as u64;
+        let dur = self.tool_display.anim_ms.max(1);
 
         // Snapshot the ids so we can mutate the maps without borrow conflicts.
         let ids: Vec<String> = self.block_fracs.keys().cloned().collect();
@@ -1342,10 +1360,10 @@ impl App {
         let Some(line) = line else {
             return;
         };
-        let Some((total, h, _, _, _)) = self.browse_layout.as_ref() else {
+        let Some(layout) = self.browse_layout.as_ref() else {
             return;
         };
-        self.browse.goto(*total, *h, line, &mut self.scroll);
+        self.browse.goto(layout.total, layout.h, line, &mut self.scroll);
     }
 
     pub fn fold_key(&mut self, c: char, total: usize, h: usize) -> bool {
@@ -1388,11 +1406,11 @@ impl App {
         if !self.browse.active() {
             return;
         }
-        let Some((total, h, _, _, _)) = self.browse_layout.as_ref() else {
+        let Some(layout) = self.browse_layout.as_ref() else {
             return;
         };
         self.browse
-            .goto_line(*total, *h, line, col, &mut self.scroll);
+            .goto_line(layout.total, layout.h, line, col, &mut self.scroll);
         let id = self.block_at_transcript_line(line).map(str::to_owned);
         if let Some(id) = id {
             self.toggle_block_expand(&id);
@@ -1881,7 +1899,7 @@ impl App {
             self.transcript_rebuild_requested = false;
             self.transcript_desired_key = None;
             self.transcript_width_debounce = None;
-            return &self.transcript_cache.as_ref().unwrap().5;
+            return &self.transcript_cache.as_ref().unwrap().lines;
         }
         // Cache-key miss: record the wanted key and ask for a
         // rebuild. The main loop dispatches one background build
@@ -1894,7 +1912,7 @@ impl App {
         let width_triggered = self
             .transcript_cache
             .as_ref()
-            .is_some_and(|c| c.1 != key.width);
+            .is_some_and(|c| c.width != key.width);
         if width_triggered {
             // The pending key is the last miss's key. Comparing
             // widths against it tells whether this is a new width
@@ -1902,7 +1920,7 @@ impl App {
             let new_width_event = self
                 .transcript_desired_key
                 .as_ref()
-                .map_or(true, |d| d.width != key.width);
+                .is_none_or(|d| d.width != key.width);
             if new_width_event {
                 self.transcript_width_debounce = Some(
                     Instant::now()
@@ -1918,7 +1936,7 @@ impl App {
         let key_is_new = self
             .transcript_desired_key
             .as_ref()
-            .map_or(true, |prev| prev != &key);
+            .is_none_or(|prev| prev != &key);
         if key_is_new {
             self.trace_transcript(&format!("miss {}", Self::fmt_key(&key)));
         }
@@ -1932,7 +1950,7 @@ impl App {
         if self.transcript_cache.is_some() {
             // Stale-while-revalidate: draw the last good cache while
             // the background build runs.
-            return &self.transcript_cache.as_ref().unwrap().5;
+            return &self.transcript_cache.as_ref().unwrap().lines;
         }
         // First build: no good cache yet. The main thread renders the
         // visible tail window, O(viewport), while the full build
@@ -1956,7 +1974,7 @@ impl App {
             self.transcript_rebuild_requested = false;
             self.transcript_desired_key = None;
         }
-        &self.transcript_cache.as_ref().unwrap().5
+        &self.transcript_cache.as_ref().unwrap().lines
     }
 
     /// True when the cached transcript matches the build key.
@@ -1965,14 +1983,14 @@ impl App {
         key: &crate::transcript_worker::BuildKey,
     ) -> bool {
         self.transcript_cache.as_ref().is_some_and(|c| {
-            c.0 == key.events_version
-                && c.1 == key.width
-                && c.2 == key.ext_ver
-                && c.3 == key.palette_level
-                && c.4 == key.palette
-                && c.9 == key.frac_epoch
-                && c.11 == key.turn_fold_epoch
-                && c.12 == key.loop_running
+            c.events_version == key.events_version
+                && c.width == key.width
+                && c.ext_ver == key.ext_ver
+                && c.palette_level == key.palette_level
+                && c.palette == key.palette
+                && c.frac_epoch == key.frac_epoch
+                && c.turn_fold_epoch == key.turn_fold_epoch
+                && c.loop_running == key.loop_running
         })
     }
 
@@ -1983,21 +2001,21 @@ impl App {
         build: &crate::render::TranscriptBuild,
         partial: bool,
     ) {
-        self.transcript_cache = Some((
-            key.events_version,
-            key.width,
-            key.ext_ver,
-            key.palette_level,
-            key.palette.clone(),
-            build.lines.clone(),
-            build.line_raw.clone(),
-            build.block_spans.clone(),
-            build.event_line_starts.clone(),
-            key.frac_epoch,
-            build.texts.clone(),
-            key.turn_fold_epoch,
-            key.loop_running,
-        ));
+        self.transcript_cache = Some(TranscriptCache {
+            events_version: key.events_version,
+            width: key.width,
+            ext_ver: key.ext_ver,
+            palette_level: key.palette_level,
+            palette: key.palette.clone(),
+            lines: build.lines.clone(),
+            line_raw: build.line_raw.clone(),
+            block_spans: build.block_spans.clone(),
+            event_line_starts: build.event_line_starts.clone(),
+            frac_epoch: key.frac_epoch,
+            texts: build.texts.clone(),
+            turn_fold_epoch: key.turn_fold_epoch,
+            loop_running: key.loop_running,
+        });
         self.transcript_partial = partial;
     }
 
@@ -2028,7 +2046,7 @@ impl App {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis())
             .unwrap_or(0);
-        let mut f = trace.lock().unwrap();
+        let f = trace.get_mut().unwrap();
         let _ = writeln!(f, "{ts} {msg}");
     }
 
@@ -2211,7 +2229,7 @@ impl App {
         ext: Option<&crate::ext::ExtHost>,
     ) -> &Vec<String> {
         let _lines = self.transcript_lines(width, ext);
-        &self.transcript_cache.as_ref().unwrap().10
+        &self.transcript_cache.as_ref().unwrap().texts
     }
 
     /// The per-line raw source map a browse yank reads (docs/tui-
@@ -2225,7 +2243,7 @@ impl App {
         ext: Option<&crate::ext::ExtHost>,
     ) -> Vec<Option<String>> {
         let _lines = self.transcript_lines(width, ext);
-        self.transcript_cache.as_ref().unwrap().6.clone()
+        self.transcript_cache.as_ref().unwrap().line_raw.clone()
     }
 
     /// Tool-result block spans (event ID → start/end transcript line
@@ -2236,7 +2254,7 @@ impl App {
         ext: Option<&crate::ext::ExtHost>,
     ) -> std::collections::HashMap<String, (usize, usize)> {
         let _ = self.transcript_lines(width, ext);
-        self.transcript_cache.as_ref().unwrap().7.clone()
+        self.transcript_cache.as_ref().unwrap().block_spans.clone()
     }
 
     /// The first rendered transcript line of each in-memory event
@@ -2251,7 +2269,7 @@ impl App {
         ext: Option<&crate::ext::ExtHost>,
     ) -> Vec<Option<usize>> {
         let _ = self.transcript_lines(width, ext);
-        self.transcript_cache.as_ref().unwrap().8.clone()
+        self.transcript_cache.as_ref().unwrap().event_line_starts.clone()
     }
 
     /// Events of the active session, oldest first.
@@ -2423,8 +2441,8 @@ impl App {
         &self.browse
     }
 
-    /// The browse layout of the last render: `(total, h, text_w,`
-    /// `texts, line_raw)`. The renderer refreshes it each
+    /// The browse layout of the last render: `(total, h, texts,`
+    /// `line_raw)`. The renderer refreshes it each
     /// frame while browse is active; browse motions and the search read
     /// it (section 4.1). `line_raw[j]` is the shareable raw source
     /// for rendered line `j` (`None` on separators and UI chrome),
@@ -2433,11 +2451,15 @@ impl App {
         &mut self,
         total: usize,
         h: usize,
-        text_w: usize,
         texts: Vec<String>,
         line_raw: Vec<Option<String>>,
     ) {
-        self.browse_layout = Some((total, h, text_w, texts, line_raw));
+        self.browse_layout = Some(BrowseLayout {
+            total,
+            h,
+            texts,
+            line_raw,
+        });
     }
 
     /// The browse highlight inputs for one frame: the match-line
@@ -2449,8 +2471,8 @@ impl App {
         total: usize,
     ) -> (std::collections::HashSet<usize>, Option<(usize, usize)>) {
         match &self.browse_layout {
-            Some((_, _, _, texts, ..)) => {
-                let (hl, am) = self.browse.highlight_lines(total, texts.as_slice());
+            Some(l) => {
+                let (hl, am) = self.browse.highlight_lines(total, l.texts.as_slice());
                 (hl.clone(), am)
             }
             None => (std::collections::HashSet::new(), None),
@@ -2460,7 +2482,7 @@ impl App {
     /// The total of the last browse layout: the gutter width hint of
     /// the width fixpoint (section 4.3).
     pub fn browse_layout_total(&self) -> usize {
-        self.browse_layout.as_ref().map(|l| l.0).unwrap_or(0)
+        self.browse_layout.as_ref().map(|l| l.total).unwrap_or(0)
     }
 
     /// The browse entry gate: the same two conditions as the `q q`
@@ -2506,7 +2528,7 @@ impl App {
             return;
         }
         let (total, h) = match &self.browse_layout {
-            Some((total, h, _w, _t, _r)) => (*total, *h),
+            Some(l) => (l.total, l.h),
             None => return,
         };
         if let Key::Char(c) = key {
@@ -2515,7 +2537,7 @@ impl App {
             }
         }
         let (texts, line_raw) = match &self.browse_layout {
-            Some((_, _, _, texts, line_raw)) => (texts.as_slice(), line_raw.as_slice()),
+            Some(l) => (l.texts.as_slice(), l.line_raw.as_slice()),
             None => return,
         };
         let half = self.half_page();
@@ -4589,7 +4611,7 @@ mod background_build_tests {
         let texts = app.transcript_texts(120, None).clone();
         let raw = app.transcript_raw(120, None);
         app.browse().enter();
-        app.set_browse_layout(total, 5, 120, texts, raw);
+        app.set_browse_layout(total, 5, texts, raw);
         app.browse_key(Key::Char('j'));
         assert_eq!(
             app.browse_ref().line_col().0,
@@ -4617,7 +4639,7 @@ mod background_build_tests {
         let total = app.transcript_lines(120, None).len();
         let texts = app.transcript_texts(120, None).clone();
         let raw = app.transcript_raw(120, None);
-        app.set_browse_layout(total, 5, 120, texts, raw);
+        app.set_browse_layout(total, 5, texts, raw);
         app.browse_key(Key::Char('j'));
         app.browse_key(Key::Char('g'));
         app.browse_key(Key::Char('g'));
@@ -4701,7 +4723,7 @@ mod background_build_tests {
         settle(&mut app);
         assert!(!app.transcript_rebuilding());
         assert_eq!(
-            app.transcript_cache.as_ref().unwrap().1,
+            app.transcript_cache.as_ref().unwrap().width,
             110,
             "the one build landed at the settled width"
         );
@@ -4791,7 +4813,7 @@ mod background_build_tests {
             "no build runs after the toggle-back"
         );
         assert_eq!(
-            app.transcript_cache.as_ref().unwrap().1,
+            app.transcript_cache.as_ref().unwrap().width,
             80,
             "the cache still holds the built width"
         );
@@ -4814,14 +4836,14 @@ mod background_build_tests {
         let _ = app.transcript_lines(80, None);
         assert!(app.dispatch_transcript_build(None));
         settle(&mut app);
-        assert_eq!(app.transcript_cache.as_ref().unwrap().1, 80);
+        assert_eq!(app.transcript_cache.as_ref().unwrap().width, 80);
 
         // 80 -> 120 settles and builds. Last built width is 120.
         let _ = app.transcript_lines(120, None);
         std::thread::sleep(Duration::from_millis(100));
         assert!(app.dispatch_transcript_build(None));
         settle(&mut app);
-        assert_eq!(app.transcript_cache.as_ref().unwrap().1, 120);
+        assert_eq!(app.transcript_cache.as_ref().unwrap().width, 120);
 
         // 120 -> 80: 80 was observed and built earlier, but the
         // last build is 120. The settled 80 builds again.
@@ -4830,7 +4852,7 @@ mod background_build_tests {
         std::thread::sleep(Duration::from_millis(100));
         assert!(app.dispatch_transcript_build(None));
         settle(&mut app);
-        assert_eq!(app.transcript_cache.as_ref().unwrap().1, 80);
+        assert_eq!(app.transcript_cache.as_ref().unwrap().width, 80);
         let _ = app.transcript_lines(80, None);
         assert!(
             !app.transcript_rebuilding(),
@@ -5028,7 +5050,7 @@ mod perf_bgbuild_tests {
 
         settle(&mut app, 60);
         assert_eq!(
-            app.transcript_cache.as_ref().unwrap().1,
+            app.transcript_cache.as_ref().unwrap().width,
             120,
             "the settled-width build landed in the cache"
         );

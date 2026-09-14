@@ -961,10 +961,10 @@ fn allocate_col_widths(natural: &[usize], avail: usize) -> Vec<usize> {
         let cap = mx - 1;
         // Even split of the remaining deficit across the top tier,
         // rounded up so progress is guaranteed, bounded by the tier cap.
-        let take = ((rem + top - 1) / top).min(cap).max(1);
-        for i in 0..n {
-            if w[i] == mx {
-                w[i] -= take;
+        let take = rem.div_ceil(top).min(cap).max(1);
+        for x in &mut w {
+            if *x == mx {
+                *x -= take;
                 rem = rem.saturating_sub(take);
             }
         }

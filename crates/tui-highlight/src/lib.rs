@@ -222,11 +222,11 @@ impl Highlighter {
             match resolve_lang(l) {
                 Some(n) => n,
                 None => {
-                    if self.active.is_some() {
+                    if let Some(n) = self.active {
                         // Unknown language token while an active grammar is
                         // set: keep the active grammar so context is not
                         // lost.
-                        self.active.expect("checked above")
+                        n
                     } else {
                         return vec![(Style::default(), line.to_string())];
                     }
@@ -641,7 +641,7 @@ fn highlight_range(
                 node_role(node.kind())
             } else if text.is_some_and(|t| kw.contains(t)) {
                 HlRole::Keyword
-            } else if matches!(text.as_deref(), Some("\"") | Some("'")) {
+            } else if matches!(text, Some("\"") | Some("'")) {
                 // Anonymous string delimiters: the grammars split a
                 // literal into quote / content / quote tokens, so the
                 // quote tokens join the string run.
@@ -681,7 +681,7 @@ fn highlight_range(
         }
         let st = role_style(role);
         let txt = src[s..e].to_string();
-        if out.last().map_or(false, |(p, _)| *p == st) {
+        if out.last().is_some_and(|(p, _)| *p == st) {
             out.last_mut().unwrap().1.push_str(&txt);
         } else {
             out.push((st, txt));

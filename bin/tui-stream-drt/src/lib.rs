@@ -152,6 +152,9 @@ pub mod line {
     /// Parse a scenario line (strict: any deviation is an error, exactly
     /// like the Lean side — the gate only sees well-formed generator
     /// lines, and both sides must reject the same malformed input).
+    // The unit error is deliberate. The DRT protocol has one error
+    // marker (`ERR`) and no error payload.
+    #[allow(clippy::result_unit_err)]
     pub fn parse(line: &str) -> Result<Scenario, ()> {
         let fields: Vec<&str> = line.split(' ').collect();
         if fields.len() != 5 {
@@ -253,7 +256,7 @@ pub mod line {
     /// Even-length lowercase hex to byte values.
     fn hex_to_values(hex: &str) -> Result<Vec<u8>, ()> {
         let bs = hex.as_bytes();
-        if bs.len() % 2 != 0 {
+        if !bs.len().is_multiple_of(2) {
             return Err(());
         }
         let mut out = Vec::with_capacity(bs.len() / 2);

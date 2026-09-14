@@ -768,11 +768,10 @@ fn edit_body(
             *hint,
             format!("↳ diff +{added} -{removed} • {layout_label} "),
         ));
-        if total > 0 {
+        if let Some(green_w) = (added * bar_w).checked_div(total) {
             // Integer split of the bar: green gets `added/total` of the
             // width (floor), red gets the remainder. When one side is
             // zero the whole bar is the other color.
-            let green_w = added * bar_w / total;
             let red_w = bar_w - green_w;
             stats.push((*hint, "[".to_string()));
             if green_w > 0 {
@@ -933,7 +932,7 @@ fn edit_body(
                 row.extend(highlighted_pane(
                     b, lang, cfg, palette, code, lc_shade, content_w,
                 ));
-                row.push((out.clone(), " │ ".to_string()));
+                row.push((*out, " │ ".to_string()));
                 row.push((rg_style, pad_cell(rgutter, gutter_w)));
                 row.extend(highlighted_pane(
                     a, lang, cfg, palette, code, rc_shade, content_w,
@@ -1004,7 +1003,7 @@ fn edit_body(
                             (*out),
                             gutter,
                         )];
-                        for (st, s) in highlight_diff_line(&context, lang, cfg, palette) {
+                        for (st, s) in highlight_diff_line(context, lang, cfg, palette) {
                             let st = if st == Style::default() { *code } else { st };
                             row.push((st, s));
                         }
@@ -1426,25 +1425,25 @@ fn inline_word_diff(
 
     // Prefix tokens.
     for t in &a[..prefix] {
-        old_segs.push((old_unchanged.clone(), t.clone()));
-        new_segs.push((new_unchanged.clone(), t.clone()));
+        old_segs.push((*old_unchanged, t.clone()));
+        new_segs.push((*new_unchanged, t.clone()));
     }
     // Changed middle (old).
     let old_mid = &a[prefix..a.len() - suffix];
     if !old_mid.is_empty() {
         let mid_text: String = old_mid.iter().cloned().collect();
-        old_segs.push((changed.clone(), mid_text));
+        old_segs.push((*changed, mid_text));
     }
     // Changed middle (new).
     let new_mid = &b[prefix..b.len() - suffix];
     if !new_mid.is_empty() {
         let mid_text: String = new_mid.iter().cloned().collect();
-        new_segs.push((changed.clone(), mid_text));
+        new_segs.push((*changed, mid_text));
     }
     // Suffix tokens.
     for t in &a[a.len() - suffix..] {
-        old_segs.push((old_unchanged.clone(), t.clone()));
-        new_segs.push((new_unchanged.clone(), t.clone()));
+        old_segs.push((*old_unchanged, t.clone()));
+        new_segs.push((*new_unchanged, t.clone()));
     }
 
     // If nothing changed, just return plain segments.

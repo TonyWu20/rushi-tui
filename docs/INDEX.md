@@ -72,7 +72,7 @@ Method and conventions: `tui-insta-snapshot-testing.md`.
 | `tui-perf-streaming-incremental-plan.md` | Spec | 2026-09-13 | Incremental cache for the live streaming block (thinking + text). Eliminates per-frame O(n) re-wrap/re-highlight; subsumes the keep-highlighter-alive optimisation. |
 | `tui-preview-pane-plan.md` | Spec | 2026-09-24 | No-truncation picker preview pane: windowed highlight (only the visible window), cancellable background load, and a size guard so huge ignored files never freeze the TUI. |
 | `tui-turn-fold.md` | Implemented | 2026-09-15 | Three-level fold in both the main and browse views. Thinking starts collapsed. The final reply sits in a title-less `Report` panel. Neovim-style `z` keys. |
-| `tui-handoff-turn-fold-rescope.md` | Closed | 2026-09-15 | Open items for the turn-fold re-scope. All items resolved on 2026-09-15: the `pty_perf` test is green (fine-grained 100 ms poll), the spec and index are updated, bookkeeping is recorded, diff churn is cleaned, clippy adds no new warnings over the pre-existing baseline (28 pre-existing warnings remain, none in the re-scoped files' new code). |
+| `tui-handoff-turn-fold-rescope.md` | Closed | 2026-09-15 | Open items for the turn-fold re-scope. All items resolved on 2026-09-15: the `pty_perf` test is green (fine-grained 100 ms poll), the spec and index are updated, bookkeeping is recorded, diff churn is cleaned, clippy is clean across the workspace (the 33-warning backlog was cleared). |
 
 ## Status legend
 

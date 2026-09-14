@@ -69,6 +69,20 @@ struct VisualSel {
     linewise: bool,
 }
 
+/// The visual selection as seen by the renderer (section 11.4):
+/// `(anchor, active, linewise)` in transcript coordinates. The anchor
+/// pins at entry or a swap; the active end is the live cursor;
+/// `linewise` shades whole display rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VisualSelection {
+    /// The selection start point, `(line, col)`.
+    pub anchor: (usize, usize),
+    /// The live selection end, `(line, col)`. The cursor.
+    pub active: (usize, usize),
+    /// A `V` entry: whole display rows are the span.
+    pub linewise: bool,
+}
+
 /// The outcome of one command-line key.
 enum TypeKeyOutcome {
     /// Consumed, nothing to show.
@@ -118,7 +132,6 @@ impl Default for Search {
 /// `line` is a zero-based transcript line index, `col` a zero-based
 /// character position within that line. Every move clamps `col` to
 /// the line length (section 4.1).
-
 pub struct Browse {
     active: bool,
     /// Entry is pending a render pass: the cursor lands on the first
@@ -236,10 +249,14 @@ impl Browse {
     /// input): `(anchor, active_end, linewise)`, transcript
     /// coordinates. The active end is the cursor; `None` outside
     /// visual / linewise visual.
-    pub fn visual_selection(&self) -> Option<((usize, usize), (usize, usize), bool)> {
+    pub fn visual_selection(&self) -> Option<VisualSelection> {
         self.visual
             .as_ref()
-            .map(|s| (s.anchor, (self.line, self.col), s.linewise))
+            .map(|s| VisualSelection {
+                anchor: s.anchor,
+                active: (self.line, self.col),
+                linewise: s.linewise,
+            })
     }
 
     /// The `[tui] clipboard = "unnamed"` flag (section 11.3): set at
