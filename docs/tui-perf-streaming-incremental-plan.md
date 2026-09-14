@@ -194,11 +194,11 @@ settled-transcript builds, which are non-incremental).
 
 ```
 struct StreamBlockView<'a> {
-    header:    Vec<Line<'static>>,   // 1 line, built fresh
-    think:     &'a [Line<'static>],  // borrowed from cache
-    text:      &'a [Line<'static>],  // borrowed from cache
-    tool_args: Vec<Line<'static>>,   // a few lines, built fresh
-    cursor:    Option<Line<'static>>,
+    header:      Vec<Line<'static>>,   // 1 line, built fresh
+    think:       &'a [Line<'static>],  // borrowed from cache
+    text:        &'a [Line<'static>],  // borrowed from cache
+    tool_args:   Vec<Line<'static>>,   // a few lines, built fresh
+    cursor_span: Option<Span<'static>>, // overlay on last body line; None when done
 }
 
 fn stream_block_lines<'a>(app: &'a App, width, max_body_lines)
@@ -294,20 +294,22 @@ fn stream_block_lines<'a>(app: &'a App, width, max_body_lines)
     };
 
     // Build the view: borrow the big cached sections, and build the
-    // small fresh pieces (header, tool_args, cursor) as owned lines.
+    // small fresh pieces (header, tool_args) as owned lines. The
+    // cursor is a span overlay (cursor_span), not a stored line.
     // The sliding-window / tool_args / header logic is unchanged.
     StreamBlockView {
-        header, think: think_lines, text: text_lines, tool_args, cursor,
+        header, think: think_lines, text: text_lines, tool_args,
+        cursor_span,
     }
 }
 ```
 
-The cached `think` / `text` sections are returned as **borrowed
-slices** (per the "Clone avoidance" decision), so an idle frame
-copies nothing. Only the small fresh pieces (header, tool-args,
-cursor) are allocated per frame. The caller (render.rs) renders the
-pieces in order instead of a single flat `Vec`, which is a modest
-change at render.rs:3558.
+The call site at render.rs:3558 uses only `.len()`, index access,
+and ordered iteration. `StreamBlockView` provides all three, so no
+flat `Vec` is needed. On an idle frame the borrowed slices cost
+nothing. The only per-frame mutation is the cursor, which blinks by
+overlaying a span on the last body line. That overlay is O(1), not
+O(T).
 
 ### Invalidation rules
 
@@ -373,10 +375,10 @@ idle frame for no benefit.
 
 `StreamBlockView` borrows the big `think` and `text` sections
 from the cache as `&'a [Line<'static>]`. The lifetime `'a` is tied
-to `&'a App`. The small fresh pieces (header, tool_args, cursor)
-are owned `Vec`s built per frame. On a cache hit the big sections
-cost nothing. The caller renders the pieces in order at
-render.rs:3558.
+to `&'a App`. The small fresh pieces (header, tool_args) are owned `Vec`s built
+per frame. The cursor is a span overlay on the last body line. On
+a cache hit the big sections cost nothing. The caller renders the
+pieces in order at render.rs:3558.
 
 Considered and rejected:
 
@@ -517,7 +519,7 @@ All tests live in `bin/tui/src/render.rs` (or a new
 | File | Change |
 |---|---|
 | `bin/tui/src/app.rs` | Add `StreamBlockCache` struct (with `think_reasoning_keys` / `think_reasoning_len` fingerprint fields) + `stream_block_cache` field + `StreamBuf::reasoning_text()` helper (joins the sorted `reasoning` map). Init in `App::new`. Clear in `clear_stream`. Expose `stream_block_cache_mut()` for the render fn. `StreamBlockCache` is `!Send` (owns `CodeHl`) — fine, lives on the main thread. |
-| `bin/tui/src/render.rs` | Split `wrap_thinking` into `wrap_thinking_full` (non-incremental, used by settled builds) and `wrap_thinking_delta` (incremental). Rewrite `stream_block_lines` to use the cache and return a `StreamBlockView<'a>` (borrowed `think` / `text` slices + fresh `header` / `tool_args` / `cursor`). Update the call site at render.rs:3558 to render the view's pieces in order. |
+| `bin/tui/src/render.rs` | Split `wrap_thinking` into `wrap_thinking_full` (non-incremental, used by settled builds) and `wrap_thinking_delta` (incremental). Rewrite `stream_block_lines` to use the cache and return a `StreamBlockView<'a>` (borrowed `think` / `text` slices + fresh `header` / `tool_args` + `cursor_span` overlay on the last body line). Update the call site at render.rs:3558: the view implements `.len()` / index / ordered `.iter()`, and the caller overlays the blinking cursor span on the last body line. |
 | `bin/tui/src/tool_display.rs` | No change. `CodeHl` is already stateful and `Send`-free (lives on the main thread). |
 | `bin/tui/src/main.rs` | No change. |
 | `bin/tui/src/render.rs` tests | New test mod or extend existing. |
