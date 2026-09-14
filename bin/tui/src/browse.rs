@@ -26,7 +26,7 @@ pub const SCROLLOFF: usize = 3;
 pub const COUNT_CAP: u32 = 99_999;
 /// The one-line status hint of the key table (section 4.4, the
 /// section 11.4 growth: the select-and-yank rows).
-pub const BROWSE_HINT: &str = "browse: v select, y yank, yy lines, yw word, b back, ss leave";
+pub const BROWSE_HINT: &str = "browse: v select, y yank, yy lines, yw word, ye end, b back, ss leave";
 
 /// One search direction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -935,8 +935,8 @@ impl Browse {
                     self.has_count = true;
                     return None;
                 }
-                m @ 'j' | m @ 'k' | m @ 'h' | m @ 'l' | m @ 'w' | m @ 'b'
-                | m @ '0' | m @ '^' | m @ '$' | m @ 'G' => {
+                m @ 'j' | m @ 'k' | m @ 'h' | m @ 'l' | m @ 'w' | m @ 'e'
+                | m @ 'b' | m @ '0' | m @ '^' | m @ '$' | m @ 'G' => {
                     self.yank_motion(m, v, registers);
                     return None;
                 }
@@ -999,13 +999,20 @@ impl Browse {
                 None
             }
             'w' => {
-                // The word motion (section 11.4): it extends the
-                // visual selection and the `y` operator; a bare `w`
-                // moves the cursor to the next word start.
+                // The word motion (section 11.4). It extends the
+                // visual selection and the `y` operator. A bare
+                // `w` moves to the next word start. The browse
+                // word class folds the hyphen in, so a hyphenated
+                // word is one word.
                 let n = self.motion_count() as usize;
                 if n > 0 && !v.texts.is_empty() {
                     let cursor = (self.line.min(v.total - 1), self.col);
-                    let res = crate::vim_editor::word_forward(v.texts, cursor, n.max(1) as u32);
+                    let res = crate::vim_editor::word_forward(
+                        v.texts,
+                        cursor,
+                        n.max(1) as u32,
+                        crate::vim_editor::WordClass::Browse,
+                    );
                     self.line = res.pos.0;
                     self.col = res.pos.1;
                     self.clamp_to_line(v);
@@ -1018,14 +1025,43 @@ impl Browse {
                 None
             }
             'b' => {
-                // The word-backward motion (the mirror of `w`): it
-                // extends the visual selection and the `y` operator;
-                // a bare `b` moves the cursor to the previous word
-                // start.
+                // The word-backward motion, the mirror of `w`. It
+                // extends the visual selection and the `y` operator.
+                // A bare `b` moves to the previous word start, with
+                // the browse word class.
                 let n = self.motion_count() as usize;
                 if n > 0 && !v.texts.is_empty() {
                     let cursor = (self.line.min(v.total - 1), self.col);
-                    let res = crate::vim_editor::word_backward(v.texts, cursor, n.max(1) as u32);
+                    let res = crate::vim_editor::word_backward(
+                        v.texts,
+                        cursor,
+                        n.max(1) as u32,
+                        crate::vim_editor::WordClass::Browse,
+                    );
+                    self.line = res.pos.0;
+                    self.col = res.pos.1;
+                    self.clamp_to_line(v);
+                    // Linewise visual parks at col 0 of the new line.
+                    if matches!(self.visual, Some(VisualSel { linewise: true, .. })) {
+                        self.col = 0;
+                    }
+                }
+                None
+            }
+            'e' => {
+                // The word-end motion (the vim `e`). The cursor
+                // lands on the last character of the word, or the
+                // next word when it already sits on the last
+                // character. The browse word class applies.
+                let n = self.motion_count() as usize;
+                if n > 0 && !v.texts.is_empty() {
+                    let cursor = (self.line.min(v.total - 1), self.col);
+                    let res = crate::vim_editor::word_end(
+                        v.texts,
+                        cursor,
+                        n.max(1) as u32,
+                        crate::vim_editor::WordClass::Browse,
+                    );
                     self.line = res.pos.0;
                     self.col = res.pos.1;
                     self.clamp_to_line(v);
@@ -1460,14 +1496,20 @@ pub(crate) fn browse_motion_range(
             ve::motion_to_range(cursor, &res)
         }
         'w' => {
-            let res = ve::word_forward(texts, cursor, count.max(1));
+            let res = ve::word_forward(texts, cursor, count.max(1), ve::WordClass::Browse);
             // The operator `w` rule: the `extend_w_eol` extension
             // (the final word reaches the line end).
             let res = ve::extend_w_eol(texts, cursor, res);
             ve::motion_to_range(cursor, &res)
         }
         'b' => {
-            let res = ve::word_backward(texts, cursor, count.max(1));
+            let res = ve::word_backward(texts, cursor, count.max(1), ve::WordClass::Browse);
+            ve::motion_to_range(cursor, &res)
+        }
+        'e' => {
+            // The operator `e` rule: the inclusive word end in the
+            // browse word class (the hyphen joins the word).
+            let res = ve::word_end(texts, cursor, count.max(1), ve::WordClass::Browse);
             ve::motion_to_range(cursor, &res)
         }
         '$' => {
@@ -1867,5 +1909,88 @@ mod stream_pin_tests {
         // The settle: a settled event lands, the stream clears.
         b.sync(104, 20, &mut scroll, true);
         assert_eq!(b.line - top(104, scroll, 20), row0, "the settle holds the row");
+    }
+}
+
+#[cfg(test)]
+mod word_motion_tests {
+    use super::*;
+
+    /// Drive a sequence of char keys through the browse state machine
+    /// and return the final cursor position.
+    fn drive(texts: &[String], line: usize, col: usize, keys: &[char]) -> (usize, usize) {
+        let mut b = Browse::new();
+        b.active = true;
+        b.line = line;
+        b.col = col;
+        let mut scroll = 0usize;
+        let mut view = View {
+            total: texts.len(),
+            h: 24,
+            scroll: &mut scroll,
+            half: 10,
+            texts,
+            line_raw: &[],
+        };
+        let mut regs: std::collections::HashMap<char, crate::vim_editor::RegContent> =
+            std::collections::HashMap::new();
+        for k in keys {
+            let _ = b.key(Key::Char(*k), &mut view, &mut regs);
+        }
+        (b.line, b.col)
+    }
+
+    fn hyphen() -> Vec<String> {
+        vec!["foo-bar baz".to_string()]
+    }
+
+    #[test]
+    fn w_lands_on_the_next_word_start_not_the_hyphen() {
+        // The bug: `w` painted on the hyphen of a hyphenated word.
+        // Now it skips the whole `foo-bar` run to the start of `baz`.
+        assert_eq!(drive(&hyphen(), 0, 0, &['w']), (0, 8));
+        assert_eq!(drive(&hyphen(), 0, 1, &['w']), (0, 8));
+        // From the hyphen itself, the landing is the word start too.
+        assert_eq!(drive(&hyphen(), 0, 3, &['w']), (0, 8));
+    }
+
+    #[test]
+    fn b_lands_on_the_hyphenated_word_start() {
+        // From `baz`, `b` lands at the start of `foo-bar`, not on
+        // the hyphen or the start of `bar`.
+        assert_eq!(drive(&hyphen(), 0, 8, &['b']), (0, 0));
+    }
+
+    #[test]
+    fn e_lands_on_the_word_end() {
+        // `e` is now registered in browse mode. From the start of
+        // `foo-bar` it lands on the last char of the whole run.
+        assert_eq!(drive(&hyphen(), 0, 0, &['e']), (0, 6));
+        // From that char it crosses into the next word `baz`.
+        assert_eq!(drive(&hyphen(), 0, 6, &['e']), (0, 10));
+        // On the last word end it stays put.
+        assert_eq!(drive(&hyphen(), 0, 10, &['e']), (0, 10));
+    }
+
+    #[test]
+    fn counted_e_motions_step_word_by_word() {
+        // Positions: a0 -1 b2 sp3 c4 -5 d6 sp7 e8 -9 f10
+        let texts = vec!["a-b c-d e-f".to_string()];
+        assert_eq!(drive(&texts, 0, 0, &['e']), (0, 2));
+        // `2e` steps two word ends forward.
+        assert_eq!(drive(&texts, 0, 0, &['2', 'e']), (0, 6));
+    }
+
+    #[test]
+    fn ye_yanks_the_whole_hyphenated_word() {
+        let texts = hyphen();
+        let range = browse_motion_range(&texts, (0, 0), 'e', 1, false).unwrap();
+        let got = crate::vim_editor::extract_text(&texts, &range);
+        assert_eq!(got, "foo-bar");
+        assert!(!range.linewise);
+        // From `baz`, `ye` yanks that word alone.
+        let range = browse_motion_range(&texts, (0, 8), 'e', 1, false).unwrap();
+        let got = crate::vim_editor::extract_text(&texts, &range);
+        assert_eq!(got, "baz");
     }
 }

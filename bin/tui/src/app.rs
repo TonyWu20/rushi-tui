@@ -2485,13 +2485,13 @@ impl App {
         self.browse_layout.as_ref().map(|l| l.total).unwrap_or(0)
     }
 
-    /// The browse entry gate: the same two conditions as the `q q`
-    /// exit path (section 4.2): an empty draft, the editor in normal
-    /// mode, and no name input up.
+    /// The browse entry gate (section 4.2, loosened 2026-09-15): the
+    /// editor in normal mode with no name input up. The 2026-09-15
+    /// request dropped the empty-draft condition, so a held draft no
+    /// longer blocks a double-`s`. The quit gate (`q q`) still needs
+    /// an empty draft.
     fn browse_gate_open(&self) -> bool {
-        self.pending_name.is_none()
-            && self.editor.mode() == Mode::Normal
-            && self.editor.text().trim().is_empty()
+        self.pending_name.is_none() && self.editor.mode() == Mode::Normal
     }
 
     /// One browse-owned key (section 4.4): the key table over the
@@ -4089,11 +4089,10 @@ impl App {
                         _ => {}
                     }
                 }
-                // The double-`s` browse gate (section 4.2): the same
-                // two conditions as the `q q` exit path. In the
-                // gated state the first `s` arms; the second `s`
-                // inside the window enters browse. A held draft keeps
-                // the editor `s` role and hints the browse path.
+                // The double-`s` browse gate (section 4.2, loosened
+                // 2026-09-15): normal mode with no name input. The
+                // draft may be held. The first `s` arms; the second
+                // `s` inside the window enters browse.
                 if c == 's' && self.browse_gate_open() {
                     match self.ss_arm {
                         Some(at) if at.elapsed() < SS_ARM_TTL => {
@@ -4108,19 +4107,6 @@ impl App {
                             return Vec::new();
                         }
                     }
-                }
-                if c == 's'
-                    && self.editor.mode() == Mode::Normal
-                    && !self.editor.text().trim().is_empty()
-                    && self.pending_name.is_none()
-                {
-                    // The editor keeps the `s` role (change one
-                    // char); the hint names the browse path.
-                    if let Some(h) = self.editor_press(Key::Char('s')) {
-                        self.flash(h);
-                    }
-                    self.flash("ss browses — clear the draft first");
-                    return Vec::new();
                 }
                 // `:` opens the command palette (docs/tui-command-palette.md).
                 // Only in normal mode; in insert mode `:` is a regular
@@ -5204,5 +5190,44 @@ mod perf_bgbuild_tests {
             !app.transcript_rebuilding(),
             "the real-log build settles"
         );
+    }
+}
+
+#[cfg(test)]
+mod browse_gate_tests {
+    use super::{App, Key};
+
+    #[test]
+    fn double_s_enters_browse_with_a_held_draft() {
+        // The 2026-09-15 loosening: a held draft no longer blocks
+        // the double-`s` browse gate. The first `s` arms the gate
+        // instead of taking the editor replace role.
+        let mut app = App::new();
+        app.set_draft("compose a message".into());
+        let _ = app.press(Key::Esc); // insert -> normal, the gate state
+        let _ = app.press(Key::Char('s'));
+        assert!(
+            !app.browse.active(),
+            "the first s only arms the gate"
+        );
+        assert_eq!(
+            app.editor.text(),
+            "compose a message",
+            "the armed s does not take the editor replace role"
+        );
+        let _ = app.press(Key::Char('s'));
+        assert!(
+            app.browse.active(),
+            "the second s enters browse even with a held draft"
+        );
+    }
+
+    #[test]
+    fn double_s_still_enters_browse_with_an_empty_draft() {
+        let mut app = App::new();
+        let _ = app.press(Key::Esc); // insert -> normal
+        let _ = app.press(Key::Char('s'));
+        let _ = app.press(Key::Char('s'));
+        assert!(app.browse.active());
     }
 }

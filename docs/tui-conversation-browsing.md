@@ -126,27 +126,28 @@ neovim.
 
 ### 4.2 Entry and exit
 
-Entry: a double `s`, under the same two conditions as the
-`q q` exit path:
+Entry: a double `s`, in the editor's normal mode. The draft
+may be empty or held (the 2026-09-15 loosening dropped the
+empty-draft condition, request 3):
 
-1. the input area (draft) is empty;
-2. the editor is in normal mode.
+1. the editor is in normal mode.
+
+(The `q q` quit path still needs an empty draft. The browse
+gate does not.)
 
 Host routing mirrors the FT-012 quit arm:
 
-- in the gated state (normal, empty draft), the first `s`
+- in the gated state (normal mode, any draft), the first `s`
   arms. A second `s` inside `3 s` enters browse mode.
 - any other key disarms. The armed `s` drops, like the
   armed `q` of FT-012. The disarming key then acts in the
   editor alone, with no `s` effect.
 - the arm expires after `3 s`. A fresh `s` re-arms.
 - in every other state (`insert`, `replace`, `visual`, the
-  command line, the name input, a non-empty draft), `s`
-  goes to that input untouched. In the editor's normal
-  mode with a draft, `s` keeps its editor role (change one
-  char, `docs/vim-editor-design.md` section 3). In that
-  state the status row hints `ss browses — clear the
-  draft first`, like the FT-012 `q` hint.
+  command line, the name input), `s` goes to that input
+  untouched. A held draft no longer blocks the gate: the
+  first `s` arms the browse gate instead of taking the
+  editor replace role.
 
 Entry places the cursor on the first visible line, col `0`.
 The view does not move on entry. The user's eyes sit on the
@@ -159,20 +160,22 @@ Exit:
   window. The view stays where browse left it (`scroll`
   unchanged): the user is still on the same spot of the
   conversation. The cursor, the gutter, and the bar drop
-  away. The editor is in normal mode with the still-empty
-  draft.
+  away. The editor is in normal mode, with the draft as it
+  was on entry.
 - `q` and `Ctrl+Q` in browse mode keep the quit gate. The
-  gate still holds (empty draft, editor in normal mode
-  under the overlay), so a double `q` quits the TUI as
-  today. Loops keep running as orphans. Only `Ctrl+C` stops
-  a loop (FT-012, unchanged).
+  quit gate still needs an empty draft (FT-012, unchanged).
+  A held draft means `q q` hints `clear the draft, then
+  q q quits` instead of quitting. An empty-draft session
+  still double-`q` quits as today. Loops keep running as
+  orphans. Only `Ctrl+C` stops a loop (FT-012, unchanged).
 - `Tab` in browse mode exits it, then cycles sessions. The
   browse state never survives a session switch. The scroll
   resets today, and the browse state resets with it.
 
 While browse mode holds, the editor is frozen. The draft
-cannot change. The empty-draft invariant of the gate holds
-for the whole browse session.
+cannot change. The 2026-09-15 loosening dropped the
+empty-draft invariant of the entry gate, so a held draft
+carries into and out of a browse session.
 
 ### 4.3 The line-number gutter
 
@@ -506,11 +509,11 @@ Unit tests live in `bin/tui/src/` (the repo convention:
 | gutter width | `total = 100` | three digits plus one space, right-aligned |
 | gate: insert | insert mode, empty draft | the first `s` types into the editor (the typed char); no arm |
 | gate: disarm | normal, empty; `s` then `i` inside `3 s` | no browse; the armed `s` drops (the FT-012 disarm); `i` enters insert alone |
-| gate: non-empty | normal mode, the draft held | the `s` goes to the editor; no arm; the hint `ss browses — clear the draft first` |
+| gate: non-empty | normal mode, the draft held | the first `s` arms the browse gate instead of the editor replace role. The second `s` enters browse mode (the 2026-09-15 loosening) |
 | gate: enter | normal, empty; `s s` inside `3 s` | browse; the cursor is the first visible line, col `0`; the view does not move; the gutter and the bar draw |
 | gate: expired arm | the arm expires; a fresh `s` | a new arm |
 | gate: exit | in browse; `s s` inside `3 s` | normal mode; the view stays where browse left it; the gutter and the bar drop |
-| quit in browse | in browse; `q q` | the TUI quits (the gate holds) |
+| quit in browse | in browse; `q q` | with an empty draft the TUI quits. A held draft hints `clear the draft, then q q quits` |
 | `j` / `k` clamp | the cursor is line `1`; `k` | no move (the floor) |
 | `h` / `l` clamp | the cursor is col `0`; `h` | no move |
 | counted motion | `5j` from line `3` | the cursor is line `8`; the col clamps |
@@ -652,7 +655,7 @@ section 4.4 roles. Stage 3 adds the visual state and the
 |---|---|
 | `v` | char-visual: the anchor sits at the cursor |
 | `V` | linewise visual: the anchor holds the cursor line |
-| a motion in visual (`j` `k` `h` `l` `w` `0` `^` `$` `G`) | extend the selection from the anchor to the motion target |
+| a motion in visual (`j` `k` `h` `l` `w` `b` `e` `0` `^` `$` `G`) | extend the selection from the anchor to the motion target |
 | `y` in visual | yank the selection; leave visual; the cursor moves to the selection end |
 | `Esc` in visual | cancel the selection; the cursor returns to the anchor |
 | `y` | open the yank operator: a motion or a text object follows |
@@ -662,6 +665,8 @@ section 4.4 roles. Stage 3 adds the visual state and the
 | `yG` | yank from the cursor line to the last line, linewise |
 | `y0` | yank from the cursor to the line start |
 | `y^` | yank from the cursor to the first non-blank char |
+| `yb` | yank to the start of the previous word (the operator `b` rule) |
+| `ye` | yank to the end of the word under the cursor (the operator `e` rule, inclusive) |
 | `yi"` / `ya"` | yank inside / around the double quotes |
 | `yi'` / `ya'` | yank inside / around the single quotes |
 | `yi(` / `ya(` | yank inside / around the parentheses |
@@ -679,11 +684,15 @@ Notes:
   pending operator keeps the section 4.4 role.
 - an unmatched text object is a no-op with a hint
   (section 11.8). The operator clears.
+- the word motions (`w` / `b` / `e` and their `y` forms)
+  run under the browse word class. The hyphen joins the word
+  run (the 2026-09-15 fix). A hyphenated word like `foo-bar`
+  is one word. The editor keeps the plain vim class.
 - the yank operator is not a change: no recording, no undo
   stack (the browse mode has neither; the editor keeps its
   own undo for the draft).
-- the status hint grows one clause: `browse: v select, y
-  yank, yy lines, yw word, ss leave`.
+- the status hint: `browse: v select, y yank, yy lines, yw
+  word, ye end, b back, ss leave`.
 
 ### 11.5 The reuse plan
 
@@ -697,9 +706,12 @@ over the same lines.
 Reuse (the functions stay in `vim_editor.rs`, made
 `pub(crate)` for `browse.rs`):
 
-- motions: `word_forward`, `word_end`, `line_end`,
-  `line_start`, `first_nonblank_motion`, `char_left`,
-  `char_right`, `go_to_last_line`, `extend_w_eol`;
+- motions: `word_forward`, `word_backward`, `word_end`,
+  `line_end`, `line_start`, `first_nonblank_motion`,
+  `char_left`, `char_right`, `go_to_last_line`, `extend_w_eol`.
+  The word motions take a `WordClass` policy: browse passes
+  `WordClass::Browse` (the hyphen joins the word run, the
+  2026-09-15 fix), the editor passes `WordClass::Editor`.
 - the range types and builders: `MotionResult`, `OpRange`,
   `motion_to_range`, `text_object_to_range`, `extract_text`;
 - the text objects: `resolve_text_object` (the `i` / `a`
@@ -807,10 +819,11 @@ P3. gutter-numbering: given browse mode with the cursor at line N of
     total T, observe line N show its absolute number in the accent tone
     and every other visible line show its relative distance in the dim
     tone.
-P4. browse-entry-exit: given normal mode with an empty draft, observe
-    a double `s` within 3 s enter browse mode and a second double `s`
-    exit it; given a non-empty draft or insert mode, observe `s` not
-    trigger browse entry.
+P4. browse-entry-exit: given normal mode, observe a double `s`
+    within 3 s enter browse mode whether the draft is empty or
+    held, and a second double `s` exit it. Given insert mode,
+    observe `s` not trigger browse entry. The 2026-09-15
+    loosening: a held draft no longer blocks the gate.
 P5. jump-motions: given `gg`, observe the cursor on line 1 and the view
     at the top; given `G`, observe the cursor on the last line and the
     view at the tail (scroll = 0).
@@ -837,7 +850,7 @@ and passes. `open` names the blocker and what unblocks it.
 | P1 | bar-visibility | `bar_hides_at_the_tail`, `bar_shows_on_scroll_back`, `bar_shows_in_browse_with_the_cursor_marker` in `bin/tui/src/render.rs` | proven |
 | P2 | bar-geometry | `bar_geometry_row` in `bin/tui/src/browse.rs` | proven |
 | P3 | gutter-numbering | `gutter_numbering`, `gutter_width_is_digits_plus_one` in `bin/tui/src/browse.rs` | proven |
-| P4 | browse-entry-exit | `browse_gate_enter_s_s`, `browse_gate_exit_s_s`, `browse_gate_non_empty_draft_hints` in `bin/tui/src/app.rs` | proven |
+| P4 | browse-entry-exit | `double_s_enters_browse_with_a_held_draft`, `double_s_still_enters_browse_with_an_empty_draft` in `bin/tui/src/app.rs` | proven |
 | P5 | jump-motions | `gg_lands_on_line_one_at_the_top`, `g_lands_on_the_last_line_at_the_tail` in `bin/tui/src/browse.rs` | proven |
 | P6 | goto-line | `goto_line_42_of_100`, `goto_clamps_to_the_last_line`, `goto_non_number_hints_and_moves_nothing` in `bin/tui/src/browse.rs` | proven |
 | P7 | regex-search | `forward_search_jumps_live_and_highlights`, `n_wraps_to_the_first_match_and_centers`, `n_after_a_forward_jump_restores_the_saved_view` in `bin/tui/src/browse.rs` | proven |

@@ -466,11 +466,28 @@ macchiato` as the first internal color scheme. Shipped in
 
 ## New requests (2026-09-15)
 
-- [ ] The browse cursor does not paint at the start of a word.
-      For a hyphenated word it paints on the hyphen. See
-      `bin/tui/src/browse.rs`.
-- [ ] The vim `e` (end of word) motion is not registered while
-      in browse mode. See `bin/tui/src/browse.rs`.
-- [ ] Allow entering browse mode with a non-empty draft. Today
-      the double-`s` gate needs an empty input. Loosen it. See
-      `docs/tui-conversation-browsing.md` section 4.2.
+- [x] The browse cursor does not paint at the start of a word.
+      For a hyphenated word it paints on the hyphen. Shipped
+      2026-09-15: the browse word motion now runs under a
+      hyphen-folding word class (`WordClass::Browse`). A
+      hyphenated word like `foo-bar` is one word. `w` / `b` /
+      `e` land on a word start or word end, never on the
+      hyphen. The editor keeps the plain vim class
+      (`WordClass::Editor`). Detail: `WordClass` in
+      `bin/tui/src/vim_editor.rs`; the motion in
+      `bin/tui/src/browse.rs`. Tests: `word_motion_tests`,
+      `word_class_tests`.
+- [x] The vim `e` (end of word) motion is not registered while
+      in browse mode. Shipped 2026-09-15: `e` is now in the
+      browse key table (`char_key`). It is also in the `y`
+      operator list and `browse_motion_range` (`ye`). It uses
+      the browse word class. The status hint gained `ye end`.
+      Detail: `bin/tui/src/browse.rs`. Tests:
+      `e_lands_on_the_word_end`, `ye_yanks_the_whole_hyphenated_word`.
+- [x] Allow entering browse mode with a non-empty draft. Today
+      the double-`s` gate needs an empty input. Loosen it.
+      Shipped 2026-09-15: `browse_gate_open`
+      (`bin/tui/src/app.rs`) dropped the empty-draft condition.
+      The double-`s` now works in normal mode with a held
+      draft. The quit gate (`q q`) still needs an empty draft.
+      Tests: `browse_gate_tests` (`bin/tui/src/app.rs`).
