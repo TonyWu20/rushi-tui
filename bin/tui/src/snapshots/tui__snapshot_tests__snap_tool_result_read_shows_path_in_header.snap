@@ -3,9 +3,9 @@ source: bin/tui/src/snapshot_tests.rs
 expression: out
 ---
 " Session: s1─────────────────────────────────────────────────────────── [idle]  "
-"                                                                                "
 "  read bin/tui/src/main.rs                                                      "
-"  fn main() {}                                                                  "
+"                                                                                "
+"                                                                                "
 "                                                                                "
 "                                                                                "
 "                                                                                "

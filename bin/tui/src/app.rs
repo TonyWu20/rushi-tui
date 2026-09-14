@@ -470,8 +470,6 @@ pub struct App {
         Vec<String>,
         u64,
         bool,
-        bool,
-        Option<usize>,
     )>,
     /// The incremental live-stream block cache. See
     /// docs/tui-perf-streaming-incremental-plan.md. None until the
@@ -572,9 +570,9 @@ pub struct App {
     /// section 4). `true` renders the block; `false` hides it
     /// entirely.
     thinking_shown: bool,
-    /// The thinking-block expand state (Ctrl+X). `false` shows the
+    /// The thinking-block expand state (Ctrl+T). `false` shows the
     /// collapsed header row; `true` shows the full thinking text.
-    thinking_expanded: bool,
+    pub(crate) thinking_expanded: bool,
     /// The input queue toggle (Ctrl+F, docs/tui-pending-user-messages.md
     /// stage 2). `true`: the next draft sends to the follow queue.
     follow_queue: bool,
@@ -793,7 +791,9 @@ impl App {
             fold_cursor_target: None,
             last_event_line_starts: Vec::new(),
             thinking_shown: true,
-            thinking_expanded: true,
+            // Thinking blocks start collapsed (docs/tui-turn-fold.md).
+            // The block is a one-line label until Ctrl+T expands it.
+            thinking_expanded: false,
             follow_queue: false,
             picker: crate::picker::state::PickerState::new(),
             picker_matcher: None,
@@ -843,12 +843,12 @@ impl App {
         self.tool_expanded
     }
 
-    /// The thinking-block visibility state (Ctrl+T).
+    /// The thinking-block visibility state. Toggled with `Ctrl+X`.
     pub fn thinking_shown(&self) -> bool {
         self.thinking_shown
     }
 
-    /// The thinking-block expand state (Ctrl+X).
+    /// The thinking-block expand state. Toggled with `Ctrl+T`.
     pub fn thinking_expanded(&self) -> bool {
         self.thinking_expanded
     }
@@ -1122,12 +1122,13 @@ impl App {
         best.map(|(id, _)| id)
     }
 
-    pub fn fold_input(&self) -> Option<std::collections::HashSet<u64>> {
-        if self.browse.active() {
-            Some(self.turn_fold.clone())
-        } else {
-            None
-        }
+    /// The turn-fold state every transcript build consumes
+    /// (docs/tui-turn-fold.md). The fold applies in the main view
+    /// and the browse view alike. The `z` keys operate the state
+    /// while browse is active. The state persists across view
+    /// switches and sessions until a session switch clears it.
+    pub fn fold_input(&self) -> std::collections::HashSet<u64> {
+        self.turn_fold.clone()
     }
 
     pub fn set_event_line_starts(&mut self, starts: Vec<Option<usize>>) {
@@ -1399,13 +1400,18 @@ impl App {
         }
     }
 
-    pub fn transcript_live_summary(
-        &mut self,
-        width: usize,
-        ext: Option<&crate::ext::ExtHost>,
-    ) -> Option<usize> {
-        let _ = self.transcript_lines(width, ext);
-        self.transcript_cache.as_ref().and_then(|c| c.14)
+    /// The live tally of the in-progress turn, merged into the
+    /// working row while the loop runs (docs/tui-turn-fold.md).
+    /// `None` when no loop is running or the live turn is empty.
+    pub fn live_fold_tally(&self) -> Option<String> {
+        let sid = self.active()?;
+        if !self.loop_running(sid) {
+            return None;
+        }
+        let events = self.events();
+        let turns = crate::fold::turns(events, self.events_base_seq(), true);
+        let t = turns.last()?;
+        crate::fold::tally_text(events, t.start + 1, t.end)
     }
 
     /// The input queue toggle state (Ctrl+F): the next draft sends
@@ -1864,7 +1870,6 @@ impl App {
             palette: self.palette.clone(),
             frac_epoch: self.frac_epoch,
             turn_fold_epoch: self.turn_fold_epoch,
-            fold_active: self.browse.active(),
             loop_running: self.active().is_some_and(|s| self.loop_running(s)),
         };
         // A partial tail cache matches the key but does not satisfy
@@ -1967,8 +1972,7 @@ impl App {
                 && c.4 == key.palette
                 && c.9 == key.frac_epoch
                 && c.11 == key.turn_fold_epoch
-                && c.12 == key.fold_active
-                && c.13 == key.loop_running
+                && c.12 == key.loop_running
         })
     }
 
@@ -1992,9 +1996,7 @@ impl App {
             key.frac_epoch,
             build.texts.clone(),
             key.turn_fold_epoch,
-            key.fold_active,
             key.loop_running,
-            build.live_summary,
         ));
         self.transcript_partial = partial;
     }
@@ -2033,13 +2035,12 @@ impl App {
     /// One-line render of a build key for the trace log.
     fn fmt_key(key: &crate::transcript_worker::BuildKey) -> String {
         format!(
-            "ev={} w={} ext={} frac={} fold={} za={} run={}",
+            "ev={} w={} ext={} frac={} fold={} run={}",
             key.events_version,
             key.width,
             key.ext_ver,
             key.frac_epoch,
             key.turn_fold_epoch,
-            key.fold_active,
             key.loop_running
         )
     }

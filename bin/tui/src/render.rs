@@ -175,81 +175,99 @@ fn owns_raw_line(k: usize, prov: &[Option<usize>], hard: &[String]) -> Option<St
     }
 }
 
-/// The user-message panel: a rounded, bordered block titled "User" on
-/// the tool-result panel background (docs/tui_feature_requests_from_human.md
-/// 2026-09-06: user messages are wrapped like tool results — the tool
-/// panel's background, a `Block::bordered().border_type(Rounded)` box,
-/// and the "User" title in place of the old `user` marker, with no
-/// content gutter). The rows are hand-built styled spans, like
-/// [`crate::tool_display::box_rows`] for the tool panel, so the panel
-/// composes into the single scrollable transcript `Paragraph` and a
-/// browse-mode cursor / yank still lands on a real transcript line.
+/// The user-message panel: a rounded, bordered block titled "User".
+/// User messages are wrapped like tool results
+/// (docs/tui_feature_requests_from_human.md 2026-09-06). The
+/// rounded `Accent`-toned border replaces the old `user` marker.
+/// There is no background fill and no content gutter. The rows are
+/// hand-built styled spans, like `box_rows` for the tool panel.
+/// The panel composes into the single scrollable transcript
+/// `Paragraph`. A browse-mode cursor or yank still lands on a real
+/// transcript line.
 ///
-/// `content` are the already-wrapped, styled message lines (clamped to
-/// the panel inner width by the caller). Every cell carries the panel
-/// background so the panel reads as one lighter band; the border and
-/// the "User" title read in the accent tone. The panel spans the full
-/// `width` (the transcript width, like the tool-result panel). An
-/// empty message renders a single empty interior row between the two
-/// border rows.
+/// `content` are the already-wrapped, styled message lines.
+/// The caller clamps them to the panel inner width. The panel
+/// spans the full `width`. An empty message renders a single empty
+/// interior row between the two border rows.
 fn user_box_rows(
     content: &[Line<'static>],
     width: usize,
     palette: &crate::color::Palette,
 ) -> Vec<Line<'static>> {
-    // The tool-result panel background (the same lighter band the tool
-    // panel uses, the 2026-09-14 borderless panel background). The
-    // border and the "User" title read in the accent tone.
-    let bg = crate::tool_display::box_bg(palette, false);
-    let border = Style::default().fg(palette.color(crate::color::Role::Accent)).bg(bg);
-    let pad = Style::default().bg(bg);
-    let left_pad = 1usize; // one column, mirroring the tool panel pad.
+    message_box_rows(
+        content,
+        width,
+        palette,
+        Some("User"),
+        crate::color::Role::Accent,
+    )
+}
+
+/// The panel for the final idle assistant message of a completed
+/// turn. It is the same rounded shape as the user box. It carries no
+/// title. Only the `Report`-toned border marks the panel. The tone
+/// is distinct from the `Accent` user box. See docs/tui-turn-fold.md
+/// "Final message panel".
+fn report_box_rows(
+    content: &[Line<'static>],
+    width: usize,
+    palette: &crate::color::Palette,
+) -> Vec<Line<'static>> {
+    message_box_rows(content, width, palette, None, crate::color::Role::Report)
+}
+
+/// The rounded message panel with no background fill. The border
+/// alone marks the message. An optional title sits in the top
+/// border. The `border_role` tones both border and title.
+fn message_box_rows(
+    content: &[Line<'static>],
+    width: usize,
+    palette: &crate::color::Palette,
+    title: Option<&str>,
+    border_role: crate::color::Role,
+) -> Vec<Line<'static>> {
+    let border = Style::default().fg(palette.color(border_role));
+    // One column of left pad, mirroring the tool panel pad.
+    let left_pad = 1usize;
     let inner = width.saturating_sub(2);
     let mut rows: Vec<Line<'static>> = Vec::new();
-    // Top border: `╭User───╮`. The "User" title sits one column in from
-    // the corner, overwriting the top border's dashes — exactly how a
-    // ratatui `Block::bordered().border_type(Rounded).title("User")`
-    // draws its left title.
-    let title = "User";
-    // `saturating_sub` keeps the fill non-negative on very narrow widths.
-    let top_fill = width.saturating_sub(1 + title.chars().count() + 1);
-    rows.push(Line::from(vec![
-        Span::styled("╭", border),
-        Span::styled(title, border),
-        Span::styled("─".repeat(top_fill), border),
-        Span::styled("╮", border),
-    ]));
-    // Interior rows: `│ content │` with one column of left padding and a
-    // background fill to the panel edge. An empty message yields a
-    // single empty interior row.
+    // Top border. `╭Title───╮` when a title is present. A bare
+    // `╭───╮` otherwise. The title sits one column in from the
+    // corner, overwriting the top border dashes.
+    let title_len = title.map_or(0, |t| t.chars().count());
+    let top_fill = width.saturating_sub(2 + title_len);
+    let mut top = vec![Span::styled("╭", border)];
+    if let Some(t) = title {
+        top.push(Span::styled(t.to_string(), border));
+    }
+    top.push(Span::styled("─".repeat(top_fill), border));
+    top.push(Span::styled("╮", border));
+    rows.push(Line::from(top));
+    // Interior rows: `│ content │` with one column of left pad. An empty
+    // message yields a single empty interior row.
     if content.is_empty() {
         rows.push(Line::from(vec![
             Span::styled("│", border),
-            Span::styled(" ".repeat(inner), pad),
+            Span::raw(" ".repeat(inner)),
             Span::styled("│", border),
         ]));
     } else {
         for line in content {
             let mut cells = vec![
                 Span::styled("│", border),
-                Span::styled(" ".repeat(left_pad), pad),
+                Span::raw(" ".repeat(left_pad)),
             ];
             let mut content_width = 0usize;
             for span in &line.spans {
-                // Keep the span's own foreground / modifiers; only fill
-                // the panel background (mirrors the tool panel's
-                // `box_rows` background fill).
-                let st = if span.style.bg.is_some() {
-                    span.style
-                } else {
-                    span.style.bg(bg)
-                };
+                // Keep the span's own foreground and modifiers.
+                let st = span.style;
                 cells.push(Span::styled(span.content.clone(), st));
                 content_width += span.content.chars().count();
             }
-            // Right padding to the panel edge (the panel is one band).
-            let right_pad = inner.saturating_sub(left_pad).saturating_sub(content_width);
-            cells.push(Span::styled(" ".repeat(right_pad), pad));
+            // Right padding to the panel edge.
+            let right_pad =
+                inner.saturating_sub(left_pad).saturating_sub(content_width);
+            cells.push(Span::raw(" ".repeat(right_pad)));
             cells.push(Span::styled("│", border));
             rows.push(Line::from(cells));
         }
@@ -306,11 +324,12 @@ pub struct RenderState<'a> {
     /// The global tool fold/expand toggle (Ctrl+O): `true` expands
     /// every collapsed block to the full body.
     pub tool_expanded: bool,
-    /// The thinking-block visibility (Ctrl+T): `false` hides every
+    /// The thinking-block visibility (Ctrl+X): `false` hides every
     /// thinking block.
     pub thinking_shown: bool,
-    /// The thinking-block expand state (Ctrl+X): `false` shows the
-    /// collapsed header row only.
+    /// The thinking-block expand state (Ctrl+T): `false` shows the
+    /// collapsed one-line label. Blocks start collapsed
+    /// (docs/tui-turn-fold.md).
     pub thinking_expanded: bool,
     /// Per-block expand fractions for animation. Keys are tool-result
     /// event IDs. A value in `[0.0, 1.0]` interpolates the body cap
@@ -318,11 +337,6 @@ pub struct RenderState<'a> {
     /// "no animation: use the `tool_expanded` bool as-is".
     /// (docs/tui-tool-display-fancy.md section 6)
     pub expand_fracs: &'a std::collections::HashMap<String, f64>,
-    /// The browse fold is active (docs/tui-turn-fold.md): tool
-    /// results render as a one-line header unless their per-block
-    /// fraction in `expand_fracs` is >= 0.5. The main-view builds
-    /// keep this off.
-    pub fold_results: bool,
 }
 
 #[builder]
@@ -337,6 +351,10 @@ fn event_lines<'a>(
     state: &'a RenderState<'a>,
     loop_running: bool,
     compaction_last_open: bool,
+    /// Box this event in the final-message panel when it is the
+    /// idle reply of a completed turn (docs/tui-turn-fold.md).
+    #[builder(default = false)]
+    final_report: bool,
 ) -> (Vec<Line<'static>>, Vec<Option<String>>) {
     let gutter = " ".repeat(GUTTER);
     let wrap_w = width.saturating_sub(GUTTER).max(4);
@@ -404,19 +422,18 @@ fn event_lines<'a>(
             owns.push(None); // bottom border
         }
         EventKind::AssistantMessage => {
-            // The thinking block first: the model's own reasoning items,
-            // captured into the log by the loop, render above the
-            // message body and the tool calls that follow, so the
-            // transcript reads thinking, then the actions (docs/tui-
-            // thinking-block.md section 4: the reasoning content shows
-            // above the message body).
-            // pi-aligned keymap: `Ctrl+T` collapses or expands
-            // the block (the pi `app.thinking.toggle`). Collapsed it is a
-            // one-line label row; expanded it is the full reasoning text.
-            // `Ctrl+X` hides or shows the block entirely. The leading
-            // `thinking` tag uses the `ThinkingTag` role: the active
-            // accent when expanded, the muted thinking tone when folded.
-            // The block body keeps the `Thinking` role.
+            // The thinking block first: the model's own reasoning items
+            // (docs/tui-thinking-block.md section 4). Rendered above
+            // the message body and the tool calls that follow.
+            // `Ctrl+T` toggles the block between collapsed and
+            // expanded. `Ctrl+X` hides or shows the block entirely.
+            // The `thinking` tag uses the `ThinkingTag` role. The
+            // block body keeps the `Thinking` role.
+            // docs/tui-turn-fold.md "Final message panel": when
+            // `final_report`, the block renders inside the report panel.
+            // Its rows drop the `LABEL` pad and the content gutter.
+            // They wrap to the panel inner width.
+            let mut think_rows: Vec<Line<'static>> = Vec::new();
             if state.thinking_shown {
                 let reasoning = e.get("reasoning").and_then(|v| v.as_array());
                 if let Some(text) = thinking_text(reasoning) {
@@ -424,15 +441,16 @@ fn event_lines<'a>(
                         palette.style(crate::color::Role::Thinking, Modifier::empty());
                     let tag_style =
                         Style::default().fg(palette.thinking_tag(state.thinking_expanded));
+                    let prefix = if final_report { "" } else { LABEL };
                     if state.thinking_expanded {
-                        let header = vec![Span::styled(format!("{LABEL}thinking"), tag_style)];
-                        out.push(Line::from(header));
-                        owns.push(None); // the thinking label: UI chrome, not shareable source
-                        // The reasoning body aligns with the tool-result
-                        // text. One cell of left pad, then the text wraps
-                        // to the remaining width. This matches the `read`
-                        // and `bash` panel left pad. No content gutter.
-                        let content_w = assistant_body_content_w(width);
+                        let header =
+                            vec![Span::styled(format!("{prefix}thinking"), tag_style)];
+                        think_rows.push(Line::from(header));
+                        let content_w = if final_report {
+                            user_box_content_w(width)
+                        } else {
+                            assistant_body_content_w(width)
+                        };
                         let wrapped = wrap_thinking(
                             &text,
                             content_w,
@@ -440,17 +458,24 @@ fn event_lines<'a>(
                             thinking_style,
                             state.tool_display.highlight_engine,
                         );
-                        let n = wrapped.len();
-                        out.extend(guttered(&wrapped, " "));
-                        owns.extend(std::iter::repeat_n(None, n));
+                        if final_report {
+                            // Inside the panel there is no content
+                            // gutter. The panel supplies its own pad.
+                            think_rows.extend(wrapped);
+                        } else {
+                            // The reasoning body aligns with the tool
+                            // result text. One cell of left pad, then
+                            // the text wraps to the remaining width.
+                            // This matches the `read`/`bash` panel pad.
+                            think_rows.extend(guttered(&wrapped, " "));
+                        }
                     } else {
-                        // The collapsed row: a one-line pi-style label with
-                        // the expand hint, not the full reasoning text.
-                        out.push(Line::from(Span::styled(
-                            format!("{LABEL}thinking \u{2026} (Ctrl+T to expand)"),
+                        // The collapsed row: a one-line pi-style label
+                        // with the expand hint, not the reasoning text.
+                        think_rows.push(Line::from(Span::styled(
+                            format!("{prefix}thinking \u{2026} (Ctrl+T to expand)"),
                             tag_style,
                         )));
-                        owns.push(None);
                     }
                 }
             }
@@ -480,33 +505,67 @@ fn event_lines<'a>(
                 .collect();
             // One cell of left pad aligns the assistant body with the
             // tool-result text (the `read`/`bash` panel left pad). The
-            // body wraps to the remaining width.
-            let content_w = assistant_body_content_w(width);
+            // body wraps to the remaining width. The final-message
+            // panel (docs/tui-turn-fold.md "Final message panel") is
+            // narrower: its content wraps to the panel inner width.
+            let content_w = if final_report {
+                user_box_content_w(width)
+            } else {
+                assistant_body_content_w(width)
+            };
             let (wrapped, prov) = if content.is_empty() {
                 (Vec::new(), Vec::new())
             } else {
                 render_message_content(&content, event_id, ext, content_w, prose, palette)
             };
+            // The first body line: the tool-call count header plus the
+            // first wrapped line. The remaining lines are the wrap
+            // continuations. `body_rows` stay unpadded. Each output form
+            // adds its own left pad.
+            let mut first_spans: Vec<Span<'static>> = Vec::new();
             if let Some(first) = wrapped.first() {
+                first_spans.extend(header.iter().cloned());
                 if !header.is_empty() {
-                    header.push(Span::raw("  "));
+                    first_spans.push(Span::raw("  "));
                 }
-                header.extend(first.spans.iter().cloned());
+                first_spans.extend(first.spans.iter().cloned());
             }
-            // The one-cell left pad: a plain space before the body text.
-            let mut body_header = vec![Span::raw(" ")];
-            body_header.extend(header);
-            out.push(Line::from(body_header));
-            owns.push(owns_raw_line(0, &prov, &hard));
-            // An empty content (a model output that carries only tool
-            // calls) has no body line; the header stands alone.
-            // FT-006: an unguarded `wrapped[1..]` panicked on the
-            // first launch draw. The body lines carry the one-cell pad.
-            if !wrapped.is_empty() {
-                out.extend(guttered(&wrapped[1..], " "));
-                for k in 1..prov.len() {
-                    owns.push(owns_raw_line(k, &prov, &hard));
+            let mut body_rows: Vec<Line<'static>> = vec![Line::from(first_spans)];
+            for w in wrapped.iter().skip(1) {
+                body_rows.push(Line::from(w.spans.clone()));
+            }
+            let mut body_raws: Vec<Option<String>> = Vec::new();
+            for k in 0..body_rows.len() {
+                body_raws.push(owns_raw_line(k, &prov, &hard));
+            }
+            let n_think = think_rows.len();
+            if final_report {
+                // The idle reply of a completed turn: the rounded
+                // panel with the `Report` border and no title
+                // (docs/tui-turn-fold.md "Final message panel"). The
+                // thinking block rides inside the panel. The border
+                // rows are UI chrome. The interior rows keep the
+                // per-source-line yank ownership.
+                let mut panel_rows = think_rows;
+                panel_rows.extend(body_rows.iter().cloned());
+                let panel = report_box_rows(&panel_rows, width, palette);
+                out.extend(panel);
+                owns.push(None);
+                owns.extend(std::iter::repeat_n(None, n_think));
+                owns.extend(body_raws);
+                owns.push(None);
+            } else {
+                out.extend(think_rows);
+                owns.extend(std::iter::repeat_n(None, n_think));
+                // The one-cell left pad: a plain space before the body
+                // text. FT-006: the empty-content case is guarded by
+                // the `body_rows` build above.
+                for br in &body_rows {
+                    let mut padded: Vec<Span<'static>> = vec![Span::raw(" ")];
+                    padded.extend(br.spans.iter().cloned());
+                    out.push(Line::from(padded));
                 }
+                owns.extend(body_raws);
             }
         }
         EventKind::ToolCall => {
@@ -595,14 +654,14 @@ fn event_lines<'a>(
             } else {
                 ""
             };
-            // The browse fold L2/L3 (docs/tui-turn-fold.md).
-            // When the fold is active, an unopened result renders as
-            // a one-line header. Opened results render the full body.
-            // The per-result frac is the open state. The `zA`, click,
-            // `zM`, and `zR` keys set it. The Ctrl+O toggle is ignored
-            // in this mode.
-            let fold_open = state.fold_results && expand_frac >= 0.5;
-            let fold_closed = state.fold_results && !fold_open;
+            // The turn fold L2/L3 (docs/tui-turn-fold.md). Applies in
+            // the main view and the browse view alike. An unopened
+            // result renders as a one-line header. Opened results
+            // render the full body. The per-result frac is the open
+            // state. The `zA`, click, `zM`, and `zR` keys set it.
+            // The Ctrl+O toggle is ignored by the L2 default.
+            let fold_open = expand_frac >= 0.5;
+            let fold_closed = !fold_open;
             if fold_closed {
                 // The one-line header. No body, no margin rows.
                 // The raw output stays the yankable source of the row
@@ -2068,7 +2127,17 @@ fn working_row(app: &App, running: bool, now: &chrono::DateTime<chrono::Utc>) ->
         app.palette()
             .style(crate::color::Role::Status, Modifier::empty()),
     );
-    Line::from(vec![frame, body])
+    let mut spans = vec![frame, body];
+    // The in-progress turn's live tally, merged into this row instead
+    // of a separate in-transcript line (docs/tui-turn-fold.md).
+    if let Some(tally) = app.live_fold_tally() {
+        spans.push(Span::styled(
+            format!(" · {tally}"),
+            app.palette()
+                .style(crate::color::Role::Status, Modifier::DIM),
+        ));
+    }
+    Line::from(spans)
 }
 
 /// The transcript-building row, shown while a background build is in
@@ -3139,7 +3208,6 @@ pub struct TranscriptBuild {
     /// the string form of every line on each frame
     /// (docs/tui-conversation-browsing.md section 4.6).
     pub texts: Vec<String>,
-    pub live_summary: Option<usize>,
 }
 
 /// The shareable source text of one event (docs/tui-conversation-
@@ -3248,7 +3316,11 @@ pub struct TranscriptBuildInput {
     /// Pre-resolved ext reply lines, keyed by event id.
     /// The key is the in-memory event index.
     pub ext_lines: std::collections::HashMap<u64, Vec<crate::ext::ExtLine>>,
-    pub turn_fold: Option<std::collections::HashSet<u64>>,
+    /// The open turns of the turn fold (docs/tui-turn-fold.md).
+    /// A turn in the set renders its full body. A turn outside the
+    /// set is collapsed to its user box and tally. The fold applies
+    /// in the main view and the browse view alike.
+    pub turn_fold: std::collections::HashSet<u64>,
 }
 
 /// The ext-side inputs of a transcript build, decoupled from the
@@ -3455,15 +3527,11 @@ fn fold_summary_line(
 ) -> Line<'static> {
     let mut spans: Vec<Span<'static>> =
         vec![Span::raw(" ".repeat(width.min(GUTTER)))];
-    if sl.spinner {
-        let spinner = Span::styled(
-            format!("{} ", WORKING_SPINNER_FRAMES[0]),
-            Style::default().fg(state.palette.color(crate::color::Role::Status)),
-        );
-        spans.push(spinner);
-    }
     if !sl.text.is_empty() {
         let dim = state.palette.style(crate::color::Role::Hint, Modifier::DIM);
+        // The `⎿` leader art marks the collapsed-turn tally
+        // (docs/tui-turn-fold.md "Summary line").
+        spans.push(Span::styled("⎿ ", dim));
         spans.push(Span::styled(sl.text.clone(), dim));
     }
     Line::from(spans)
@@ -3498,7 +3566,6 @@ pub fn build_transcript_input(input: &TranscriptBuildInput) -> TranscriptBuild {
         thinking_shown: input.thinking_shown,
         thinking_expanded: input.thinking_expanded,
         expand_fracs: &input.expand_fracs,
-        fold_results: input.turn_fold.is_some(),
     };
     // The loop running bit, precomputed on the main thread.
     let running = input.loop_running;
@@ -3540,10 +3607,14 @@ pub fn build_transcript_input(input: &TranscriptBuildInput) -> TranscriptBuild {
     // The ext-side state for the built-in fallback path. `None` keeps
     // the plain markdown engine.
     let ext_data: Option<&ExtRenderData> = input.ext_data.as_ref();
-    let fold: Option<crate::fold::FoldState> = input.turn_fold.as_ref().map(|open| {
-        crate::fold::FoldState::new(events, input.events_base_seq, running, open.clone())
-    });
-    let mut live_summary: Option<usize> = None;
+    // The turn fold is active in every build (docs/tui-turn-fold.md):
+    // the main view and the browse view share the same open-turn set.
+    let fold = crate::fold::FoldState::new(
+        events,
+        input.events_base_seq,
+        running,
+        input.turn_fold.clone(),
+    );
     for (i, e) in events[start..].iter().enumerate() {
         // ext_status is shared UI state: suppressed from the transcript
         // by default. ext_status events add no rows, and add no blank
@@ -3553,22 +3624,25 @@ pub fn build_transcript_input(input: &TranscriptBuildInput) -> TranscriptBuild {
             continue;
         }
         let w = start + i;
-        if let Some(fs) = &fold {
-            if !fs.visible(w) {
-                continue;
-            }
+        if !fold.visible(w) {
+            continue;
         }
         let turn_start_summary: Option<crate::fold::SummaryLine> =
-            fold.as_ref().and_then(|fs| {
-                fs.turn_for_event(w).filter(|t| w == t.start).and_then(|t| {
-                    fs.collapsed_summary(events, t)
-                })
-            });
+            fold.turn_for_event(w)
+                .filter(|t| w == t.start)
+                .and_then(|t| fold.collapsed_summary(events, t));
         if !all.is_empty() {
             all.push(Line::from(""));
             line_raw.push(None);
         }
         let event_id = (offset + start + i) as u64;
+        // The idle reply of a completed turn renders in the `Report`
+        // panel. `final_msg` names it. The live tail of a running turn
+        // is never boxed.
+        let final_report = e.kind() == EventKind::AssistantMessage
+            && fold
+                .turn_for_event(w)
+                .is_some_and(|t| Some(w) == t.final_msg && !t.in_progress);
         // Record the start of a tool-result block for click hit-testing.
         let tr_start = if e.kind() == EventKind::ToolResult {
             Some(all.len())
@@ -3603,7 +3677,8 @@ pub fn build_transcript_input(input: &TranscriptBuildInput) -> TranscriptBuild {
                     .event_id(event_id)
                     .state(&state)
                     .loop_running(running)
-                    .compaction_last_open(last_open.get(i).copied().unwrap_or(false));
+                    .compaction_last_open(last_open.get(i).copied().unwrap_or(false))
+                    .final_report(final_report);
                 match ext_data {
                     Some(data) => builder.ext(data).call(),
                     None => builder.call(),
@@ -3628,22 +3703,6 @@ pub fn build_transcript_input(input: &TranscriptBuildInput) -> TranscriptBuild {
         if let Some(sl) = turn_start_summary {
             all.push(fold_summary_line(&sl, &state, input.width));
             line_raw.push(None);
-            if sl.spinner {
-                live_summary = Some(all.len() - 1);
-            }
-        }
-    }
-    if let Some(fs) = &fold {
-        if let Some(t) = fs.turns.last() {
-            if let Some(sl) = fs.open_in_progress_line(events, t) {
-                if !all.is_empty() {
-                    all.push(Line::from(""));
-                    line_raw.push(None);
-                }
-                all.push(fold_summary_line(&sl, &state, input.width));
-                line_raw.push(None);
-                live_summary = Some(all.len() - 1);
-            }
         }
     }
     // The display text of each line, for the browse layout. Computed
@@ -3655,7 +3714,6 @@ pub fn build_transcript_input(input: &TranscriptBuildInput) -> TranscriptBuild {
         block_spans,
         event_line_starts,
         texts,
-        live_summary,
     }
 }
 
@@ -4207,7 +4265,7 @@ pub fn draw(
     // the settled cache slice or the stream tail. This is the draw
     // path's whole cost for a long transcript (no full-vector copy).
     let end = (start + h).min(total);
-    let mut view_lines: Vec<Line<'static>> = {
+    let view_lines: Vec<Line<'static>> = {
         let settled = app.transcript_lines(text_w, Some(host));
         let mut v = Vec::with_capacity(end.saturating_sub(start));
         for g in start..end {
@@ -4254,21 +4312,6 @@ pub fn draw(
         let starts = app.transcript_event_line_starts(text_w, Some(host));
         app.set_event_line_starts(starts);
         app.apply_fold_cursor_target();
-    }
-    if browse_active {
-        if let Some(ls) = app.transcript_live_summary(text_w, Some(host)) {
-            if ls >= start && ls < end {
-                let idx = ls - start;
-                let spans = &mut view_lines[idx].spans;
-                if spans.len() > 1 {
-                    let style = spans[1].style;
-                    spans[1] = Span::styled(
-                        format!("{} ", spinner_frame(&chrono::Utc::now())),
-                        style,
-                    );
-                }
-            }
-        }
     }
     // The owned browse draw inputs: the cursor, the match-line
     // cache, the highlight styles. The cache clone is one pass per
@@ -5062,7 +5105,6 @@ mod tool_call_line_tests {
             thinking_shown: false,
             thinking_expanded: false,
             expand_fracs: &fracs,
-            fold_results: false,
         };
         let details: HashMap<String, (String, serde_json::Value)> = HashMap::new();
         let result_ids: HashSet<String> = HashSet::new();
@@ -5091,6 +5133,7 @@ mod tool_call_line_tests {
     }
 }
 
+#[cfg(test)]
 // ── issue #4: user-message box, no markers, no indent ────────────────
 
 #[cfg(test)]
@@ -5103,11 +5146,10 @@ mod user_box_tests {
         lines.iter().map(|l| l.to_string()).collect::<Vec<_>>().join("\n")
     }
 
-    /// The user panel: a rounded bordered box titled "User" on the
-    /// tool-result panel background — no `user` marker, no content
-    /// gutter (docs/tui_feature_requests_from_human.md 2026-09-06).
+    /// The user panel: rounded border, "User" title, no background
+    /// fill. No `user` marker, no content gutter.
     #[test]
-    fn user_box_has_title_and_background() {
+    fn user_box_has_title_no_background() {
         let palette = Palette::builtin(Level::Rgb);
         let content = vec![
             Line::from(Span::raw("Hello, world")),
@@ -5127,17 +5169,45 @@ mod user_box_tests {
         let j = joined(&lines);
         assert!(!j.contains("user "), "no user marker: {j:?}");
         assert!(!j.contains("\n            "), "no gutter indent: {j:?}");
-        // Every cell of every row carries the tool-result background,
-        // so the panel reads as one lighter band.
-        let bg = crate::tool_display::box_bg(&palette, false);
+        // No background fill: every span of every row is transparent.
         for line in &lines {
             for span in &line.spans {
-                assert_eq!(
-                    span.style.bg,
-                    Some(bg),
-                    "every cell on the panel background: {j:?}"
+                assert!(
+                    span.style.bg.is_none(),
+                    "no panel background fill: {j:?}"
                 );
             }
+        }
+    }
+
+    /// The report panel: the final idle assistant message.
+    /// A rounded `Report`-toned box with no title and no background.
+    #[test]
+    fn report_box_has_report_border_no_title() {
+        use super::report_box_rows;
+        let palette = Palette::builtin(Level::Rgb);
+        let content = vec![Line::from(Span::raw("All done."))];
+        let lines = report_box_rows(&content, 40, &palette);
+        assert_eq!(lines.len(), 3, "got: {}", joined(&lines));
+        let top = lines[0].to_string();
+        assert!(top.starts_with('╭'), "rounded top-left: {top:?}");
+        assert!(top.ends_with('╮'), "rounded top-right: {top:?}");
+        // No title: the top border is corner, dashes, corner only.
+        assert_eq!(lines[0].spans.len(), 3, "no title span: {top:?}");
+        assert!(!top.contains("Assistant"), "no title: {top:?}");
+        let border_fg = palette.color(crate::color::Role::Report);
+        // No background fill anywhere in the panel.
+        for line in &lines {
+            for span in &line.spans {
+                assert!(span.style.bg.is_none(), "no background fill");
+            }
+        }
+        // The border rows are fully in the Report tone.
+        for span in &lines[0].spans {
+            assert_eq!(span.style.fg, Some(border_fg), "top: {top:?}");
+        }
+        for span in &lines[lines.len() - 1].spans {
+            assert_eq!(span.style.fg, Some(border_fg), "bottom border");
         }
     }
 
@@ -5169,7 +5239,6 @@ mod user_box_tests {
             thinking_shown: false,
             thinking_expanded: false,
             expand_fracs: &fracs,
-            fold_results: false,
         };
         let details: HashMap<String, (String, serde_json::Value)> = HashMap::new();
         let result_ids: HashSet<String> = HashSet::new();
@@ -5228,7 +5297,6 @@ mod user_box_tests {
             thinking_shown: true,
             thinking_expanded: true,
             expand_fracs: &fracs,
-            fold_results: false,
         };
         let details: HashMap<String, (String, serde_json::Value)> = HashMap::new();
         let result_ids: HashSet<String> = HashSet::new();
@@ -5271,6 +5339,7 @@ mod user_box_tests {
 
 }
 
+#[cfg(test)]
 // ── §4.1 table rendering fixes ──────────────────────────────────────────
 
 #[cfg(test)]
@@ -5357,6 +5426,7 @@ mod table_fix_tests {
     }
 }
 
+#[cfg(test)]
 // ── §4.8 preview-pane wrapping helpers ─────────────────────────────
 
 #[cfg(test)]
@@ -5576,7 +5646,10 @@ mod transcript_snapshot_tests {
         assert_eq!(input.tool_display, *app.tool_display());
         assert!(!input.tool_expanded);
         assert_eq!(input.thinking_shown, app.thinking_shown());
-        assert!(input.thinking_expanded);
+        assert!(
+            !input.thinking_expanded,
+            "thinking blocks start collapsed (docs/tui-turn-fold.md)"
+        );
         assert_eq!(input.expand_fracs, app.expand_fracs().clone());
         assert_eq!(input.rewind_active_ranges, app.rewind_active_ranges());
         assert_eq!(input.active, app.active().cloned());
@@ -6335,7 +6408,7 @@ mod stream_cache_independent_tests {
             Rc::ptr_eq(&text_a, &text_b),
             "the thinking-expanded toggle must leave the text section alone"
         );
-        assert_eq!(cache_of(&app).thinking_expanded, false);
+        assert_eq!(cache_of(&app).thinking_expanded, true);
 
         // Ctrl+X: thinking_shown flips. No section rebuilds.
         let _ = app.press(Key::CtrlX);

@@ -57,7 +57,7 @@ fn perf_24mb_background_build_no_freeze() {
 
     // Startup loads the 24 MB log, then the fast tail-window build
     // renders the log tail on the main thread.
-    pty.pump(10.0);
+    pty.pump(4.0);
     assert!(pty.alive(), "the process died during startup");
     let text = pty.screen.text();
     assert!(
@@ -65,8 +65,23 @@ fn perf_24mb_background_build_no_freeze() {
         "the tail of the log should be visible after the fast first build:\n{text}"
     );
 
-    // The full build runs in the background: the rebuild indicator
-    // row must appear while it is in flight.
+    // With thinking blocks collapsed by default (docs/tui-turn-
+    // fold.md), the 24 MB startup build settles quickly and the
+    // initial "building transcript" window is too short to poll.
+    // Recreate the heavy build instead: expand every tool result
+    // (Ctrl+O) and every thinking block (Ctrl+T). Each toggle bumps
+    // the events version, so the pending miss coalesces into one
+    // background build of the fully expanded transcript.
+    pty.write_input(b"\x0f");
+    pty.write_input(b"\x14");
+    // The expanded build settles in under a second. The
+    // "building transcript" indicator is on screen far less
+    // than a 500 ms poll step, so the coarse poll misses it.
+    // Poll the screen fine-grained instead. The harness `pump`
+    // samples at ~100 ms (its inner poll timeout). That bounds
+    // the catch window to about one poll step. The expanded
+    // content widens the build enough for a ~100 ms sample to
+    // land inside the indicator window.
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         let text = pty.screen.text();
@@ -78,7 +93,7 @@ fn perf_24mb_background_build_no_freeze() {
             Instant::now() < deadline,
             "the build indicator never appeared within 60 s:\n{text}"
         );
-        pty.pump(0.5);
+        pty.pump(0.1);
     }
 
     // While the multi-second build runs the main loop must keep

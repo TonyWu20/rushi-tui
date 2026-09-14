@@ -306,6 +306,11 @@ pub enum Role {
     /// shade so the cursor row is visible without overpowering the
     /// selection tone.
     CursorLine,
+    /// The border and title of the final-assistant-message panel
+    /// (docs/tui-turn-fold.md "Final message panel"): a rounded box
+    /// around the turn's idle reply. A tone distinct from the `Accent`
+    /// user-box border so the outcome reads as its own panel.
+    Report,
 }
 
 impl Role {
@@ -356,6 +361,7 @@ impl Role {
         Role::ToolName,
         Role::Selection,
         Role::CursorLine,
+        Role::Report,
     ];
 
     /// The built-in value of the role at every capability level. The
@@ -421,6 +427,9 @@ impl Role {
             // A blue selection tone (distinct from the `Hint`
             // search-highlight gray: lowers to Blue vs DarkGray at C16).
             Selection => Color::Rgb(0x36, 0x45, 0x73),
+            // The final-message panel border and title: a sapphire
+            // tone distinct from the `Accent` user-box border.
+            Report => Color::Rgb(0x74, 0xc7, 0xec),
         };
         lower(c, level)
     }
@@ -474,6 +483,7 @@ impl Role {
             ToolName => "tool_name",
             Selection => "selection",
             CursorLine => "cursor_line",
+            Report => "report",
         }
     }
 
@@ -526,7 +536,7 @@ pub const SCHEME_CATPPUCCIN_MACCHIATO: &str = "catppuccin macchiato";
 /// internal scheme.
 pub fn catppuccin_macchiato() -> std::collections::HashMap<Role, &'static str> {
     use Role::*;
-    let pairs: [(Role, &str); 44] = [
+    let pairs: [(Role, &str); 45] = [
         (PlainText, "#cad3f5"),
         (ToolOutput, "#cad3f5"),
         (ToolCommand, "#c6a0f6"),
@@ -569,8 +579,12 @@ pub fn catppuccin_macchiato() -> std::collections::HashMap<Role, &'static str> {
         (ToolBoxBgSuccess, "#363a4f"),
         (ToolBoxBgError, "#363a4f"),
         (ToolName, "#c6a0f6"),
-        (Selection, "#5b6078"),
-        (CursorLine, "#1e2030"),
+        (Selection, "#6e738d"),
+        (CursorLine, "#494d64"),
+        // The sapphire tone of the catppuccin-macchiato `dark`
+        // theme: the final-message panel border and title
+        // (docs/tui-turn-fold.md "Final message panel").
+        (Report, "#74c7ec"),
     ];
     pairs.iter().cloned().collect()
 }

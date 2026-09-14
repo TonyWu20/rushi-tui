@@ -166,7 +166,10 @@ fn snap_assistant_thinking_block() {
             r#"{"v":1,"type":"assistant_message","ts":"t","id":"a1","content":"The answer is 42.","tool_calls":[],"stop_reason":"stop","usage":{"input_tokens":10,"output_tokens":5},"reasoning":[{"content":[{"type":"reasoning_text","text":"Step one: read the question.\nStep two: compute the answer."}]}]}"#,
         ),
     ];
+    // Thinking blocks are collapsed by default (2026-09-15 re-scope).
+    // This snapshot pins the expanded form, so expand explicitly.
     let mut app = app_with_session(events);
+    app.thinking_expanded = true;
     let (host, _tmp) = empty_host();
     let out = render(&mut app, &host, 80, 24);
     insta::assert_snapshot!(out);

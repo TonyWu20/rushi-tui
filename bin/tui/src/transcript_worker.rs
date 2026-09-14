@@ -13,7 +13,6 @@ pub struct BuildKey {
     pub palette: crate::color::Palette,
     pub frac_epoch: u64,
     pub turn_fold_epoch: u64,
-    pub fold_active: bool,
     pub loop_running: bool,
 }
 
@@ -249,7 +248,6 @@ mod tests {
             palette: Palette::builtin(level),
             frac_epoch: 0,
             turn_fold_epoch: 0,
-            fold_active: false,
             loop_running: false,
         }
     }

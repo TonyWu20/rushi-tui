@@ -4,12 +4,14 @@ Authoritative entry point for any agent starting a new session in
 this repo. Read this first. It tells you what exists, what is
 shipped, and what is next.
 
-## Repo state (2026-09-14)
+## Repo state (2026-09-15)
 
 **Working.** `bin/tui` is the swappable Ratatui TUI front-end for
 the `rushi` kernel. It compiles and runs against a sibling
 `rushi-common` path dep. The PTY smoke gate is
-`scripts/tui-pty-smoke.py`.
+`scripts/tui-pty-smoke.py`. The 2026-09-15 turn-fold re-scope
+landed. The fold now applies in the main view too. Thinking blocks
+start collapsed. The final reply sits in a `Report` panel.
 
 **Split.** This repo is the TUI half of the split described in
 `tui-ext-repo-split.md`. The kernel lives in
@@ -69,7 +71,8 @@ Method and conventions: `tui-insta-snapshot-testing.md`.
 | `tui-perf-background-build-audit.md` | Audit | 2026-09-13 | Audit of the background build plan and the independent perf test for the 100 ms frame budget. |
 | `tui-perf-streaming-incremental-plan.md` | Spec | 2026-09-13 | Incremental cache for the live streaming block (thinking + text). Eliminates per-frame O(n) re-wrap/re-highlight; subsumes the keep-highlighter-alive optimisation. |
 | `tui-preview-pane-plan.md` | Spec | 2026-09-24 | No-truncation picker preview pane: windowed highlight (only the visible window), cancellable background load, and a size guard so huge ignored files never freeze the TUI. |
-| `tui-turn-fold.md` | Implemented | 2026-09-14 | Browse-mode three-level fold: per-turn and per-tool-result collapse, neovim-style z keys. |
+| `tui-turn-fold.md` | Implemented | 2026-09-15 | Three-level fold in both the main and browse views. Thinking starts collapsed. The final reply sits in a title-less `Report` panel. Neovim-style `z` keys. |
+| `tui-handoff-turn-fold-rescope.md` | Closed | 2026-09-15 | Open items for the turn-fold re-scope. All items resolved on 2026-09-15: the `pty_perf` test is green (fine-grained 100 ms poll), the spec and index are updated, bookkeeping is recorded, diff churn is cleaned, clippy adds no new warnings over the pre-existing baseline (28 pre-existing warnings remain, none in the re-scoped files' new code). |
 
 ## Status legend
 

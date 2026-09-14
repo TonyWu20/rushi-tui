@@ -77,17 +77,29 @@ pub fn tally_text(events: &[Event], lo: usize, hi: usize) -> Option<String> {
         });
         idx
     };
-    let mut s = format!(
-        "{} step{}, {} msg{}",
-        steps,
-        if steps == 1 { "" } else { "s" },
-        msgs,
-        if msgs == 1 { "" } else { "s" }
-    );
-    for &i in &order {
-        s.push_str(&format!(", {} x{}", names[i].0, names[i].1));
+    // The agreed tally format (docs/tui-turn-fold.md "Summary line"):
+    // the step count, the tool histogram, then the message count.
+    // Middle-dot separators. The multiplication sign marks counts.
+    // Example: `14 steps · read ×5 · bash ×3 · edit ×2 · 6 msgs`.
+    let mut parts: Vec<String> = Vec::new();
+    if steps > 0 {
+        parts.push(format!(
+            "{} step{}",
+            steps,
+            if steps == 1 { "" } else { "s" }
+        ));
     }
-    Some(s)
+    for &i in &order {
+        parts.push(format!("{} \u{d7}{}", names[i].0, names[i].1));
+    }
+    if msgs > 0 {
+        parts.push(format!(
+            "{} msg{}",
+            msgs,
+            if msgs == 1 { "" } else { "s" }
+        ));
+    }
+    Some(parts.join(" \u{b7} "))
 }
 
 pub fn tool_ids(events: &[Event], lo: usize, hi: usize) -> Vec<String> {
@@ -109,7 +121,6 @@ pub enum FoldCursorTarget {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SummaryLine {
     pub text: String,
-    pub spinner: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -147,34 +158,17 @@ impl FoldState {
         i == t.start || Some(i) == t.final_msg
     }
 
+    /// The tally row of a collapsed completed turn.
+    /// Open turns emit no row. The in-progress turn emits none.
+    /// Its live tally merges into the working row while the loop
+    /// runs (docs/tui-turn-fold.md "In-progress turn").
     pub fn collapsed_summary(&self, events: &[Event], t: &Turn) -> Option<SummaryLine> {
-        if self.turn_open(t) {
+        if self.turn_open(t) || t.in_progress {
             return None;
-        }
-        if t.in_progress {
-            let text = tally_text(events, t.start + 1, t.end).unwrap_or_default();
-            return Some(SummaryLine {
-                text,
-                spinner: true,
-            });
         }
         let hi = t.final_msg.unwrap_or(t.end);
         let text = tally_text(events, t.start + 1, hi)?;
-        Some(SummaryLine {
-            text,
-            spinner: false,
-        })
-    }
-
-    pub fn open_in_progress_line(&self, events: &[Event], t: &Turn) -> Option<SummaryLine> {
-        if !t.in_progress || !self.turn_open(t) {
-            return None;
-        }
-        let text = tally_text(events, t.start + 1, t.end).unwrap_or_default();
-        Some(SummaryLine {
-            text,
-            spinner: true,
-        })
+        Some(SummaryLine { text })
     }
 }
 
@@ -322,7 +316,7 @@ mod tests {
             result("c4"),
         ];
         let ts = tally_text(&hidden, 0, hidden.len()).unwrap();
-        assert_eq!(ts, "4 steps, 2 msgs, bash x2, read x1, mymcp__ext x1");
+        assert_eq!(ts, "4 steps \u{b7} bash \u{d7}2 \u{b7} read \u{d7}1 \u{b7} mymcp__ext \u{d7}1 \u{b7} 2 msgs");
     }
 
     #[test]
@@ -378,8 +372,7 @@ mod tests {
         assert!(st.visible(6));
         let t = st.turn_for_event(0).unwrap();
         let sl = st.collapsed_summary(&events, t).expect("a summary");
-        assert_eq!(sl.text, "1 step, 1 msg, bash x1");
-        assert!(!sl.spinner);
+        assert_eq!(sl.text, "1 step \u{b7} bash \u{d7}1 \u{b7} 1 msg");
     }
 
     #[test]
@@ -397,11 +390,10 @@ mod tests {
         }
         let t = st.turn_for_event(0).unwrap();
         assert!(st.collapsed_summary(&events, t).is_none());
-        assert!(st.open_in_progress_line(&events, t).is_none());
     }
 
     #[test]
-    fn in_progress_collapse_hides_live_tail_and_spins() {
+    fn in_progress_collapse_hides_live_tail() {
         let events = vec![
             user("u1"),
             asst("a1", "starting"),
@@ -411,13 +403,19 @@ mod tests {
         let st = FoldState::new(&events, 1, true, std::collections::HashSet::new());
         let t = st.turns[0].clone();
         assert!(t.in_progress);
+        assert!(st.visible(0));
         assert!(!st.visible(1));
         assert!(!st.visible(2));
         assert!(!st.visible(3));
-        assert!(st.visible(0));
-        let sl = st.collapsed_summary(&events, &t).expect("spinner line");
-        assert!(sl.spinner);
-        assert_eq!(sl.text, "1 step, 1 msg, bash x1");
+        // No in-transcript summary row for the live turn.
+        // The tally merges into the working row instead.
+        assert!(st.collapsed_summary(&events, &t).is_none());
+        // The live tally of the in-progress range, as the working
+        // row displays it.
+        assert_eq!(
+            tally_text(&events, 1, 4).as_deref(),
+            Some("1 step \u{b7} bash \u{d7}1 \u{b7} 1 msg")
+        );
     }
 
     #[test]
@@ -436,9 +434,13 @@ mod tests {
         assert!(st.visible(3));
         assert!(!st.visible(4));
         let t = st.turns[0].clone();
-        let sl = st.open_in_progress_line(&events, &t).expect("tail spinner");
-        assert!(sl.spinner);
-        assert_eq!(sl.text, "1 step, 2 msgs, bash x1");
+        // An open live turn hides only the live tail. No summary row
+        // either: the working row carries the tally.
+        assert!(st.collapsed_summary(&events, &t).is_none());
+        assert_eq!(
+            tally_text(&events, 1, 5).as_deref(),
+            Some("1 step \u{b7} bash \u{d7}1 \u{b7} 2 msgs")
+        );
     }
 
     #[test]

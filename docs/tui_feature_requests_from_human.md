@@ -463,3 +463,14 @@ macchiato` as the first internal color scheme. Shipped in
       level source mapping. Anchoring raw ownership at a
       block's first line made sub-block yanks behave
       unexpectedly. A raw export path may be explored later.
+
+## New requests (2026-09-15)
+
+- [ ] The browse cursor does not paint at the start of a word.
+      For a hyphenated word it paints on the hyphen. See
+      `bin/tui/src/browse.rs`.
+- [ ] The vim `e` (end of word) motion is not registered while
+      in browse mode. See `bin/tui/src/browse.rs`.
+- [ ] Allow entering browse mode with a non-empty draft. Today
+      the double-`s` gate needs an empty input. Loosen it. See
+      `docs/tui-conversation-browsing.md` section 4.2.

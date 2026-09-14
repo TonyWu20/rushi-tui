@@ -6,15 +6,7 @@ expression: "joined.join(\"\\n\")"
 │ Hello, world                                                                                     │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 
- thinking
- Step one: think about it.
- Here is the output.
-
-
-                                                                                                    
- bash  exit 0                                                                                       
- Compiling tui v0.1.0                                                                               
- Finished in 3.2s                                                                                   
-                                                                                                    
-
-[approval appr-1] Allow the command?  [y allow] [n deny] [e edit]
+╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ thinking … (Ctrl+T to expand)                                                                    │
+│ Here is the output.                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
