@@ -17,6 +17,16 @@ use ratatui_markdown::theme::{CodeColors, Generation, RichTextTheme};
 
 use crate::color::{Palette, Role};
 
+// Test-only counter: how many times the whole-document markdown
+// parse in `render_markdown_lines` ran on the calling thread. The
+// cache-if-unchanged test
+// (docs/tui-perf-streaming-incremental-plan.md) asserts an idle
+// frame does not re-parse.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static MARKDOWN_PARSE_CALLS: std::cell::Cell<u32> = std::cell::Cell::new(0);
+}
+
 /// A [`RichTextTheme`] backed by the TUI's active [`Palette`].
 ///
 /// Maps each palette role to the corresponding ratatui-markdown
@@ -129,8 +139,19 @@ pub fn render_markdown_lines(
     palette: &Palette,
     _base: Style,
 ) -> Vec<Line<'static>> {
+    #[cfg(test)]
+    {
+        MARKDOWN_PARSE_CALLS.with(|c| c.set(c.get() + 1));
+    }
     let renderer = MarkdownRenderer::new(wrap_w.max(1));
     let blocks = renderer.parse(text);
     let theme = MdTheme::new(palette);
     renderer.render(&blocks, &theme)
+}
+
+/// The test-only read of the markdown parse counter
+/// (docs/tui-perf-streaming-incremental-plan.md test 4).
+#[cfg(test)]
+pub(crate) fn markdown_parse_calls() -> u32 {
+    MARKDOWN_PARSE_CALLS.with(|c| c.get())
 }

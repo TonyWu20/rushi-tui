@@ -5,6 +5,7 @@
 //! actions; the tests here drive the state machine directly.
 
 use std::collections::{HashMap, VecDeque};
+use std::rc::Rc;
 use std::time::Instant;
 
 use ratatui::text::Line;
@@ -206,6 +207,152 @@ pub struct StreamBuf {
     pub done: bool,
 }
 
+impl StreamBuf {
+    /// The reasoning values joined in sorted-id order, the exact
+    /// string the live block feeds to `wrap_thinking` (the thinking
+    /// body of docs/tui-streaming-simplify.md section 3). Sorting the
+    /// keys makes the join deterministic regardless of `HashMap`
+    /// iteration order, so a cache keyed on this string is stable.
+    pub fn reasoning_text(&self) -> String {
+        #[cfg(test)]
+        {
+            // The join-skip test
+            // (docs/tui-perf-streaming-incremental-plan.md) asserts
+            // this O(T) join does not run on idle frames.
+            REASONING_JOIN_CALLS.with(|c| c.set(c.get() + 1));
+        }
+        let mut ids: Vec<&String> = self.reasoning.keys().collect();
+        ids.sort();
+        ids.iter()
+            .filter_map(|id| self.reasoning.get(*id))
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+// Test-only counter: how many times the O(T) join in
+// `StreamBuf::reasoning_text` actually ran on the calling thread.
+// A match on the cache's join-skip fingerprint must leave it
+// untouched (docs/tui-perf-streaming-incremental-plan.md test 7).
+#[cfg(test)]
+thread_local! {
+    pub(crate) static REASONING_JOIN_CALLS: std::cell::Cell<u32> = std::cell::Cell::new(0);
+}
+
+/// Incremental cache for the live stream block.
+/// See docs/tui-perf-streaming-incremental-plan.md.
+///
+/// Holds the wrapped output for the thinking and response-text
+/// sections plus the source prefix that produced them. On each call
+/// to `stream_block_lines`, only the appended suffix is re-wrapped.
+/// The stateful `CodeHl` persists. This keeps code fences that
+/// span the append boundary coherent.
+///
+/// The wrapped sections are shared through [`Rc`]. They are not
+/// borrowed out of [`App`]. The `draw` call site interleaves
+/// `&mut App` methods between uses of the stream block. A view
+/// that borrows `App` would conflict with them. On a cache hit the
+/// `Rc` clone is an O(1) refcount bump. An idle frame stays cheap.
+/// This is the plan's clone-avoidance goal. The `Rc` is used because
+/// the caller consumes the lines directly, not via `to_vec()`.
+///
+/// The type is `!Send`. It owns a `CodeHl`, which may hold a
+/// tree-sitter parser. It also owns `Rc`. That is fine. The cache
+/// lives on the main thread alongside [`App`].
+pub(crate) struct StreamBlockCache {
+    // ── thinking section ────────────────────────────────
+    /// The settled, fully-wrapped thinking source. This is the
+    /// complete hard lines, ending at a `\n` boundary. It is a
+    /// prefix of the joined reasoning text. When the joined text
+    /// starts with this, only the suffix is re-wrapped.
+    pub(crate) think_src: String,
+    /// The in-progress last hard line of the reasoning text.
+    /// It has no trailing `\n`. It is not yet wrapped into
+    /// [`Self::think_lines`]. It is wrapped fresh each frame for
+    /// the live display. Once a `\n` completes it, it is promoted
+    /// into `think_lines`.
+    pub(crate) think_held: String,
+    /// The wrapped, gutter-prefixed display lines for
+    /// [`Self::think_held`]. Recomputed only when `think_held`, the
+    /// fence state, or the config snapshot changes. An idle frame
+    /// reuses it, so the live block stays O(1) with no highlight
+    /// work.
+    pub(crate) think_held_lines: Vec<Line<'static>>,
+    /// The byte length of `think_held` when `think_held_lines` was
+    /// last computed. An idle frame (fingerprint unchanged) reuses
+    /// `think_held_lines` and skips the re-wrap. A frame that grew
+    /// the held line recomputes. The idle-path O(1) guard.
+    pub(crate) think_held_wrapped_for: usize,
+    /// Wrapped, gutter-prefixed lines for [`Self::think_src`]. The
+    /// in-progress held line is wrapped separately. The settled
+    /// lines stay stable and are reused on cache hits.
+    pub(crate) think_lines: Rc<Vec<Line<'static>>>,
+    /// The persistent code highlighter, carried across calls. This
+    /// keeps block-comment state in code fences open.
+    pub(crate) think_hl: crate::tool_display::CodeHl,
+    /// Fence state at the end of `think_src`. This records whether
+    /// we are inside a code fence and what language tag opened it.
+    pub(crate) think_in_fence: bool,
+    pub(crate) think_fence_lang: Option<String>,
+
+    // ── response-text section ───────────────────────────
+    /// The response text that `text_lines` was produced from.
+    /// `render_markdown_lines` is a whole-document parser. We can
+    /// only skip the re-parse when the text is unchanged.
+    pub(crate) text_src: String,
+    /// Rendered, gutter-prefixed lines for `text_src`.
+    pub(crate) text_lines: Rc<Vec<Line<'static>>>,
+
+    // ── config snapshot for invalidation ────────────────
+    /// The width, palette level, highlight engine, and
+    /// thinking_expanded flag at the time the cache was built.
+    /// A change to any of these invalidates the cache.
+    pub(crate) width: usize,
+    pub(crate) palette_level: crate::color::Level,
+    pub(crate) engine: crate::tool_display::HighlightEngine,
+    pub(crate) thinking_expanded: bool,
+
+    // ── join-skip fingerprint ───────────────────────────
+    /// A cheap way to detect that the `reasoning` map is unchanged
+    /// without re-joining it. `think_reasoning_keys` is the sorted
+    /// id set. `think_reasoning_len` is the total byte length
+    /// across all values. The pair changes only when the map
+    /// changes. Values grow only via `push_str`. The id set only
+    /// grows within a stream. On a match the O(T) join is
+    /// skipped. This is the plan's join-skip optimisation.
+    pub(crate) think_reasoning_keys: Vec<String>,
+    pub(crate) think_reasoning_len: usize,
+}
+
+impl StreamBlockCache {
+    /// Construct the cache for the active highlight engine.
+    /// `CodeHl` is engine-dependent and has no `Default`, so the
+    /// cache must be built with the engine it will use.
+    pub(crate) fn new(engine: crate::tool_display::HighlightEngine) -> Self {
+        // `think_hl` starts fresh. All other fields start empty or
+        // default and are filled on the first build.
+        Self {
+            think_src: String::new(),
+            think_held: String::new(),
+            think_held_lines: Vec::new(),
+            think_held_wrapped_for: 0,
+            think_lines: Rc::new(Vec::new()),
+            think_hl: crate::tool_display::CodeHl::new(engine),
+            think_in_fence: false,
+            think_fence_lang: None,
+            text_src: String::new(),
+            text_lines: Rc::new(Vec::new()),
+            width: 0,
+            palette_level: crate::color::Level::DEFAULT,
+            engine,
+            thinking_expanded: false,
+            think_reasoning_keys: Vec::new(),
+            think_reasoning_len: 0,
+        }
+    }
+}
+
 /// The kind of a paced stream delta: the accumulator key the release
 /// applies to (docs/tui-streaming-response.md §6.5).
 #[derive(Clone, Debug)]
@@ -322,6 +469,12 @@ pub struct App {
         u64,
         Vec<String>,
     )>,
+    /// The incremental live-stream block cache. See
+    /// docs/tui-perf-streaming-incremental-plan.md. None until the
+    /// first draw of a stream. Cleared in clear_stream so the held
+    /// tree-sitter parser and cached lines return to baseline.
+    /// Not Send. It owns a CodeHl and Rc. Lives on the main thread.
+    stream_block_cache: Option<StreamBlockCache>,
     /// The background transcript build worker (docs/tui-perf-background-
     /// build-plan.md, stage 2). `None` until `attach_transcript_worker`.
     /// The miss path then falls back to the synchronous main-thread build.
@@ -600,6 +753,7 @@ impl App {
             events_base_seq: 1,
             view_only_target: None,
             transcript_cache: None,
+            stream_block_cache: None,
             transcript_worker: None,
             transcript_build_seq: 0,
             transcript_rebuild_requested: false,
@@ -1066,6 +1220,36 @@ impl App {
         self.stream_offset = 0;
         self.stream_pending.clear();
         self.stream_pending_chars = 0;
+        // Release the incremental live-stream cache. This drops the
+        // held CodeHl (and its tree-sitter parser) and the cached
+        // wrapped lines, so memory returns to baseline
+        // (docs/tui-perf-streaming-incremental-plan.md).
+        self.stream_block_cache = None;
+    }
+
+    /// Test hook: replace the live stream buffer wholesale,
+    /// bypassing the stream-channel pacing path. The incremental
+    /// cache tests
+    /// (docs/tui-perf-streaming-incremental-plan.md) use it to
+    /// drive `stream_block_lines` with controlled buffers.
+    #[cfg(test)]
+    pub fn set_stream_buf(&mut self, buf: StreamBuf) {
+        self.stream_buf = Some(buf);
+    }
+
+    /// The live stream block cache
+    /// (docs/tui-perf-streaming-incremental-plan.md). The render pass
+    /// mutates it in place. Cache hits reuse the cached wrapped lines.
+    /// Cache misses rebuild and store them. It lives on the main
+    /// thread next to the render loop.
+    pub(crate) fn stream_block_cache_mut(&mut self) -> &mut Option<StreamBlockCache> {
+        &mut self.stream_block_cache
+    }
+
+    /// The live stream block cache, shared. The render pass reads the
+    /// cached wrapped sections through this on cache hits.
+    pub(crate) fn stream_block_cache_ref(&self) -> &Option<StreamBlockCache> {
+        &self.stream_block_cache
     }
 
     /// Poll the session-local stream channel file and fold new lines

@@ -27,9 +27,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 use ratatui::Frame;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
-use crate::app::App;
+use crate::app::{App, StreamBlockCache};
 use crate::event::{Event, EventKind};
 use crate::highlight;
 use crate::picker::preview::Previewer;
@@ -935,18 +936,57 @@ fn wrap_thinking(
     style: Style,
     engine: crate::tool_display::HighlightEngine,
 ) -> Vec<Line<'static>> {
+    let (lines, _in_fence, _fence_lang) = wrap_thinking_full(text, wrap_w, palette, style, engine);
+    lines
+}
+
+/// Wrap a whole thinking text from a fresh highlighter.
+///
+/// The settled-transcript path and the live cache's full-rebuild
+/// path use this. It creates a stateful `CodeHl`, feeds every hard
+/// line, and returns the wrapped lines plus the final fence state.
+/// A block comment that spans fence lines stays open across them.
+fn wrap_thinking_full(
+    text: &str,
+    wrap_w: usize,
+    palette: &crate::color::Palette,
+    style: Style,
+    engine: crate::tool_display::HighlightEngine,
+) -> (Vec<Line<'static>>, bool, Option<String>) {
     let hard_lines: Vec<&str> = text.split('\n').collect();
+    let mut hl = crate::tool_display::CodeHl::new(engine);
+    let (out, in_fence, fence_lang) =
+        wrap_thinking_delta(&hard_lines, wrap_w, palette, style, &mut hl, false, None);
+    (out, in_fence, fence_lang)
+}
+
+/// Wrap the complete hard lines of an incremental thinking suffix.
+///
+/// `lines` are the newly-settled complete hard lines. They never
+/// include the in-progress trailing partial. `hl`, `in_fence`, and
+/// `fence_lang` carry state from the already-wrapped prefix. A code
+/// fence or block comment spanning the append boundary stays
+/// coherent. The in-progress partial line is not handled here.
+/// Wrap it with [`wrap_thinking_held`] instead, since re-wrapping a
+/// growing line each frame cannot advance the persistent tree-sitter
+/// parser in place.
+fn wrap_thinking_delta(
+    lines: &[&str],
+    wrap_w: usize,
+    palette: &crate::color::Palette,
+    style: Style,
+    hl: &mut crate::tool_display::CodeHl,
+    in_fence: bool,
+    fence_lang: Option<String>,
+) -> (Vec<Line<'static>>, bool, Option<String>) {
     let mut out: Vec<Line<'static>> = Vec::new();
     let border_style = palette.style(crate::color::Role::Hint, Modifier::DIM);
     let code_style = palette.style(crate::color::Role::Code, Modifier::empty());
-    // One stateful highlighter for the whole thinking text: a block
-    // comment that spans code-fence lines stays open across them.
-    let mut hl = crate::tool_display::CodeHl::new(engine);
-    let mut in_fence = false;
-    let mut fence_lang: Option<String> = None;
+    let mut fence_lang = fence_lang;
+    let mut in_fence = in_fence;
     let mut i = 0usize;
-    while i < hard_lines.len() {
-        let t = hard_lines[i].trim_start();
+    while i < lines.len() {
+        let t = lines[i].trim_start();
         if highlight::is_fence_delim(t) {
             i += 1;
             // The fence marker line: the delimiter and the language
@@ -972,7 +1012,7 @@ fn wrap_thinking(
             continue;
         }
         if in_fence {
-            let line = hard_lines[i];
+            let line = lines[i];
             i += 1;
             // One hard code line through the active engine. The scoped
             // tokens carry the engine's fg colors (no background, the
@@ -1000,10 +1040,10 @@ fn wrap_thinking(
             }
             continue;
         }
-        if highlight::is_table_block_start(&hard_lines, i) {
+        if highlight::is_table_block_start(lines, i) {
             let mut block: Vec<String> = Vec::new();
-            while i < hard_lines.len() && highlight::is_table_row(hard_lines[i]) {
-                block.push(hard_lines[i].to_string());
+            while i < lines.len() && highlight::is_table_row(lines[i]) {
+                block.push(lines[i].to_string());
                 i += 1;
             }
             let grid = highlight::table_grid(&block, wrap_w, palette);
@@ -1021,7 +1061,7 @@ fn wrap_thinking(
             }
             continue;
         }
-        let line = hard_lines[i];
+        let line = lines[i];
         i += 1;
         if line.is_empty() {
             out.push(Line::default());
@@ -1033,13 +1073,97 @@ fn wrap_thinking(
         // and table lines are handled by the branches above, so the
         // fence state here stays `false`.
         let mut md_fence = false;
-        let segs = with_plain_base(
-            highlight::md_line(line, &mut md_fence, palette),
-            style,
-        );
+        let segs = with_plain_base(highlight::md_line(line, &mut md_fence, palette), style);
         out.extend(wrap_flow(segs, wrap_w));
     }
+    (out, in_fence, fence_lang)
+}
+
+/// Wrap the in-progress (partial) last thinking line.
+///
+/// A fresh `CodeHl` is seeded with the carried fence language. This
+/// keeps a line inside an open code fence highlighted. Block-comment
+/// state that spans the boundary is not carried. That is a visual
+/// approximation on the single in-progress line only. An empty
+/// `held` returns an empty vec.
+fn wrap_thinking_held(
+    held: &str,
+    wrap_w: usize,
+    palette: &crate::color::Palette,
+    style: Style,
+    engine: crate::tool_display::HighlightEngine,
+    in_fence: bool,
+    fence_lang: Option<&str>,
+) -> Vec<Line<'static>> {
+    if held.is_empty() {
+        return Vec::new();
+    }
+    let mut hl = crate::tool_display::CodeHl::new(engine);
+    let (out, _, _) = wrap_thinking_delta(
+        std::slice::from_ref(&held),
+        wrap_w,
+        palette,
+        style,
+        &mut hl,
+        in_fence,
+        fence_lang.map(str::to_string),
+    );
     out
+}
+
+/// Re-wrap the in-progress held thinking line and store it on the
+/// cache (docs/tui-perf-streaming-incremental-plan.md). A join
+/// ending in a newline leaves an empty held line, which shows as
+/// one blank row (matching the legacy full wrap).
+fn refresh_held_lines(
+    cache: &mut StreamBlockCache,
+    held: &str,
+    wrap_w: usize,
+    palette: &crate::color::Palette,
+    thinking_style: Style,
+) {
+    cache.think_held = held.to_string();
+    cache.think_held_lines = if held.is_empty() {
+        vec![gutter_line(Line::default(), LIVE_GUTTER)]
+    } else {
+        gutter_lines(
+            wrap_thinking_held(
+                held,
+                wrap_w,
+                palette,
+                thinking_style,
+                cache.engine,
+                cache.think_in_fence,
+                cache.think_fence_lang.as_deref(),
+            ),
+            LIVE_GUTTER,
+        )
+    };
+    cache.think_held_wrapped_for = held.len();
+}
+
+/// Apply the live-stream gutter to a wrapped line. The live block
+/// settles where it lands, so it must not carry the 12-col settled
+/// gutter. Instead each body line owns one leading space. Lines that
+/// already start with the gutter keep it. Everything else gets it
+/// prepended (docs/tui-streaming-simplify.md section 3).
+fn gutter_line(line: Line<'static>, gutter: &str) -> Line<'static> {
+    let has_gutter = line
+        .spans
+        .first()
+        .map_or(false, |s| s.content.starts_with(gutter));
+    if has_gutter {
+        line
+    } else {
+        let mut spans = vec![Span::styled(gutter.to_string(), Style::default())];
+        spans.extend(line.spans);
+        Line::from(spans)
+    }
+}
+
+/// Apply the live-stream gutter to a whole set of wrapped lines.
+fn gutter_lines(lines: Vec<Line<'static>>, gutter: &str) -> Vec<Line<'static>> {
+    lines.into_iter().map(|l| gutter_line(l, gutter)).collect()
 }
 
 fn wrap_styled(segs: Vec<(Style, String)>, width: usize) -> Vec<Line<'static>> {
@@ -1951,146 +2075,536 @@ fn rebuilding_row(app: &App, now: &chrono::DateTime<chrono::Utc>) -> Line<'stati
     Line::from(vec![frame, body])
 }
 
-/// The in-progress model response lines, rendered inside the transcript
-/// (docs/tui-streaming-simplify.md section 3). The caller appends the
-/// returned lines to the settled transcript. The live body settles
-/// where it lands, and the user can scroll up through the whole body.
+/// The one-cell left pad of the live stream body
+/// (docs/tui-streaming-simplify.md section 3). The live body
+/// settles where it lands, so it must not carry the old 12-column
+/// settled gutter.
+const LIVE_GUTTER: &str = " ";
+
+/// Split the joined reasoning text into the settled prefix and the
+/// in-progress held line. The settled half ends at the last `\n`
+/// (inclusive). The held half has no trailing `\n`. An empty input
+/// yields two empty halves. Text without any newline is held
+/// entirely.
+fn split_settled_held(full: &str) -> (&str, &str) {
+    match full.rfind('\n') {
+        Some(p) => (&full[..=p], &full[p + 1..]),
+        None => ("", full),
+    }
+}
+
+/// The frame's config fields that invalidate the live stream block
+/// cache (docs/tui-perf-streaming-incremental-plan.md). A change to
+/// any of these forces a full rebuild.
+#[derive(Clone, Copy)]
+struct ConfigSnap {
+    width: usize,
+    palette_level: crate::color::Level,
+    engine: crate::tool_display::HighlightEngine,
+    thinking_expanded: bool,
+}
+
+/// Owned snapshot of the live buffer and config. It is captured
+/// under shared borrows of [`App`] before the mutable cache update
+/// (docs/tui-perf-streaming-incremental-plan.md).
+struct StreamPlan {
+    /// Whether the stream's `done` line has been read.
+    done: bool,
+    /// Partial tool-call arguments, cloned (a handful at most).
+    tool_args: HashMap<String, (String, String)>,
+    /// The sorted reasoning id set plus total value byte length.
+    /// This is the join-skip fingerprint.
+    cur_keys: Vec<String>,
+    cur_len: usize,
+    /// The joined reasoning text. It is joined only when a
+    /// re-wrap is needed. Idle frames keep it `None`.
+    thinking_joined: Option<String>,
+    /// The new response text. Set only when it changed, when the
+    /// cache was invalidated, or on the first build.
+    text_new: Option<String>,
+    /// A width, palette, or engine change. Both sections fully
+    /// rebuild.
+    cfg_invalid_full: bool,
+    /// The `thinking_expanded` toggle flipped. The thinking section
+    /// rebuilds. The text section is unaffected.
+    think_toggle_invalid: bool,
+    cfg: ConfigSnap,
+    /// The owned palette. Wrap calls below run without any `App`
+    /// borrow.
+    palette: crate::color::Palette,
+}
+
+/// One frame's view of the live stream block
+/// (docs/tui-perf-streaming-incremental-plan.md).
+///
+/// The two big sections (settled thinking and response text) share
+/// their wrapped lines with the app's
+/// [`StreamBlockCache`] through `Rc`. A cache hit costs two
+/// refcount bumps and no line copies. The small pieces (header,
+/// thinking label, in-progress held lines, partial tool args,
+/// cursor) are owned and rebuilt each frame.
+///
+/// `len`, `Index`, and `iter` walk the sections in display order:
+/// header, label, visible thinking, held lines, visible text, tool
+/// args. The blinking cursor overlays the last body line. When the
+/// body is empty it is its own trailing row. This matches the
+/// legacy flat-vec render byte for byte.
+pub(crate) struct StreamBlockView {
+    /// The pinned status row ("…" open, "· done" settled).
+    header: Vec<Line<'static>>,
+    /// The "thinking …" label row, when thinking is shown.
+    label: Option<Line<'static>>,
+    /// Settled thinking lines shared with the cache.
+    think: Rc<Vec<Line<'static>>>,
+    /// Offset into `think` where the visible window starts.
+    think_start: usize,
+    /// Wrapped in-progress held thinking lines, fresh each frame
+    /// they change.
+    think_held: Vec<Line<'static>>,
+    /// Response text lines shared with the cache.
+    text: Rc<Vec<Line<'static>>>,
+    /// Offset into `text` where the visible window starts.
+    text_start: usize,
+    /// Partial tool-call argument rows.
+    tool_args: Vec<Line<'static>>,
+    /// The last body line with the cursor span applied, or the
+    /// standalone cursor row when the body is empty. `None` when
+    /// the stream is done.
+    cursor_line: Option<Line<'static>>,
+    /// True when `cursor_line` is its own trailing row instead of an
+    /// overlay on the last body line.
+    cursor_standalone: bool,
+}
+
+impl StreamBlockView {
+    /// The empty view used when there is no live stream buffer.
+    pub(crate) fn empty() -> Self {
+        Self {
+            header: Vec::new(),
+            label: None,
+            think: Rc::new(Vec::new()),
+            think_start: 0,
+            think_held: Vec::new(),
+            text: Rc::new(Vec::new()),
+            text_start: 0,
+            tool_args: Vec::new(),
+            cursor_line: None,
+            cursor_standalone: false,
+        }
+    }
+
+    /// The total visible line count.
+    pub fn len(&self) -> usize {
+        let mut n = self.header.len();
+        if self.label.is_some() {
+            n += 1;
+        }
+        n += self.think.len() - self.think_start;
+        n += self.think_held.len();
+        n += self.text.len() - self.text_start;
+        n += self.tool_args.len();
+        if self.cursor_standalone {
+            n += 1;
+        }
+        n
+    }
+
+    /// The visible line at flat index `i`, or `None` past the end.
+    /// The last body line comes back with the cursor span applied
+    /// while the stream is open.
+    fn line_at(&self, i: usize) -> Option<&Line<'static>> {
+        // The cursor row (overlay or standalone) always occupies
+        // the final visible row.
+        if self.cursor_line.is_some() && self.len() > 0 && i == self.len() - 1 {
+            return self.cursor_line.as_ref();
+        }
+        let mut rem = i;
+        if rem < self.header.len() {
+            return self.header.get(rem);
+        }
+        rem -= self.header.len();
+        if let Some(l) = &self.label {
+            if rem == 0 {
+                return Some(l);
+            }
+            rem -= 1;
+        }
+        let think = &self.think[self.think_start..];
+        if rem < think.len() {
+            return Some(&think[rem]);
+        }
+        rem -= think.len();
+        if rem < self.think_held.len() {
+            return Some(&self.think_held[rem]);
+        }
+        rem -= self.think_held.len();
+        let text = &self.text[self.text_start..];
+        if rem < text.len() {
+            return Some(&text[rem]);
+        }
+        rem -= text.len();
+        self.tool_args.get(rem)
+    }
+
+    /// The visible lines in display order. The last body line
+    /// carries the cursor overlay. A standalone cursor is a
+    /// trailing row.
+    pub fn iter(&self) -> impl Iterator<Item = &Line<'static>> + '_ {
+        (0..self.len()).map(move |i| self.line_at(i).expect("in-bounds view index"))
+    }
+}
+
+impl std::ops::Index<usize> for StreamBlockView {
+    type Output = Line<'static>;
+
+    fn index(&self, i: usize) -> &Line<'static> {
+        self.line_at(i)
+            .expect("StreamBlockView index out of bounds")
+    }
+}
+
+/// The in-progress model response lines, rendered inside the
+/// transcript (docs/tui-streaming-simplify.md section 3). The caller
+/// appends the returned view's lines to the settled transcript. The
+/// live body settles where it lands, and the user can scroll up
+/// through the whole body.
 ///
 /// Shows the header with an ellipsis ("…") while the stream is open.
 /// Once the done line arrives, the header shows "· done".
 ///
-/// The body shows the full accumulated content (no sliding-window cap
-/// when `max_body_lines` is `usize::MAX`): thinking above text, partial
-/// tool-call arguments when no content has arrived yet. A blinking
-/// block cursor marks the end of the live text.
+/// The body shows the full accumulated content. There is no sliding-
+/// window cap when `max_body_lines` is `usize::MAX`. Thinking renders
+/// above text, with partial tool-call arguments when no content has
+/// arrived yet. A blinking block cursor marks the end of the live
+/// text.
 ///
-/// The thinking block honors the same global toggles as settled blocks
-/// (docs/tui-streaming-simplify.md section 3, the unified toggle):
-/// `thinking_shown` (Ctrl+X) controls visibility; `thinking_expanded`
-/// (Ctrl+T) controls collapse/expand. When collapsed the live thinking
-/// shows only the one-line "thinking …" label.
-fn stream_block_lines(app: &App, width: usize, max_body_lines: usize) -> Vec<Line<'static>> {
-    let buf = match app.stream_buf() {
-        Some(b) => b,
-        None => return Vec::new(),
+/// The thinking block honors the same global toggles as settled
+/// blocks (docs/tui-streaming-simplify.md section 3). The
+/// `thinking_shown` toggle (Ctrl+X) controls visibility and the
+/// `thinking_expanded` toggle (Ctrl+T) controls collapse/expand.
+/// When collapsed the live thinking shows only the one-line
+/// "thinking …" label.
+///
+/// The wrapped thinking and response-text lines come from the app's
+/// `StreamBlockCache` (docs/tui-perf-streaming-incremental-plan.md).
+/// Only a newly appended thinking suffix is re-wrapped. The response
+/// text re-parses only when it changed. Idle frames skip all wrap
+/// work. The returned view shares the cached lines through `Rc`, so
+/// producing it copies nothing large.
+fn stream_block_lines(app: &mut App, width: usize, max_body_lines: usize) -> StreamBlockView {
+    // Phase 1 (shared borrows only): snapshot the live buffer, the
+    // cache fingerprints, and the config. No shared borrow of `App`
+    // may outlive the mutable cache update below.
+    let plan = {
+        let buf = match app.stream_buf() {
+            Some(b) => b,
+            None => return StreamBlockView::empty(),
+        };
+        let cached = app.stream_block_cache_ref().as_ref();
+
+        // Join-skip fingerprint: the sorted reasoning id set plus the
+        // total value byte length. Within a stream the id set only
+        // grows. The values only grow via `push_str`. A match means
+        // the joined text is byte-identical, so the O(T) join is
+        // skipped.
+        let mut cur_keys: Vec<String> = buf.reasoning.keys().cloned().collect();
+        cur_keys.sort();
+        let cur_len: usize = buf.reasoning.values().map(|s| s.len()).sum();
+        let fp_match = cached.is_some_and(|c| {
+            c.think_reasoning_keys == cur_keys && c.think_reasoning_len == cur_len
+        });
+        // The response text only grows within a stream. clear_stream
+        // drops the cache on settle and session switch. Equal length
+        // therefore means identical content, so the markdown re-parse
+        // is skipped.
+        let text_unchanged = cached.is_some_and(|c| c.text_src.len() == buf.text.len());
+
+        let cfg = ConfigSnap {
+            width,
+            palette_level: app.palette().level(),
+            engine: app.tool_display().highlight_engine,
+            thinking_expanded: app.thinking_expanded(),
+        };
+        let cfg_invalid_full = cached.map_or(true, |c| {
+            c.width != cfg.width || c.palette_level != cfg.palette_level || c.engine != cfg.engine
+        });
+        let think_toggle_invalid =
+            cached.map_or(true, |c| c.thinking_expanded != cfg.thinking_expanded);
+        // A thinking re-wrap is needed when the fingerprint moved,
+        // the expand toggle flipped, or the config invalidated the
+        // cache.
+        let need_think_work = !fp_match || think_toggle_invalid || cfg_invalid_full;
+
+        StreamPlan {
+            done: buf.done,
+            tool_args: buf.tool_args.clone(),
+            cur_keys,
+            cur_len,
+            thinking_joined: if need_think_work {
+                Some(buf.reasoning_text())
+            } else {
+                None
+            },
+            text_new: if text_unchanged {
+                None
+            } else {
+                Some(buf.text.clone())
+            },
+            cfg_invalid_full,
+            think_toggle_invalid,
+            cfg,
+            palette: app.palette().clone(),
+        }
     };
-    let palette = app.palette();
-    let prose = palette.style(crate::color::Role::PlainText, Modifier::empty());
+    // All shared borrows of `App` end here.
+
+    // Phase 2 (mutable): update the cache in place. Idle frames do
+    // nothing here.
+    {
+        let cache_slot = app.stream_block_cache_mut();
+        if cache_slot.is_none() {
+            *cache_slot = Some(StreamBlockCache::new(plan.cfg.engine));
+        }
+        let cache = cache_slot.as_mut().expect("cache initialized above");
+
+        if plan.cfg_invalid_full {
+            // Width, palette, or engine changed: full rebuild of both
+            // sections with a fresh highlighter.
+            *cache = StreamBlockCache::new(plan.cfg.engine);
+        }
+        // Record the config snapshot after the rebuild decision so the
+        // next frame's check reads the current values. Without this
+        // the `new()` sentinels would re-trigger a rebuild every frame.
+        cache.width = plan.cfg.width;
+        cache.palette_level = plan.cfg.palette_level;
+        cache.engine = plan.cfg.engine;
+        cache.thinking_expanded = plan.cfg.thinking_expanded;
+
+        if plan.think_toggle_invalid {
+            // The `thinking_expanded` toggle rebuilds the thinking
+            // section only. The text section is unaffected.
+            cache.think_hl = crate::tool_display::CodeHl::new(plan.cfg.engine);
+            cache.think_src.clear();
+            cache.think_lines = Rc::new(Vec::new());
+            cache.think_in_fence = false;
+            cache.think_fence_lang = None;
+            cache.think_held.clear();
+            cache.think_held_lines.clear();
+            cache.think_held_wrapped_for = 0;
+            cache.think_reasoning_keys.clear();
+            cache.think_reasoning_len = 0;
+        }
+
+        // ── thinking section ─────────────────────────────────
+        if let Some(full) = &plan.thinking_joined {
+            if !plan.cur_keys.is_empty() && !full.is_empty() {
+                let thinking_style = plan
+                    .palette
+                    .style(crate::color::Role::Thinking, Modifier::empty());
+                let wrap_w = plan.cfg.width.saturating_sub(1).max(4);
+                // Split the joined text into the settled prefix and the
+                // in-progress held line. `think_lines` covers every
+                // hard line except the held one, which is rewrapped
+                // whenever it changes.
+                let (_, held) = split_settled_held(full);
+                // Append-only growth keeps the prefix intact. A broken
+                // prefix (an earlier reasoning id grew) forces a full
+                // re-wrap from a fresh highlighter.
+                if full.starts_with(cache.think_src.as_str()) {
+                    let delta = &full[cache.think_src.len()..];
+                    if !delta.is_empty() {
+                        let frags: Vec<&str> = delta.split('\n').collect();
+                        if frags.len() >= 2 {
+                            // Completed hard lines: the old held line
+                            // plus the delta's first fragment, then the
+                            // delta's middle fragments. The final delta
+                            // fragment is the new held line.
+                            let mut to_wrap: Vec<String> = Vec::with_capacity(frags.len() - 1);
+                            to_wrap.push(cache.think_held.clone() + frags[0]);
+                            for f in &frags[1..frags.len() - 1] {
+                                to_wrap.push(f.to_string());
+                            }
+                            let refs: Vec<&str> = to_wrap.iter().map(|s| s.as_str()).collect();
+                            let (new_lines, in_fence, fence_lang) = wrap_thinking_delta(
+                                &refs,
+                                wrap_w,
+                                &plan.palette,
+                                thinking_style,
+                                &mut cache.think_hl,
+                                cache.think_in_fence,
+                                cache.think_fence_lang.clone(),
+                            );
+                            // The append copies the old lines into the
+                            // new `Rc` (O(T)). A persistent deque
+                            // would remove it. That is out of scope
+                            // for this pass.
+                            let mut merged: Vec<Line<'static>> =
+                                cache.think_lines.iter().cloned().collect();
+                            merged.extend(new_lines);
+                            cache.think_lines = Rc::new(gutter_lines(merged, LIVE_GUTTER));
+                            cache.think_in_fence = in_fence;
+                            cache.think_fence_lang = fence_lang;
+                        }
+                    }
+                } else {
+                    // Non-suffix change (an earlier reasoning id
+                    // grew): full re-wrap of the settled prefix from
+                    // a fresh highlighter.
+                    let settled = split_settled_held(full).0;
+                    let hard: Vec<&str> = if settled.is_empty() {
+                        Vec::new()
+                    } else {
+                        // `settled` ends in the held line's boundary
+                        // `\n`. Drop it before splitting, else a
+                        // spurious empty line appears.
+                        settled
+                            .strip_suffix('\n')
+                            .unwrap_or(settled)
+                            .split('\n')
+                            .collect()
+                    };
+                    cache.think_hl = crate::tool_display::CodeHl::new(plan.cfg.engine);
+                    let (lines, in_fence, fence_lang) = wrap_thinking_delta(
+                        &hard,
+                        wrap_w,
+                        &plan.palette,
+                        thinking_style,
+                        &mut cache.think_hl,
+                        false,
+                        None,
+                    );
+                    cache.think_lines = Rc::new(gutter_lines(lines, LIVE_GUTTER));
+                    cache.think_in_fence = in_fence;
+                    cache.think_fence_lang = fence_lang;
+                }
+                cache.think_src = full.to_string();
+                // Re-wrap the held line whenever the join ran. The
+                // fence state or a reset path may have moved even
+                // when the held text is unchanged. Idle frames skip
+                // the whole section, so the cached held lines stay
+                // O(1) with no highlight work.
+                refresh_held_lines(cache, held, wrap_w, &plan.palette, thinking_style);
+                cache.think_reasoning_keys = plan.cur_keys.clone();
+                cache.think_reasoning_len = plan.cur_len;
+            }
+        }
+
+        // ── response-text section ────────────────────────────
+        if let Some(text) = plan.text_new {
+            if text.is_empty() {
+                // Mirror the legacy path. An empty text contributes no
+                // lines.
+                cache.text_src.clear();
+                cache.text_lines = Rc::new(Vec::new());
+            } else {
+                let prose = plan
+                    .palette
+                    .style(crate::color::Role::PlainText, Modifier::empty());
+                let wrap_w = plan.cfg.width.saturating_sub(1).max(4);
+                let lines = wrap_markdown_p(&text, wrap_w, &plan.palette, prose);
+                cache.text_lines = Rc::new(gutter_lines(lines, LIVE_GUTTER));
+                cache.text_src = text;
+            }
+        }
+    }
+    // The mutable cache borrow ends here.
+
+    // Phase 3 (shared): assemble the view. The big sections are
+    // shared by `Rc` clone, so a cache hit copies nothing.
+    let cache = app
+        .stream_block_cache_ref()
+        .as_ref()
+        .expect("cache built above");
+    let cfg = plan.cfg;
+    let palette = &plan.palette;
+    let wrap_w = cfg.width.saturating_sub(1).max(4);
+
     let dim = palette.style(crate::color::Role::Status, Modifier::DIM);
     let label_style = Style::default()
         .fg(palette.color(crate::color::Role::ToolCommand))
         .add_modifier(Modifier::BOLD);
-    // The tool name of a partial call: the purple `tool_name` accent
-    // (the 2026-09-14 user pass), bold, standing alone with no
-    // `tool:` prefix.
     let tool_name_style = Style::default()
         .fg(palette.color(crate::color::Role::ToolName))
         .add_modifier(Modifier::BOLD);
-    // One-cell left pad, matching the settled thinking/assistant-body
-    // gutter (docs/tui-streaming-simplify.md section 3): the live body
-    // settles where it lands, so it must not carry the old 12-col GUTTER.
-    let gutter = " ".to_string();
-    let wrap_w = width.saturating_sub(1).max(4);
+    let thinking_tag_style = Style::default().fg(palette.thinking_tag(cfg.thinking_expanded));
 
-    let mut out: Vec<Line<'static>> = Vec::new();
-
-    // Header row: the status suffix only — the `assistant` type marker
-    // is gone (2026-09-06 request: no message-type markers); the block
-    // body below is the live response.
-    let suffix = if buf.done { " · done" } else { " …" };
-    out.push(Line::from(vec![Span::styled(
+    // Header row: the status suffix only. The `assistant` type
+    // marker is gone (2026-09-06 request: no message-type markers).
+    let suffix = if plan.done { " · done" } else { " …" };
+    let header = vec![Line::from(vec![Span::styled(
         suffix.to_string(),
         label_style,
-    )]));
+    )])];
 
-    let mut body_lines: Vec<Line<'static>> = Vec::new();
+    // The label row, shown when thinking content exists. Collapsed
+    // shows "thinking …" and expanded shows "thinking"
+    // (docs/tui-streaming-simplify.md section 3).
+    let join_nonempty = plan.cur_len + plan.cur_keys.len().saturating_sub(1) > 0;
+    let shows_thinking_label =
+        app.thinking_shown() && !plan.cur_keys.is_empty() && join_nonempty && max_body_lines > 0;
+    let label = shows_thinking_label.then(|| {
+        let t = if cfg.thinking_expanded {
+            "thinking".to_string()
+        } else {
+            "thinking \u{2026}".to_string()
+        };
+        Line::from(vec![
+            Span::styled(LIVE_GUTTER.to_string(), Style::default()),
+            Span::styled(t, thinking_tag_style),
+        ])
+    });
 
-    let has_thinking = app.thinking_shown() && !buf.reasoning.is_empty();
-    let has_text = !buf.text.is_empty();
+    // The shared content window: the last `max_body_lines` rows. One
+    // row is reserved for the pinned thinking label when thinking is
+    // shown. While the content fits, the block grows with it. Once
+    // full, the oldest thinking rows scroll out as the text grows.
+    let settled_total = cache.think_lines.len();
+    let held_total = cache.think_held_lines.len();
+    // The thinking lines show only when the label row shows (which
+    // folds in the global `thinking_shown` toggle) and the block is
+    // expanded. Collapsed or hidden shows no thinking content lines.
+    let think_total = if shows_thinking_label && cfg.thinking_expanded {
+        settled_total + held_total
+    } else {
+        0
+    };
+    let text_total = cache.text_lines.len();
+    let window = max_body_lines.saturating_sub(usize::from(shows_thinking_label));
+    let combined = think_total + text_total;
+    let drop = combined.saturating_sub(window);
+    let think_take = think_total.saturating_sub(drop);
+    let text_drop = drop.saturating_sub(think_total);
+    let text_take = text_total.saturating_sub(text_drop);
 
-    // Thinking renders above the response text (the natural order is
-    // thinking → response). The live block honors the same global
-    // thinking toggles as the settled blocks
-    // (docs/tui-streaming-simplify.md section 3, the unified toggle):
-    // `Ctrl+T` (collapse/expand, `thinking_expanded`) and `Ctrl+X`
-    // (show/hide, `thinking_shown`). When collapsed the live block
-    // shows only the one-line `thinking …` label, like a settled
-    // block.
-    let thinking_style = palette.style(crate::color::Role::Thinking, Modifier::empty());
-    let thinking_tag_style =
-        Style::default().fg(palette.thinking_tag(app.thinking_expanded()));
-    let mut thinking_tail: Vec<Line<'static>> = Vec::new();
-    let mut shows_thinking_label = false;
-    if has_thinking && max_body_lines > 0 {
-        let mut ids: Vec<&String> = buf.reasoning.keys().collect();
-        ids.sort();
-        let thinking_text = ids
-            .iter()
-            .filter_map(|id| buf.reasoning.get(*id))
-            .map(|s| s.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-        if !thinking_text.is_empty() {
-            shows_thinking_label = true;
-            if app.thinking_expanded() {
-                thinking_tail = wrap_thinking(
-                    &thinking_text,
-                    wrap_w,
-                    palette,
-                    thinking_style,
-                    app.tool_display().highlight_engine,
-                );
-            }
-        }
-    }
-
-    // Text block: the accumulated response text, wrapped with the same
-    // markdown/syntax path used for the settled message.
-    let text_tail: Vec<Line<'static>> = if has_text {
-        wrap_markdown_p(&buf.text, wrap_w, palette, prose)
+    // The window drops from the front. The visible thinking is the
+    // tail of the settled lines followed by the tail of the held
+    // lines. Collapsed shows no thinking lines at all.
+    let held_take = think_take.min(held_total);
+    let settled_take = think_take.saturating_sub(held_total);
+    let think_start = if cfg.thinking_expanded {
+        settled_total - settled_take
+    } else {
+        settled_total
+    };
+    let held_visible: Vec<Line<'static>> = if cfg.thinking_expanded {
+        cache.think_held_lines[held_total - held_take..].to_vec()
     } else {
         Vec::new()
     };
+    let text_start = text_total - text_take;
 
-    // The shared content window: the last `max_body_lines` rows (one
-    // row reserved for the pinned "thinking" label when thinking is
-    // shown). While the content fits, the block grows with it; once
-    // full, the oldest rows (the front of the thinking) scroll out as
-    // the text grows. The block height never shrinks at the
-    // thinking → text transition, so the transcript above it does not
-    // lurch and the view does not flicker.
-    let window = max_body_lines.saturating_sub(usize::from(shows_thinking_label));
-    if window > 0 {
-        let combined = thinking_tail.len() + text_tail.len();
-        let drop = combined.saturating_sub(window);
-        let think_take = thinking_tail.len().saturating_sub(drop);
-        let text_drop = drop.saturating_sub(thinking_tail.len());
-        let text_take = text_tail.len().saturating_sub(text_drop);
-        if shows_thinking_label {
-            let label = if app.thinking_expanded() {
-                "thinking".to_string()
-            } else {
-                "thinking \u{2026}".to_string()
-            };
-            body_lines.push(Line::from(vec![Span::styled(
-                label,
-                thinking_tag_style,
-            )]));
-        }
-        body_lines.extend(
-            thinking_tail[thinking_tail.len() - think_take..]
-                .iter()
-                .cloned(),
-        );
-        body_lines.extend(text_tail[text_tail.len() - text_take..].iter().cloned());
-    }
-
-    // Partial tool-call arguments: one dim line per call.
-    if body_lines.is_empty() {
-        let mut ids: Vec<&String> = buf.tool_args.keys().collect();
+    // Partial tool-call arguments: one dim line per call. They show
+    // only when no other body content is present.
+    let body_has_content = shows_thinking_label || think_take > 0 || text_take > 0;
+    let mut tool_args: Vec<Line<'static>> = Vec::new();
+    if !body_has_content {
+        let mut ids: Vec<&String> = plan.tool_args.keys().collect();
         ids.sort();
         for id in ids {
-            let Some((name, args)) = buf.tool_args.get(id) else {
+            if tool_args.len() >= max_body_lines {
+                break;
+            }
+            let Some((name, args)) = plan.tool_args.get(id) else {
                 continue;
             };
             let name_disp = if name.is_empty() {
@@ -2098,57 +2612,61 @@ fn stream_block_lines(app: &App, width: usize, max_body_lines: usize) -> Vec<Lin
             } else {
                 name.as_str()
             };
-            let budget = max_body_lines.saturating_sub(body_lines.len());
-            if budget == 0 {
-                break;
-            }
             let shown = trunc(args, wrap_w.saturating_sub(12));
-            body_lines.push(Line::from(vec![
-                Span::styled(format!("{gutter}{name_disp}"), tool_name_style),
+            tool_args.push(Line::from(vec![
+                Span::styled(format!("{LIVE_GUTTER}{name_disp}"), tool_name_style),
                 Span::styled(format!(" {shown}"), dim),
             ]));
         }
     }
 
-    // Apply the gutter to text/thinking body lines that lack it.
-    let mut content: Vec<Line<'static>> = body_lines
-        .into_iter()
-        .map(|l| {
-            // The wrap helpers already prefix the gutter when the wrap
-            // width accounts for it. If the first span does not start
-            // with the gutter, prepend it.
-            let has_gutter = l
-                .spans
-                .first()
-                .map_or(false, |s| s.content.starts_with(&gutter));
-            if has_gutter {
-                l
-            } else {
-                let mut spans = vec![Span::styled(gutter.clone(), Style::default())];
-                spans.extend(l.spans);
-                Line::from(spans)
-            }
-        })
-        .collect();
-
-    // Blinking cursor on the last content line while the stream is open.
-    if !buf.done && content.is_empty() {
-        content.push(Line::from(vec![
-            Span::styled(gutter.clone(), dim),
-            Span::styled("▊", dim),
-        ]));
-    } else if !buf.done && !content.is_empty() {
+    // The blinking cursor overlays the last body line while the
+    // stream is open. When the body is empty it is its own row.
+    let (cursor_line, cursor_standalone) = if plan.done {
+        (None, false)
+    } else {
         let now = chrono::Utc::now();
         let blink = (now.timestamp_millis() / 500) % 2 == 0;
         let cursor = if blink { "▊" } else { " " };
-        let last = content.last_mut().unwrap();
-        last.spans.push(Span::styled(cursor, dim));
+        let last_body: Option<Line<'static>> = if !tool_args.is_empty() {
+            tool_args.last().cloned()
+        } else if text_take > 0 {
+            Some(cache.text_lines[cache.text_lines.len() - 1].clone())
+        } else if held_take > 0 {
+            Some(cache.think_held_lines[held_total - 1].clone())
+        } else if settled_take > 0 {
+            Some(cache.think_lines[settled_total - 1].clone())
+        } else {
+            label.clone()
+        };
+        match last_body {
+            Some(mut l) => {
+                l.spans.push(Span::styled(cursor, dim));
+                (Some(l), false)
+            }
+            None => (
+                Some(Line::from(vec![
+                    Span::styled(LIVE_GUTTER.to_string(), dim),
+                    Span::styled("▊", dim),
+                ])),
+                true,
+            ),
+        }
+    };
+
+    StreamBlockView {
+        header,
+        label,
+        think: Rc::clone(&cache.think_lines),
+        think_start,
+        think_held: held_visible,
+        text: Rc::clone(&cache.text_lines),
+        text_start,
+        tool_args,
+        cursor_line,
+        cursor_standalone,
     }
-
-    out.extend(content);
-    out
 }
-
 /// The status/help row content as terminal lines (one per row).
 ///
 /// The TUI flash wins; then the status extension row (its lines or
@@ -5034,5 +5552,864 @@ mod transcript_snapshot_tests {
         fn assert_send<T: Send>() {}
         assert_send::<TranscriptBuildInput>();
         assert_send::<TranscriptBuild>();
+    }
+}
+
+#[cfg(test)]
+mod stream_cache_tests {
+    //! The stream block cache tests
+    //! (docs/tui-perf-streaming-incremental-plan.md).
+
+    use std::rc::Rc;
+    use std::time::Instant;
+
+    use ratatui::style::Modifier;
+    use ratatui::text::Line;
+
+    use crate::app::{App, StreamBlockCache, StreamBuf};
+    use crate::color::{Level, Palette, Role};
+    use crate::tool_display::HighlightEngine;
+
+    use super::{gutter_lines, stream_block_lines, wrap_thinking_full, LIVE_GUTTER};
+
+    /// The frame width the frame uses.
+    const W: usize = 80;
+    /// The wrap width: `W.saturating_sub(1).max(4)`.
+    const WRAP_W: usize = 79;
+
+    /// A fresh app with a fixed palette and the given highlight engine.
+    fn make_app(engine: HighlightEngine) -> App {
+        let mut app = App::new();
+        app.set_palette(Palette::builtin(Level::Rgb));
+        let mut td = app.tool_display().clone();
+        td.highlight_engine = engine;
+        app.set_tool_display(td);
+        app
+    }
+
+    /// Build a live stream buffer from reasoning pairs and response text.
+    fn stream_buf(text: &str, reasoning: &[(&str, &str)], done: bool) -> StreamBuf {
+        let mut buf = StreamBuf::default();
+        buf.text = text.to_string();
+        for (k, v) in reasoning {
+            buf.reasoning.insert((*k).to_string(), (*v).to_string());
+        }
+        buf.done = done;
+        buf
+    }
+
+    /// The live stream cache, once a frame has built it.
+    fn cache_of(app: &App) -> &StreamBlockCache {
+        app.stream_block_cache_ref().as_ref().expect("cache built")
+    }
+
+    /// The O(T) reasoning join count on this thread.
+    fn join_calls() -> u32 {
+        crate::app::REASONING_JOIN_CALLS.with(|c| c.get())
+    }
+
+    /// The whole-document markdown parse count on this thread.
+    fn parse_calls() -> u32 {
+        crate::markdown::markdown_parse_calls()
+    }
+
+    /// The rendered text of a set of lines, for byte-identity checks.
+    fn lines_text<'a>(lines: impl IntoIterator<Item = &'a Line<'static>>) -> Vec<String> {
+        lines.into_iter().map(|l| l.to_string()).collect()
+    }
+
+    /// A thinking corpus of about `n_kb` kilobytes: prose lines plus
+    /// a fenced rust block each, so fences cross chunk boundaries.
+    fn thinking_corpus(n_kb: usize) -> String {
+        let want = n_kb * 1024;
+        let mut s: String = (0..(n_kb * 12))
+            .map(|i| {
+                format!(
+                    "Step {i}: weigh the design against the cost. ```rust\nfn step_{i}() {{ let v: u32 = {i}; v }}\n```\n"
+                )
+            })
+            .collect();
+        s.truncate(want);
+        s
+    }
+
+    /// 1. Feeding 10 KB of thinking in ten 1 KB chunks must match a
+    /// fresh full rebuild of each prefix.
+    #[test]
+    fn incremental_thinking_matches_full_rebuild() {
+        let mut app = make_app(HighlightEngine::Builtin);
+        let palette = app.palette().clone();
+        let style = palette.style(Role::Thinking, Modifier::empty());
+        let corpus = thinking_corpus(10);
+        let total = corpus.len();
+        assert!(total >= 10 * 1024, "corpus is only {total} bytes");
+        let step = total / 10;
+        for i in 1..=10 {
+            let prefix = &corpus[..step * i];
+            app.set_stream_buf(stream_buf("", &[("r1", prefix)], false));
+            let _ = stream_block_lines(&mut app, W, usize::MAX);
+            let cache = cache_of(&app);
+            let actual = lines_text(
+                cache
+                    .think_lines
+                    .iter()
+                    .chain(cache.think_held_lines.iter()),
+            );
+            let (full, _, _) =
+                wrap_thinking_full(prefix, WRAP_W, &palette, style, HighlightEngine::Builtin);
+            let expected = lines_text(gutter_lines(full, LIVE_GUTTER).iter());
+            assert_eq!(actual, expected, "chunk {i}/10 must equal the full rebuild");
+        }
+    }
+
+    /// 2. A code fence open in chunk 1 and closed in chunk 2 keeps the
+    /// fence state coherent, and the line after it is prose.
+    #[test]
+    fn thinking_code_fence_spans_delta_boundary() {
+        let mut app = make_app(HighlightEngine::Builtin);
+        let palette = app.palette().clone();
+        let style = palette.style(Role::Thinking, Modifier::empty());
+
+        // Chunk 1: open a fence, one code line inside, no close.
+        let c1 = "```rust\nlet a: u32 = 1;\n";
+        app.set_stream_buf(stream_buf("", &[("r1", c1)], false));
+        let _ = stream_block_lines(&mut app, W, usize::MAX);
+        {
+            let cache = cache_of(&app);
+            assert!(cache.think_in_fence, "the fence is open after chunk 1");
+            assert_eq!(cache.think_fence_lang.as_deref(), Some("rust"));
+        }
+
+        // Chunk 2: close the fence. The line after it is prose.
+        let c2 = format!("{c1}```\nand that is why it works\n");
+        app.set_stream_buf(stream_buf("", &[("r1", &c2)], false));
+        let _ = stream_block_lines(&mut app, W, usize::MAX);
+        let cache = cache_of(&app);
+        assert!(!cache.think_in_fence, "the fence is closed after chunk 2");
+        assert_eq!(cache.think_fence_lang, None);
+        let (full, _, _) =
+            wrap_thinking_full(&c2, WRAP_W, &palette, style, HighlightEngine::Builtin);
+        let expected = lines_text(gutter_lines(full, LIVE_GUTTER).iter());
+        let actual = lines_text(
+            cache
+                .think_lines
+                .iter()
+                .chain(cache.think_held_lines.iter()),
+        );
+        assert_eq!(
+            actual, expected,
+            "the post-fence line is prose, matching the full rebuild"
+        );
+    }
+
+    /// 3. A width change invalidates the cache, a fresh build of both
+    /// the thinking and text sections.
+    #[test]
+    fn width_change_invalidates_cache() {
+        let mut app = make_app(HighlightEngine::Builtin);
+        let reasoning = "w ".repeat(200);
+        let text = "x ".repeat(150);
+        app.set_stream_buf(stream_buf(&text, &[("r1", &reasoning)], false));
+        let _ = stream_block_lines(&mut app, 80, usize::MAX);
+        let before = cache_of(&app).think_lines.clone();
+        let before_text = cache_of(&app).text_lines.clone();
+
+        let _ = stream_block_lines(&mut app, 120, usize::MAX);
+        let cache = cache_of(&app);
+        let after = cache.think_lines.clone();
+        let after_text = cache.text_lines.clone();
+        assert!(
+            !Rc::ptr_eq(&before, &after),
+            "a width change must rebuild the thinking lines"
+        );
+        assert!(
+            !Rc::ptr_eq(&before_text, &after_text),
+            "a width change must rebuild the text lines"
+        );
+        assert_eq!(
+            cache.width, 120,
+            "the config snapshot records the new width"
+        );
+    }
+
+    /// 4. An unchanged response text returns the cached lines with no
+    /// markdown re-parse. A changed one re-parses.
+    #[test]
+    fn text_unchanged_returns_cache() {
+        let mut app = make_app(HighlightEngine::Builtin);
+        let text = "Hello **world**\n\n- alpha\n- beta\n";
+        app.set_stream_buf(stream_buf(text, &[], false));
+
+        let p0 = parse_calls();
+        let _ = stream_block_lines(&mut app, W, usize::MAX);
+        let p1 = parse_calls();
+        assert!(p1 > p0, "a new text body must parse the markdown");
+
+        // Idle frame: same text, no re-parse, lines shared.
+        let rc0 = cache_of(&app).text_lines.clone();
+        let _ = stream_block_lines(&mut app, W, usize::MAX);
+        let rc1 = cache_of(&app).text_lines.clone();
+        let p2 = parse_calls();
+        assert_eq!(p2, p1, "an idle frame must not re-parse the markdown");
+        assert!(
+            Rc::ptr_eq(&rc0, &rc1),
+            "idle frame reuses the cached text lines"
+        );
+
+        // Growth: a new parse runs.
+        let text2 = format!("{text}more body\n");
+        app.set_stream_buf(stream_buf(&text2, &[], false));
+        let _ = stream_block_lines(&mut app, W, usize::MAX);
+        let p3 = parse_calls();
+        assert!(p3 > p2, "a changed text body must re-parse the markdown");
+    }
+
+    /// 5. Growing the earliest reasoning id changes the join at a
+    /// non-suffix position, so a full rebuild runs and matches a
+    /// fresh full rebuild.
+    #[test]
+    fn reasoning_reorder_triggers_full_rebuild() {
+        let mut app = make_app(HighlightEngine::Builtin);
+        let palette = app.palette().clone();
+        let style = palette.style(Role::Thinking, Modifier::empty());
+
+        // Grow the last id in sort order (b), a suffix append.
+        app.set_stream_buf(stream_buf("", &[("a", "alpha"), ("b", "beta")], false));
+        let _ = stream_block_lines(&mut app, W, usize::MAX);
+        app.set_stream_buf(stream_buf(
+            "",
+            &[("a", "alpha"), ("b", "beta\ngamma")],
+            false,
+        ));
+        let _ = stream_block_lines(&mut app, W, usize::MAX);
+        assert_eq!(cache_of(&app).think_src, "alpha\nbeta\ngamma");
+
+        // Grow the earlier id (a) by appending. The value only grows,
+        // so the fingerprint moves and the join runs. But the joined
+        // text now changes at a non-suffix position, so the prefix
+        // check fails and a full rebuild runs.
+        app.set_stream_buf(stream_buf(
+            "",
+            &[("a", "alpha\nalpha2"), ("b", "beta\ngamma")],
+            false,
+        ));
+        let _ = stream_block_lines(&mut app, W, usize::MAX);
+        let joined = "alpha\nalpha2\nbeta\ngamma";
+        assert_eq!(cache_of(&app).think_src, joined);
+        let (full, _, _) =
+            wrap_thinking_full(joined, WRAP_W, &palette, style, HighlightEngine::Builtin);
+        let expected = lines_text(gutter_lines(full, LIVE_GUTTER).iter());
+        let cache = cache_of(&app);
+        let actual = lines_text(
+            cache
+                .think_lines
+                .iter()
+                .chain(cache.think_held_lines.iter()),
+        );
+        assert_eq!(
+            actual, expected,
+            "the reorder rebuild matches a fresh full rebuild"
+        );
+    }
+
+    /// 6. `clear_stream` drops the live cache and the stream buffer.
+    #[test]
+    fn clear_stream_drops_cache() {
+        let mut app = make_app(HighlightEngine::Builtin);
+        app.set_stream_buf(stream_buf("hi", &[("r1", "think")], false));
+        let _ = stream_block_lines(&mut app, W, usize::MAX);
+        assert!(
+            app.stream_block_cache_ref().is_some(),
+            "the cache is built in a frame"
+        );
+        app.clear_stream();
+        assert!(
+            app.stream_block_cache_ref().is_none(),
+            "clear_stream drops the cache"
+        );
+        assert!(app.stream_buf().is_none(), "clear_stream clears the buffer");
+    }
+
+    /// 7. An unchanged reasoning map skips the O(T) join on idle
+    /// frames.
+    #[test]
+    fn join_skip_on_unchanged_reasoning() {
+        let mut app = make_app(HighlightEngine::Builtin);
+        app.set_stream_buf(stream_buf("", &[("r1", "some reasoning")], false));
+
+        let j0 = join_calls();
+        let _ = stream_block_lines(&mut app, W, usize::MAX);
+        let j1 = join_calls();
+        assert_eq!(j1, j0 + 1, "a fresh cache joins the reasoning once");
+
+        let _ = stream_block_lines(&mut app, W, usize::MAX);
+        let j2 = join_calls();
+        assert_eq!(j2, j1, "an idle frame skips the O(T) join");
+    }
+
+    /// 8. A changed reasoning map re-joins, and the incremental path
+    /// picks up the new suffix.
+    #[test]
+    fn join_triggers_on_reasoning_change() {
+        let mut app = make_app(HighlightEngine::Builtin);
+        let palette = app.palette().clone();
+        let style = palette.style(Role::Thinking, Modifier::empty());
+
+        app.set_stream_buf(stream_buf("", &[("r1", "first part")], false));
+        let _ = stream_block_lines(&mut app, W, usize::MAX);
+        let j1 = join_calls();
+
+        // Grow the single reasoning value, a new suffix.
+        app.set_stream_buf(stream_buf("", &[("r1", "first part\nsecond part")], false));
+        let _ = stream_block_lines(&mut app, W, usize::MAX);
+        let j2 = join_calls();
+        assert!(j2 > j1, "a changed reasoning map re-joins");
+
+        let cache = cache_of(&app);
+        assert_eq!(cache.think_src, "first part\nsecond part");
+        let (full, _, _) = wrap_thinking_full(
+            "first part\nsecond part",
+            WRAP_W,
+            &palette,
+            style,
+            HighlightEngine::Builtin,
+        );
+        let expected = lines_text(gutter_lines(full, LIVE_GUTTER).iter());
+        let actual = lines_text(
+            cache
+                .think_lines
+                .iter()
+                .chain(cache.think_held_lines.iter()),
+        );
+        assert_eq!(
+            actual, expected,
+            "the new suffix is wrapped and matches the rebuild"
+        );
+    }
+
+    /// 9. Perf gate. 200 KB of thinking fed in 60 frames of about 3
+    /// KB each. Every frame stays under 100 ms and the average under
+    /// 10 ms. The Builtin engine isolates the cache mechanism. The
+    /// tree-sitter highlighter internal re-parse is out of scope.
+    #[test]
+    fn streaming_thinking_per_frame_stays_under_budget() {
+        let mut app = make_app(HighlightEngine::Builtin);
+        let total = 200 * 1024;
+        let frames = 60;
+        let per = total / frames;
+        let corpus = thinking_corpus(200);
+        assert_eq!(corpus.len(), total, "the corpus must be 200 KB");
+
+        let ms: Vec<u128> = (0..frames)
+            .map(|i| {
+                let upto = ((i + 1) * per).min(corpus.len());
+                app.set_stream_buf(stream_buf("", &[("r1", &corpus[..upto])], false));
+                let t0 = Instant::now();
+                let _ = stream_block_lines(&mut app, W, usize::MAX);
+                t0.elapsed().as_millis()
+            })
+            .collect();
+        let avg = ms.iter().sum::<u128>() / frames as u128;
+        let max = *ms.iter().max().unwrap();
+        assert!(max < 100, "a frame hit {max} ms, the budget is 100 ms");
+        assert!(avg < 10, "the average frame {avg} ms must stay under 10 ms");
+    }
+
+    /// 10. Perf gate. A warm cache with no new delta is an idle frame.
+    /// It skips the join, the highlight, and the markdown re-parse,
+    /// and stays under 2 ms.
+    #[test]
+    fn idle_frame_is_cached() {
+        let mut app = make_app(HighlightEngine::Builtin);
+        let corpus = thinking_corpus(200);
+        app.set_stream_buf(stream_buf("", &[("r1", &corpus)], false));
+        let _ = stream_block_lines(&mut app, W, usize::MAX);
+
+        let t0 = Instant::now();
+        let _ = stream_block_lines(&mut app, W, usize::MAX);
+        let idle_ms = t0.elapsed().as_millis();
+        assert!(
+            idle_ms < 2,
+            "an idle frame took {idle_ms} ms, the budget is 2 ms"
+        );
+    }
+}
+
+
+#[cfg(test)]
+mod stream_cache_independent_tests {
+    //! Independent verification of the live-stream-block incremental
+    //! cache (docs/tui-perf-streaming-incremental-plan.md).
+    //!
+    //! These tests are written **independently** of the sibling
+    //! `stream_cache_tests` module, which implements the plan's own
+    //! test plan. They:
+    //!
+    //!   * drive the mechanism through the public `App` API
+    //!     (`set_stream_buf`, `press`, `clear_stream`) rather than
+    //!     poking cache fields,
+    //!   * check the plan's **invariant** (the cached lines must stay
+    //!     byte-identical to a from-scratch full rebuild of the same
+    //!     source prefix) at *irregular* chunk boundaries the plan's
+    //!     tests do not exercise, and
+    //!   * add an **A/B performance test** that runs the pre-plan
+    //!     full-rebuild mechanism and the post-plan incremental
+    //!     mechanism over the same streaming workload and asserts the
+    //!     incremental one is faster.
+    //!
+    //! The plan's "Before" cost model is: every draw ran
+    //! `wrap_thinking` (a fresh `CodeHl`, O(total thinking chars))
+    //! plus `render_markdown_lines` (a fresh parser, O(total response
+    //! chars)). The "After" model is: a cache hit reuses the wrapped
+    //! lines, a delta re-wraps only the appended suffix, and the
+    //! persistent `CodeHl` keeps code-fence state coherent.
+
+    use std::rc::Rc;
+    use std::time::Instant;
+
+    use ratatui::style::Modifier;
+    use ratatui::text::Line;
+
+    use crate::app::{App, Key, StreamBlockCache, StreamBuf};
+    use crate::color::{Level, Palette, Role};
+    use crate::tool_display::HighlightEngine;
+
+    use super::{
+        gutter_lines, stream_block_lines, wrap_markdown_p, wrap_thinking_full, LIVE_GUTTER,
+    };
+
+    // A fresh app with a fixed palette and the Builtin engine (the
+    // engine the plan's perf gates run, isolating the cache mechanism
+    // from tree-sitter's own full-buffer re-parse).
+    fn make_app() -> App {
+        let mut app = App::new();
+        app.set_palette(Palette::builtin(Level::Rgb));
+        let mut td = app.tool_display().clone();
+        td.highlight_engine = HighlightEngine::Builtin;
+        app.set_tool_display(td);
+        app
+    }
+
+    /// Build a live-stream buffer from a response-text string and a
+    /// list of (id, value) reasoning pairs.
+    fn buf(text: &str, reasoning: &[(&str, &str)]) -> StreamBuf {
+        let mut b = StreamBuf::default();
+        b.text = text.to_string();
+        for (k, v) in reasoning {
+            b.reasoning.insert((*k).to_string(), (*v).to_string());
+        }
+        b
+    }
+
+    fn cache_of(app: &App) -> &StreamBlockCache {
+        app.stream_block_cache_ref().as_ref().expect("cache built")
+    }
+
+    /// The O(T) reasoning-join count on this thread.
+    fn join_calls() -> u32 {
+        crate::app::REASONING_JOIN_CALLS.with(|c| c.get())
+    }
+
+    /// The whole-document markdown parse count on this thread.
+    fn parse_calls() -> u32 {
+        crate::markdown::markdown_parse_calls()
+    }
+
+    /// The rendered text of a line iterable, for byte-identity checks.
+    fn lines_text<'a>(lines: impl IntoIterator<Item = &'a Line<'static>>) -> Vec<String> {
+        lines.into_iter().map(|l| l.to_string()).collect()
+    }
+
+    /// The legacy (pre-plan) full-rebuild baseline for a thinking
+    /// prefix: a fresh highlighter over the whole prefix, gutter
+    /// applied. This is exactly what the old `stream_block_lines`
+    /// paid on every frame.
+    fn legacy_full_think(app: &App, prefix: &str) -> Vec<String> {
+        let palette = app.palette().clone();
+        let style = palette.style(Role::Thinking, Modifier::empty());
+        let (lines, _, _) =
+            wrap_thinking_full(prefix, 79, &palette, style, HighlightEngine::Builtin);
+        lines_text(gutter_lines(lines, LIVE_GUTTER).iter())
+    }
+
+    /// The incremental cache's thinking output: settled lines plus the
+    /// in-progress held lines.
+    fn cache_think(app: &App) -> Vec<String> {
+        let c = cache_of(app);
+        lines_text(c.think_lines.iter().chain(c.think_held_lines.iter()))
+    }
+
+    /// A thinking corpus with code fences and prose, ~`n_kb` KB. The
+    /// fence delimiters sit on their own hard lines so fence state
+    /// actually opens and closes.
+    fn fence_corpus(n_kb: usize) -> String {
+        let want = n_kb * 1024;
+        let mut s: String = (0..(n_kb * 12))
+            .map(|i| {
+                format!(
+                    "Step {i}: weigh the design. ```rust\nfn step_{i}() {{ let v: u32 = {i}; v }}\n```\n"
+                )
+            })
+            .collect();
+        s.truncate(want);
+        s
+    }
+
+    // ── correctness: the invariant holds at odd boundaries ─────
+
+    /// Feeding the same thinking prefix in *irregular* chunks (splitting
+    /// fence lines, landing on newline boundaries, multi-line suffixes)
+    /// keeps the cached thinking byte-identical to a fresh full rebuild
+    /// of that prefix at every step.
+    #[test]
+    fn irregular_chunks_stay_byte_identical() {
+        let mut app = make_app();
+        let corpus = fence_corpus(8);
+        let total = corpus.len();
+        let bounds: Vec<usize> = [0.0f64, 0.01, 0.13, 0.29, 0.5, 0.61, 0.87, 1.0]
+            .iter()
+            .map(|f| (*f * total as f64) as usize)
+            .collect();
+        for &bound in bounds.iter().skip(1) {
+            app.set_stream_buf(buf("", &[("r1", &corpus[..bound])]));
+            let _ = stream_block_lines(&mut app, 80, usize::MAX);
+            assert_eq!(
+                cache_think(&app),
+                legacy_full_think(&app, &corpus[..bound]),
+                "prefix {bound} of {total} must equal the full rebuild"
+            );
+        }
+    }
+
+    /// A code fence that opens in chunk 1 and closes in chunk 2 stays
+    /// coherent: after the close the following line is
+    /// prose-highlighted, byte-identical to a full rebuild.
+    #[test]
+    fn fence_state_spans_delta_boundary() {
+        let mut app = make_app();
+        let c1 = "```rust\nlet x = 1;\n";
+        app.set_stream_buf(buf("", &[("r1", c1)]));
+        let _ = stream_block_lines(&mut app, 80, usize::MAX);
+        let c1cache = cache_of(&app);
+        assert!(c1cache.think_in_fence, "the fence is open after c1");
+        assert_eq!(c1cache.think_fence_lang.as_deref(), Some("rust"));
+
+        let c2 = format!("{c1}{}\nafter the fence", "```");
+        app.set_stream_buf(buf("", &[("r1", &c2)]));
+        let _ = stream_block_lines(&mut app, 80, usize::MAX);
+        let c2cache = cache_of(&app);
+        assert!(!c2cache.think_in_fence, "the fence is closed after c2");
+        assert_eq!(
+            cache_think(&app),
+            legacy_full_think(&app, &c2),
+            "the post-fence line is prose, matching the full rebuild"
+        );
+    }
+
+    /// A delta that only grows the in-progress held line must not
+    /// merge the settled lines (no `Rc` re-allocation); a delta that
+    /// completes a hard line must merge into a new `Rc`. This is the
+    /// build deviation "the held line is rewrapped, not cached".
+    #[test]
+    fn held_line_grows_without_merging_settled_lines() {
+        let mut app = make_app();
+        let s1 = "alpha\nbeta\n";
+        app.set_stream_buf(buf("", &[("r1", s1)]));
+        let _ = stream_block_lines(&mut app, 80, usize::MAX);
+        let settled_a = cache_of(&app).think_lines.clone();
+
+        // Grow the held line only (no new newline in the suffix).
+        let s2 = "alpha\nbeta\ngamma";
+        app.set_stream_buf(buf("", &[("r1", s2)]));
+        let _ = stream_block_lines(&mut app, 80, usize::MAX);
+        let settled_b = cache_of(&app).think_lines.clone();
+        assert!(
+            Rc::ptr_eq(&settled_a, &settled_b),
+            "held-line-only growth must not re-allocate the settled lines"
+        );
+        assert_eq!(
+            cache_think(&app),
+            legacy_full_think(&app, s2),
+            "settled plus rewrapped held must match a full rebuild of the prefix"
+        );
+
+        // Now complete the line: a newline lands, so a merge runs.
+        let s3 = "alpha\nbeta\ngamma\ndelta";
+        app.set_stream_buf(buf("", &[("r1", s3)]));
+        let _ = stream_block_lines(&mut app, 80, usize::MAX);
+        let settled_c = cache_of(&app).think_lines.clone();
+        assert!(
+            !Rc::ptr_eq(&settled_b, &settled_c),
+            "completing a hard line must merge into a new settled Rc"
+        );
+        assert_eq!(
+            cache_think(&app),
+            legacy_full_think(&app, s3),
+            "after the merge, settled plus held must match a full rebuild"
+        );
+    }
+
+    /// Growing the *earliest* reasoning id changes the join at a
+    /// non-suffix position, forcing a full rebuild that still matches
+    /// a fresh full rebuild.
+    #[test]
+    fn reasoning_reorder_triggers_full_rebuild() {
+        let mut app = make_app();
+        app.set_stream_buf(buf("", &[("a", "alpha"), ("b", "beta")]));
+        let _ = stream_block_lines(&mut app, 80, usize::MAX);
+        let j1 = join_calls();
+
+        // Grow the earlier id "a": the join now changes at a
+        // non-suffix position.
+        app.set_stream_buf(buf("", &[("a", "alpha\nalpha2"), ("b", "beta")]));
+        let _ = stream_block_lines(&mut app, 80, usize::MAX);
+        let joined = "alpha\nalpha2\nbeta";
+        assert_eq!(cache_of(&app).think_src, joined);
+        assert!(join_calls() > j1, "the reordered join must re-join");
+        assert_eq!(
+            cache_think(&app),
+            legacy_full_think(&app, joined),
+            "the reorder rebuild must match a fresh full rebuild"
+        );
+    }
+
+    /// A config change (width or palette level) forces a full rebuild
+    /// of both sections.
+    #[test]
+    fn config_change_invalidates_cache() {
+        let mut app = make_app();
+        let think = "w ".repeat(200);
+        let text = "x ".repeat(150);
+        app.set_stream_buf(buf(&text, &[("r1", &think)]));
+        let _ = stream_block_lines(&mut app, 80, usize::MAX);
+        let t_before = cache_of(&app).think_lines.clone();
+        let x_before = cache_of(&app).text_lines.clone();
+
+        // Width change -> full rebuild of both sections.
+        let _ = stream_block_lines(&mut app, 120, usize::MAX);
+        assert!(
+            !Rc::ptr_eq(&t_before, &cache_of(&app).think_lines),
+            "a width change must rebuild the thinking section"
+        );
+        assert!(
+            !Rc::ptr_eq(&x_before, &cache_of(&app).text_lines),
+            "a width change must rebuild the text section"
+        );
+        assert_eq!(cache_of(&app).width, 120);
+
+        // Palette level change -> full rebuild again.
+        let t_pal = cache_of(&app).think_lines.clone();
+        app.set_palette(Palette::builtin(Level::C256));
+        let _ = stream_block_lines(&mut app, 120, usize::MAX);
+        assert!(
+            !Rc::ptr_eq(&t_pal, &cache_of(&app).think_lines),
+            "a palette level change must rebuild the thinking section"
+        );
+        assert_eq!(cache_of(&app).palette_level, Level::C256);
+    }
+
+    /// Toggling `thinking_expanded` (Ctrl+T) rebuilds the thinking
+    /// section only; the text section is unaffected. Toggling
+    /// `thinking_shown` (Ctrl+X) rebuilds nothing.
+    #[test]
+    fn thinking_toggles_rebuild_only_their_section() {
+        let mut app = make_app();
+        let think = "alpha\nbeta\n";
+        let text = "# Answer\n\n- a\n- b\n";
+        app.set_stream_buf(buf(text, &[("r1", think)]));
+        let _ = stream_block_lines(&mut app, 80, usize::MAX);
+        let think_a = cache_of(&app).think_lines.clone();
+        let text_a = cache_of(&app).text_lines.clone();
+
+        // Ctrl+T: thinking_expanded flips. Thinking section rebuilds,
+        // text section keeps its Rc.
+        let _ = app.press(Key::CtrlT);
+        let _ = stream_block_lines(&mut app, 80, usize::MAX);
+        let think_b = cache_of(&app).think_lines.clone();
+        let text_b = cache_of(&app).text_lines.clone();
+        assert!(
+            !Rc::ptr_eq(&think_a, &think_b),
+            "the thinking-expanded toggle must rebuild the thinking section"
+        );
+        assert!(
+            Rc::ptr_eq(&text_a, &text_b),
+            "the thinking-expanded toggle must leave the text section alone"
+        );
+        assert_eq!(cache_of(&app).thinking_expanded, false);
+
+        // Ctrl+X: thinking_shown flips. No section rebuilds.
+        let _ = app.press(Key::CtrlX);
+        let _ = stream_block_lines(&mut app, 80, usize::MAX);
+        let think_c = cache_of(&app).think_lines.clone();
+        let text_c = cache_of(&app).text_lines.clone();
+        assert!(
+            Rc::ptr_eq(&think_b, &think_c),
+            "the thinking-shown toggle must not rebuild the thinking section"
+        );
+        assert!(
+            Rc::ptr_eq(&text_b, &text_c),
+            "the thinking-shown toggle must not rebuild the text section"
+        );
+    }
+
+    /// `clear_stream` drops the live cache (and the buffer), so memory
+    /// returns to baseline.
+    #[test]
+    fn clear_stream_drops_cache() {
+        let mut app = make_app();
+        app.set_stream_buf(buf("hi", &[("r1", "think")]));
+        let _ = stream_block_lines(&mut app, 80, usize::MAX);
+        assert!(app.stream_block_cache_ref().is_some());
+        app.clear_stream();
+        assert!(
+            app.stream_block_cache_ref().is_none(),
+            "clear_stream must drop the cache"
+        );
+        assert!(app.stream_buf().is_none());
+    }
+
+    /// A warm idle frame (no reasoning or text delta) does no join, no
+    /// markdown re-parse, and reuses the cached lines.
+    #[test]
+    fn idle_frame_does_no_work() {
+        let mut app = make_app();
+        let think = "step one\nstep two\n";
+        let text = "Answer\n\n- a\n- b\n";
+        app.set_stream_buf(buf(text, &[("r1", think)]));
+        let _ = stream_block_lines(&mut app, 80, usize::MAX);
+        let t_warm = cache_of(&app).think_lines.clone();
+        let x_warm = cache_of(&app).text_lines.clone();
+        let j_warm = join_calls();
+        let p_warm = parse_calls();
+
+        for _ in 0..2 {
+            let _ = stream_block_lines(&mut app, 80, usize::MAX);
+        }
+        assert_eq!(join_calls(), j_warm, "idle frames must skip the O(T) join");
+        assert_eq!(parse_calls(), p_warm, "idle frames must skip the markdown re-parse");
+        assert!(
+            Rc::ptr_eq(&t_warm, &cache_of(&app).think_lines),
+            "idle frames must reuse the cached thinking lines"
+        );
+        assert!(
+            Rc::ptr_eq(&x_warm, &cache_of(&app).text_lines),
+            "idle frames must reuse the cached text lines"
+        );
+    }
+
+    // ── performance: the incremental path beats full rebuild ─────
+
+    /// A/B gate. The pre-plan path re-ran a full O(T) thinking rebuild
+    /// and a full O(W) markdown parse on every frame. The post-plan
+    /// incremental cache re-wraps only the appended suffix and skips
+    /// the markdown parse when the text is unchanged. Over a 60-frame
+    /// stream of ~800 KB of thinking, the incremental path must win.
+    #[test]
+    fn streaming_frames_incremental_beats_full_rebuild() {
+        let corpus = fence_corpus(800);
+        let text = "## Answer\n\n".to_string() + "x ".repeat(20_000).as_str();
+        let frames = 60;
+        let per = corpus.len() / frames;
+
+        let app0 = make_app();
+        let palette = app0.palette().clone();
+        let style = palette.style(Role::Thinking, Modifier::empty());
+        let prose = palette.style(Role::PlainText, Modifier::empty());
+
+        // OLD mechanism: full thinking rebuild plus full markdown
+        // parse on every frame.
+        let mut old_ms: Vec<u128> = Vec::with_capacity(frames);
+        for i in 1..=frames {
+            let think_prefix = corpus[..i * per].to_string();
+            let text_prefix = text[..i * text.len() / frames].to_string();
+            let t0 = Instant::now();
+            let _ = wrap_thinking_full(
+                &think_prefix,
+                79,
+                &palette,
+                style,
+                HighlightEngine::Builtin,
+            );
+            let _ = wrap_markdown_p(&text_prefix, 79, &palette, prose);
+            old_ms.push(t0.elapsed().as_millis());
+        }
+        let old_total = old_ms.iter().sum::<u128>();
+
+        // NEW mechanism: the incremental cache.
+        let mut app = make_app();
+        let mut new_ms: Vec<u128> = Vec::with_capacity(frames);
+        for i in 1..=frames {
+            let think_prefix = corpus[..i * per].to_string();
+            let text_prefix = text[..i * text.len() / frames].to_string();
+            app.set_stream_buf(buf(&text_prefix, &[("r1", &think_prefix)]));
+            let t0 = Instant::now();
+            let _ = stream_block_lines(&mut app, 80, usize::MAX);
+            new_ms.push(t0.elapsed().as_millis());
+        }
+        let new_total = new_ms.iter().sum::<u128>();
+
+        let old_avg = old_total / frames as u128;
+        let new_avg = new_total / frames as u128;
+        eprintln!(
+            "indep_streaming old_total={} ms old_avg={} ms \
+             new_total={} ms new_avg={} ms ratio={:.2}",
+            old_total,
+            old_avg,
+            new_total,
+            new_avg,
+            old_total as f64 / new_total.max(1) as f64
+        );
+        assert!(
+            old_total >= 2 * new_total,
+            "the incremental path must be at least 2x faster in total \
+             (old {old_total} ms vs new {new_total} ms)"
+        );
+        assert!(
+            new_avg < 50,
+            "an incremental frame hit {new_avg} ms, the budget is 50 ms"
+        );
+    }
+
+    /// A/B gate. A warm idle frame in the new mechanism reuses the
+    /// cache and does no wrap or parse work. The pre-plan idle frame
+    /// re-ran the full thinking rebuild and the full markdown parse.
+    /// The new idle frame must be far cheaper.
+    #[test]
+    fn idle_frame_incremental_beats_full_rebuild() {
+        let think = fence_corpus(500);
+        let text = "## Answer\n\n".to_string() + "x ".repeat(60_000).as_str();
+
+        let mut app = make_app();
+        app.set_stream_buf(buf(&text, &[("r1", &think)]));
+        let _ = stream_block_lines(&mut app, 80, usize::MAX);
+
+        let palette = app.palette().clone();
+        let style = palette.style(Role::Thinking, Modifier::empty());
+        let prose = palette.style(Role::PlainText, Modifier::empty());
+
+        // OLD idle frame: full thinking rebuild plus full markdown
+        // parse.
+        let t_old = Instant::now();
+        let _ = wrap_thinking_full(
+            &think,
+            79,
+            &palette,
+            style,
+            HighlightEngine::Builtin,
+        );
+        let _ = wrap_markdown_p(&text, 79, &palette, prose);
+        let old_ms = t_old.elapsed().as_millis();
+
+        // NEW idle frame: a cache hit.
+        let t_new = Instant::now();
+        let _ = stream_block_lines(&mut app, 80, usize::MAX);
+        let new_ms = t_new.elapsed().as_millis();
+
+        eprintln!("indep_idle old={} ms new={} ms", old_ms, new_ms);
+        assert!(
+            old_ms > 0 && new_ms <= old_ms / 10,
+            "the idle frame must be at least 10x cheaper than a full \
+             rebuild (old {old_ms} ms, new {new_ms} ms)"
+        );
     }
 }
