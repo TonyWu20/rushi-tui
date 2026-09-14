@@ -1,8 +1,8 @@
 # TUI streaming live-block: incremental render plan
 
-Status: Spec (approved for build).
+Status: Implemented (built and tested).
 
-Last updated: 2026-09-14.
+Last updated: 2026-09-15.
 
 Scope: eliminate the per-frame O(n) cost of rendering the live
 stream block (thinking + response text) when the content grows to
@@ -369,7 +369,9 @@ grows within a stream. The pair (sorted keys, total length)
 changes only when the map changes. The check costs O(k log k)
 where k is the number of reasoning ids, usually 1 to 2.
 
-### Clone avoidance: borrowed slices (decided)
+### Clone avoidance: borrowed slices (superseded)
+
+Superseded at build. See "Build deviations".
 
 The wrapped-line cache still copies O(T) memory on every frame.
 `stream_block_lines` returns an owned `Vec<Line<'static>>`, so a
@@ -541,6 +543,52 @@ The "keep the highlighter alive" idea (#2) is a prerequisite of
 this plan and is folded in: `StreamBlockCache` owns the
 `CodeHl`, so it persists across frames by construction.
 
+## Build deviations
+
+Departures from the design above, made during the build. All are
+covered by the tests in `render::stream_cache_tests`.
+
+### The view holds `Rc`, not borrowed slices
+
+The "Clone avoidance" section decides on a `StreamBlockView`
+with borrowed slices tied to `&'a App`. It rejects `Rc` up
+front. The stated reason is a caller-side `to_vec()` copy.
+The build changes that decision.
+
+`draw()` interleaves `&mut App` calls between its uses of the
+view. A view that borrows `App` would not coexist with those.
+The view therefore holds `Rc<Vec<Line<'static>>>` for the
+settled `think` and `text` sections.
+
+The caller consumes those lines directly via `iter()`, `Index`,
+and `len()`. No `to_vec()` copy runs. An idle frame pays one
+O(1) refcount bump. That keeps the clone-avoidance goal on the
+hot path.
+
+The cache lives in `App`, so mutating it makes the build
+signature `fn stream_block_lines(app: &mut App, ...)`, not the
+spec's `&'a App`.
+
+### The held line is rewrapped, not cached
+
+The spec cache stores a settled source prefix and rewraps only
+the appended suffix. The build splits the joined thinking text
+at the last `\n`. The settled half feeds `think_lines`. The
+in-progress held line is rewrapped fresh on each change.
+
+The held line is partial and grows every frame, so it reflows
+every frame anyway. Rewrapping it fresh bounds the work by the
+partial line, not the total. Treating it as settled would
+leave stale wraps behind. Tests 1, 2, 5, and 8 prove
+byte-identity with a full rebuild at every prefix.
+
+### The perf gate runs the Builtin engine
+
+The perf-gate tests run on the Builtin highlight engine. The
+tree-sitter highlighter re-parses its whole buffer on each line,
+so its per-frame cost stays O(total). The Builtin engine isolates
+the cache mechanism this plan targets.
+
 ## Open questions
 
 - **Streaming markdown parser**: the response-text path still
@@ -556,3 +604,43 @@ this plan and is folded in: `StreamBlockCache` owns the
   The `CodeHl` state still tracks the full document, so the
   highlighter must see every line even if we drop old wrapped
   output. This is a memory optimisation, not a correctness issue.
+
+## Independent verification tests
+
+A second, independent test module `render::stream_cache_independent_tests`
+(`bin/tui/src/render.rs`) verifies the mechanism on top of the
+plan's own `stream_cache_tests`. It drives the cache through the
+public `App` API (`set_stream_buf`, `press`, `clear_stream`) rather
+than poking cache fields, so it catches wiring regressions as well.
+
+What it covers:
+
+- Byte-identity of the cached thinking against a fresh full rebuild
+  at *irregular* chunk boundaries (1 %, 13 %, 29 %, ... splits),
+  including splits inside code fences and on newline boundaries.
+- Fence-state coherence across a delta boundary (open in chunk 1,
+  close in chunk 2; the post-fence line is prose).
+- The held-line / settled split: a held-only delta keeps the
+  settled `Rc` (no merge); a completed hard line merges into a new
+  `Rc`.
+- A non-suffix reasoning-id change forces a full rebuild that still
+  matches a fresh full rebuild.
+- Invalidation matrix: width change, palette-level change, the
+  `Ctrl+T` (thinking_expanded) toggle, the `Ctrl+X` (thinking_shown)
+  toggle, and `clear_stream()`.
+- Idle-frame zero work: the reasoning-join and markdown-parse
+  counters are unchanged and the `Rc`s are identical across
+  consecutive idle frames.
+
+Two A/B performance gates quantify the benefit (Builtin engine, to
+isolate the cache mechanism from tree-sitter's full-buffer re-parse):
+
+- Streaming: 60 frames of ~800 KB. The pre-plan full-rebuild path
+  is at least 2x the total cost of the incremental path
+  (measured ~2.4x here).
+- Idle frame: a warm idle frame is at least 10x cheaper than a
+  full rebuild + re-parse (measured ~0 ms vs ~118 ms here).
+
+The module prints its measured timings (`indep_streaming`,
+`indep_idle`) so a reader can see the actual ratio on their
+machine.
