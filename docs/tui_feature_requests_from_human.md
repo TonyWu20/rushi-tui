@@ -567,6 +567,39 @@ macchiato` as the first internal color scheme. Shipped in
       dropped; the pane scrolls. Tests: `palette::preview::tests`
       (parse, fallback, cache) and `snap_tree_event_pane_lines`.
 
+## New requests (2026-09-16)
+
+- [x] The `wait` loop-phase state covers two sub-phases of the
+      model call, and the TUI shows `waiting for model · Ns` for
+      both: the sent request pending on the server (no response
+      data yet), and the response streaming back (deltas arriving
+      through the session's `.model-stream`). Add one more loop-
+      phase status, `working`, beyond [`idle`, `tools`, `wait`],
+      to distinguish the two cases: `wait` is the request pending,
+      `working` is the response streaming. Proposal: `working` as
+      the new status. Decision 2026-09-16: the marker source is a
+      TUI-side rendering rule, no kernel change. Per the
+      refinement policy (`docs/refinement-policy.md`, P1a
+      condition 3 and the P4 pre-test) a TUI-only effect gets a
+      rendering rule instead of a protocol change. While the loop
+      phase is `wait`, the TUI shows `working` when the session's
+      `.model-stream` is non-empty (deltas have arrived) and keeps
+      `wait` while it is empty (the request is still pending). The
+      kernel emits no `working` marker. The label `working` is
+      kept as proposed: the `running-unknown` fallback is an
+      internal state name (`PhaseState::RunningUnknown`, `bin/tui/
+      src/render.rs`), shown as `[running]` / `Working...`, and the
+      user has never seen it surface (2026-09-16). Detail:
+      `docs/tui-working-status.md` (the open-request design),
+      `docs/tui-model-wait-indicator.md` (the base contract),
+      `docs/tui-streaming-response.md`.
+      Shipped 2026-09-16: `PhaseState::Working` plus the `working`
+      state-table row are TUI-derived in `bin/tui/src/render.rs`
+      (`phase_state` reads the last `loop_phase` value and the
+      session stream buffer; `[working]` bit; `model working · Ns`
+      row). No kernel change. Tests: `working_status_tests` in
+      `bin/tui/src/render.rs`.
+
 ## New feedback (2026-09-25)
 
 - [x] Color the tree row tags by class: user, assistant, and

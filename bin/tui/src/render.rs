@@ -1995,10 +1995,12 @@ pub fn help_line(running: bool) -> String {
 }
 
 /// The loop-phase display state of the active session
-/// (docs/tui-model-wait-indicator.md section 2). One of four values,
-/// derived from two inputs: the last `loop_phase` value in the log
-/// and the loop-running bit. The state is a pure function of the
-/// log and the bit, so it survives a TUI restart.
+/// (docs/tui-model-wait-indicator.md section 2, the `working` row
+/// from docs/tui-working-status.md section 4). One of five values,
+/// derived from three inputs: the last `loop_phase` value in the log,
+/// the loop-running bit, and the session stream buffer. The state is
+/// a pure function of the log, the bit, and the buffer, so it
+/// survives a TUI restart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PhaseState {
     /// The loop is not running. Bit `[idle]`, the working row
@@ -2008,9 +2010,18 @@ pub enum PhaseState {
     /// `wait` / `tools`. Bit `[running]`, the row shows
     /// `Working...`.
     RunningUnknown,
-    /// The loop runs, the last marker value is `wait`. Bit
-    /// `[wait]`, the row shows the wait for the model response.
+    /// The loop runs, the last marker value is `wait`, and the
+    /// stream buffer is closed. The request is pending on the
+    /// server. Bit `[wait]`, the row shows the wait for the
+    /// model response.
     Wait,
+    /// The loop runs, the last marker value is `wait`, and the
+    /// session stream buffer is open (at least one
+    /// `.model-stream` delta line was read). The response is
+    /// streaming back. Bit `[working]`, the row shows
+    /// `model working · Ns` (docs/tui-working-status.md). The
+    /// timer keeps the `wait` marker timestamp.
+    Working,
     /// The loop runs, the last marker value is `tools`. Bit
     /// `[tools]`, the row shows the tool run.
     Tools,
@@ -2024,14 +2035,20 @@ pub fn phase_bit(state: PhaseState) -> &'static str {
         PhaseState::Idle => " [idle] ",
         PhaseState::RunningUnknown => " [running] ",
         PhaseState::Wait => " [wait] ",
+        PhaseState::Working => " [working] ",
         PhaseState::Tools => " [tools] ",
     }
 }
 
-/// Derive the phase state from the last marker value and the running
-/// bit (docs/tui-model-wait-indicator.md section 2). The value comes
-/// from the O(1) per-id map; a missing marker or a value outside
-/// the two known strings maps to `RunningUnknown`.
+/// Derive the phase state from the last marker value, the running
+/// bit, and the session stream buffer (docs/tui-model-wait-indicator.md
+/// section 2; the `working` row from docs/tui-working-status.md
+/// section 4). The value comes from the O(1) per-id map; a missing
+/// marker or a value outside the two known strings maps to
+/// `RunningUnknown` regardless of the stream buffer. Inside `wait`,
+/// an open stream buffer (at least one `.model-stream` delta line
+/// read) upgrades the state to `Working`: the response is
+/// streaming back instead of the request still pending.
 pub fn phase_state(app: &App, running: bool) -> PhaseState {
     if !running {
         return PhaseState::Idle;
@@ -2041,7 +2058,13 @@ pub fn phase_state(app: &App, running: bool) -> PhaseState {
         .get(crate::app::LOOP_PHASE_STATUS_ID)
         .and_then(|v| v.as_str())
     {
-        Some("wait") => PhaseState::Wait,
+        Some("wait") => {
+            if app.stream_buf().is_some() {
+                PhaseState::Working
+            } else {
+                PhaseState::Wait
+            }
+        }
         Some("tools") => PhaseState::Tools,
         _ => PhaseState::RunningUnknown,
     }
@@ -2079,33 +2102,29 @@ fn spinner_frame(now: &chrono::DateTime<chrono::Utc>) -> &'static str {
 }
 
 /// The working row text above the input box
-/// (docs/tui-model-wait-indicator.md section 3): the phase with the
-/// wait span from the marker timestamp. The `wait` and `tools`
-/// states carry the span; an unparseable timestamp drops the span
-/// and keeps the label. The idle state owns no text: the row stays
-/// blank.
+/// (docs/tui-model-wait-indicator.md section 3; the `working` row
+/// from docs/tui-working-status.md section 4): the phase with the
+/// span from the marker timestamp. The `wait`, `working`, and
+/// `tools` states carry the span; an unparseable timestamp drops
+/// the span and keeps the label. The `working` state keeps the
+/// `wait` marker timestamp: `N` counts the whole model call from
+/// the marker, not from the first delta. The idle state owns no
+/// text: the row stays blank.
 fn working_row_text(
     state: PhaseState,
     ts: Option<&str>,
     now: &chrono::DateTime<chrono::Utc>,
 ) -> Option<String> {
-    match state {
-        PhaseState::Idle => None,
-        PhaseState::RunningUnknown => Some("Working...".to_string()),
-        PhaseState::Wait => {
-            let label = "waiting for model";
-            match ts.and_then(|t| wait_span_text(t, *now)) {
-                Some(span) => Some(format!("{label} · {span}")),
-                None => Some(label.to_string()),
-            }
-        }
-        PhaseState::Tools => {
-            let label = "tools running";
-            match ts.and_then(|t| wait_span_text(t, *now)) {
-                Some(span) => Some(format!("{label} · {span}")),
-                None => Some(label.to_string()),
-            }
-        }
+    let label = match state {
+        PhaseState::Idle => return None,
+        PhaseState::RunningUnknown => return Some("Working...".to_string()),
+        PhaseState::Wait => "waiting for model",
+        PhaseState::Working => "model working",
+        PhaseState::Tools => "tools running",
+    };
+    match ts.and_then(|t| wait_span_text(t, *now)) {
+        Some(span) => Some(format!("{label} · {span}")),
+        None => Some(label.to_string()),
     }
 }
 
@@ -4091,8 +4110,9 @@ pub fn draw(
     // stage 2): a rebuild is recorded or in flight on the worker.
     let rebuilding = app.transcript_rebuilding();
     // The loop-phase bit (docs/tui-model-wait-indicator.md): a
-    // running loop names its phase (`[wait]`, `[tools]`); an
-    // idle loop or an unknown marker keeps the plain bit.
+    // running loop names its phase (`[wait]`, `[working]`,
+    // `[tools]`); an idle loop or an unknown marker keeps the plain
+    // bit.
     let phase = phase_state(app, running);
     // The palette colors as owned values: the palette borrow must
     // end before the mutable app borrows below (the viewport and
@@ -6729,5 +6749,307 @@ mod stream_cache_independent_tests {
             "the idle frame must be at least 10x cheaper than a full \
              rebuild (old {old_ms} ms, new {new_ms} ms)"
         );
+    }
+}
+
+#[cfg(test)]
+mod working_status_tests {
+    //! The TUI-derived `working` state (docs/tui-working-status.md).
+    //! `wait` is the sent request pending on the server; `working`
+    //! is the response streaming back through the session's
+    //! `.model-stream`. The derivation is a rendering rule over
+    //! three inputs — the loop-running bit, the last `loop_phase`
+    //! value, and the session stream buffer — with no kernel
+    //! change (section 2, marker source).
+
+    use crate::app::{App, StreamBuf};
+    use crate::event::Event;
+    use crate::port::{TailCursor, WatchItem};
+
+    use super::{phase_bit, phase_state, working_row_text, PhaseState};
+
+    /// One `loop_phase` marker event, delivered the way the log
+    /// tailer delivers it (app.rs `on_watch_item`, the ext_status
+    /// arm records it in the O(1) map and the ts side map).
+    fn marker_event(value: &str, ts: &str) -> Event {
+        let line = format!(
+            r#"{{"v":1,"type":"ext_status","ts":"{ts}","id":"loop_phase","value":"{value}"}}"#
+        );
+        Event::parse_line(&line).expect("a valid ext_status marker line")
+    }
+
+    /// Push one event through the watch path the main loop uses.
+    fn watch(app: &mut App, event: Event) {
+        app.on_watch_item(WatchItem::Event {
+            event,
+            cursor: TailCursor::end(),
+        });
+    }
+
+    /// A settle event: the authoritative `assistant_message` clears
+    /// the live stream buffer (app.rs `on_watch_item`).
+    fn settle_event() -> Event {
+        Event::parse_line(
+            r#"{"v":1,"type":"assistant_message","ts":"t","id":"a1","content":"hi","tool_calls":[],"stop_reason":"stop","usage":{"input_tokens":1,"output_tokens":1},"reasoning":{}}"#,
+        )
+        .expect("a valid settle event")
+    }
+
+    /// An open stream buffer: at least one `.model-stream` delta
+    /// line was read. `done` mirrors the channel's `done` line.
+    fn open_buf(done: bool) -> StreamBuf {
+        StreamBuf {
+            text: "so far ".to_string(),
+            done,
+            ..Default::default()
+        }
+    }
+
+    /// A fixed clock for the span tests.
+    fn now_fixed() -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339("2026-09-16T12:00:00Z")
+            .expect("a valid rfc3339 instant")
+            .with_timezone(&chrono::Utc)
+    }
+
+    /// The marker `ts` string `secs` before `now` (the marker
+    /// timestamp the loop host recorded at one-second resolution).
+    fn marker_ts(now: &chrono::DateTime<chrono::Utc>, secs: u64) -> String {
+        (*now - chrono::Duration::seconds(secs as i64))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    }
+
+    /// P1 working-state: given the loop is running, the last
+    /// `loop_phase` value is `wait`, and the stream buffer is open,
+    /// observe the title bit reads `[working]` and the working row
+    /// shows `model working · Ns`.
+    #[test]
+    fn working_state_shows_the_bit_and_the_row() {
+        let mut app = App::new();
+        let now = now_fixed();
+        watch(&mut app, marker_event("wait", &marker_ts(&now, 30)));
+        app.set_stream_buf(open_buf(false));
+
+        let state = phase_state(&app, true);
+        assert!(
+            matches!(state, PhaseState::Working),
+            "wait marker plus an open buffer is working, got {state:?}"
+        );
+        assert_eq!(phase_bit(state), " [working] ");
+
+        let row = working_row_text(state, app.loop_phase_ts(), &now)
+            .expect("the working row has text while the loop runs");
+        assert_eq!(row, "model working · 30s");
+    }
+
+    /// P2 wait-pending: given the loop is running, the last value is
+    /// `wait`, and no stream file was read (the buffer is closed),
+    /// observe the state stays `wait` and the row keeps
+    /// `waiting for model · Ns`.
+    #[test]
+    fn wait_marker_without_a_stream_buffer_keeps_the_wait_row() {
+        let mut app = App::new();
+        let now = now_fixed();
+        watch(&mut app, marker_event("wait", &marker_ts(&now, 30)));
+        assert!(app.stream_buf().is_none(), "no delta read: the buffer is closed");
+
+        let state = phase_state(&app, true);
+        assert!(
+            matches!(state, PhaseState::Wait),
+            "a closed buffer under wait stays wait, got {state:?}"
+        );
+        assert_eq!(phase_bit(state), " [wait] ");
+        let row = working_row_text(state, app.loop_phase_ts(), &now)
+            .expect("the wait row has text");
+        assert_eq!(row, "waiting for model · 30s");
+    }
+
+    /// The same `wait` row through the file path: a missing
+    /// `.model-stream` file settles the buffer, so the derivation
+    /// stays `wait`.
+    #[test]
+    fn a_missing_stream_file_keeps_the_wait_state() {
+        let mut app = App::new();
+        let now = now_fixed();
+        watch(&mut app, marker_event("wait", &marker_ts(&now, 30)));
+        let dir = std::env::temp_dir().join(format!(
+            "rushi-tui-working-status-{}-missing",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let file = dir.join(".model-stream");
+        // The loop created and deleted the file: it is gone. The
+        // poll settles any open buffer.
+        app.set_stream_buf(open_buf(false));
+        app.refresh_stream(&file);
+        assert!(
+            app.stream_buf().is_none(),
+            "a missing stream file settles the buffer"
+        );
+        assert!(matches!(phase_state(&app, true), PhaseState::Wait));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// P3 done-window: given the `done` line is read but the
+    /// `assistant_message` has not landed, observe the state stays
+    /// `working`.
+    #[test]
+    fn the_done_line_keeps_the_state_working() {
+        let mut app = App::new();
+        let now = now_fixed();
+        watch(&mut app, marker_event("wait", &marker_ts(&now, 30)));
+        // The channel is complete but the log event has not landed:
+        // the buffer is still open (`done` set).
+        app.set_stream_buf(open_buf(true));
+
+        let state = phase_state(&app, true);
+        assert!(
+            matches!(state, PhaseState::Working),
+            "the done window stays working, got {state:?}"
+        );
+        assert_eq!(
+            working_row_text(state, app.loop_phase_ts(), &now).unwrap(),
+            "model working · 30s"
+        );
+    }
+
+    /// P4 settle-fallback: given the settle event clears the stream
+    /// buffer, observe the state falls back to the marker-derived
+    /// one: `wait` while the last marker is `wait`, `tools` after a
+    /// `tools` marker, and `idle` when the running bit falls.
+    #[test]
+    fn settle_clears_the_buffer_and_falls_back_to_the_marker() {
+        let mut app = App::new();
+        let now = now_fixed();
+        watch(&mut app, marker_event("wait", &marker_ts(&now, 30)));
+        app.set_stream_buf(open_buf(true));
+        assert!(matches!(phase_state(&app, true), PhaseState::Working));
+
+        // The authoritative event lands: the buffer clears and the
+        // state falls back to the last marker, which is still wait.
+        watch(&mut app, settle_event());
+        assert!(app.stream_buf().is_none(), "the settle clears the buffer");
+        let state = phase_state(&app, true);
+        assert!(
+            matches!(state, PhaseState::Wait),
+            "after settle the marker-derived state is wait, got {state:?}"
+        );
+
+        // The next marker is tools: the state follows the marker
+        // with the buffer closed.
+        watch(&mut app, marker_event("tools", &marker_ts(&now, 5)));
+        assert!(matches!(phase_state(&app, true), PhaseState::Tools));
+
+        // The loop stops: the running bit falls and the state is
+        // idle, even with a stale buffer.
+        app.set_stream_buf(open_buf(true));
+        assert!(matches!(phase_state(&app, false), PhaseState::Idle));
+    }
+
+    /// P5 unknown-marker: given the loop is running with no marker,
+    /// or a value outside `wait`/`tools`, and an open stream
+    /// buffer, observe the state stays `running-unknown` — the
+    /// derivation applies only inside `wait`.
+    #[test]
+    fn an_unknown_marker_stays_unknown_with_an_open_buffer() {
+        let now = now_fixed();
+        // No marker at all, buffer open.
+        let mut app = App::new();
+        app.set_stream_buf(open_buf(false));
+        let state = phase_state(&app, true);
+        assert!(
+            matches!(state, PhaseState::RunningUnknown),
+            "no marker with an open buffer is running-unknown, got {state:?}"
+        );
+        assert_eq!(phase_bit(state), " [running] ");
+        assert_eq!(
+            working_row_text(state, app.loop_phase_ts(), &now).unwrap(),
+            "Working..."
+        );
+
+        // A value outside the two known strings: still unknown.
+        watch(&mut app, marker_event("model", &marker_ts(&now, 30)));
+        assert!(
+            matches!(phase_state(&app, true), PhaseState::RunningUnknown),
+            "a value outside wait/tools is running-unknown, got {state:?}"
+        );
+    }
+
+    /// P6 stale-file: given the running bit is clear and a stale
+    /// (undeleted) stream buffer exists, observe the state is
+    /// `idle` and no working row draws.
+    #[test]
+    fn a_stale_stream_buffer_is_idle_when_the_loop_stops() {
+        let mut app = App::new();
+        let now = now_fixed();
+        watch(&mut app, marker_event("wait", &marker_ts(&now, 30)));
+        app.set_stream_buf(open_buf(true));
+
+        let state = phase_state(&app, false);
+        assert!(
+            matches!(state, PhaseState::Idle),
+            "a dead loop with an undeleted stream file is idle, got {state:?}"
+        );
+        assert_eq!(phase_bit(state), " [idle] ");
+        assert!(
+            working_row_text(state, app.loop_phase_ts(), &now).is_none(),
+            "no working row when idle"
+        );
+    }
+
+    /// Restart onto a running session with a non-empty stream file:
+    /// the start read rebuilds the marker from the log and the
+    /// first `refresh_stream` read opens the buffer — `working` on
+    /// the first draw.
+    #[test]
+    fn a_restart_onto_a_running_session_shows_working() {
+        let mut app = App::new();
+        let now = now_fixed();
+        // The restart rebuilt the per-id values from the log.
+        watch(&mut app, marker_event("wait", &marker_ts(&now, 30)));
+        // The first frame reads the non-empty file from byte 0: the
+        // delta line opens the live buffer.
+        let dir = std::env::temp_dir().join(format!(
+            "rushi-tui-working-status-{}-restart",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let file = dir.join(".model-stream");
+        std::fs::write(&file, "{\"kind\":\"text\",\"delta\":\"so far \"}\n").expect("stream file");
+        app.refresh_stream(&file);
+        assert!(
+            app.stream_buf().is_some(),
+            "a non-empty file opens the buffer on the first read"
+        );
+        assert!(
+            matches!(phase_state(&app, true), PhaseState::Working),
+            "the first draw after the restart shows working"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// P7 timer-continuity: given the `wait` marker is 30 s old and
+    /// the state is `working`, observe the row shows the span from
+    /// the marker, not from the first delta; and the P5
+    /// span-format rules of the base contract hold at 90 s.
+    #[test]
+    fn the_working_timer_counts_from_the_wait_marker() {
+        let mut app = App::new();
+        let now = now_fixed();
+        watch(&mut app, marker_event("wait", &marker_ts(&now, 30)));
+        app.set_stream_buf(open_buf(false));
+
+        let state = phase_state(&app, true);
+        assert!(matches!(state, PhaseState::Working));
+        assert_eq!(
+            working_row_text(state, app.loop_phase_ts(), &now).unwrap(),
+            "model working · 30s",
+            "the span counts from the marker, not the first delta"
+        );
+
+        // The base contract's P5 format at 60 s and above: `Mm SSs`.
+        watch(&mut app, marker_event("wait", &marker_ts(&now, 90)));
+        let row = working_row_text(PhaseState::Working, app.loop_phase_ts(), &now).unwrap();
+        assert_eq!(row, "model working · 1m 30s", "the P5 format holds for working");
     }
 }

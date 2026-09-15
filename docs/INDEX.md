@@ -49,7 +49,8 @@ Method and conventions: `tui-insta-snapshot-testing.md`.
 | `tui-color-tones.md` | Implemented | 2026-09-07 | Text-tone roles and the gray-abuse fix. |
 | `tui-color-pi-alignment.md` | Implemented | 2026-09-07 | Case-by-case colour alignment with the pi TUI. |
 | `tui-streaming-response.md` | Implemented | 2026-09-07 | Live model-response streaming into the TUI transcript. |
-| `tui-model-wait-indicator.md` | Implemented | 2026-09-07 | Working-row spinner and timer during model wait. |
+| `tui-model-wait-indicator.md` | Implemented | 2026-09-16 | Working-row spinner and timer during model wait. The `working` follow-up shipped in `tui-working-status.md`. |
+| `tui-working-status.md` | Implemented | 2026-09-16 | The TUI-derived `working` loop-phase status: request pending vs. response streaming. Shipped 2026-09-16: `PhaseState::Working` derived in `render.rs`, no kernel change. |
 | `tui-thinking-block.md` | Implemented | 2026-09-07 | Reasoning/thinking block capture and display. |
 | `tui-thinking-level-input-box.md` | Implemented | 2026-09-07 | Thinking-level control in the input-box border. |
 | `tui-pending-user-messages.md` | Implemented | 2026-09-07 | Queued user messages rendered while the loop is busy. |
@@ -65,7 +66,7 @@ Method and conventions: `tui-insta-snapshot-testing.md`.
 | `goal-ui_feedback_from_human.md` | Draft | 2026-09-10 | Human-reported goal UI bugs and feature requests. |
 | `tree-ui-design-from-human.md` | Draft | 2026-09-15 | Draft for the rewind/tree browse UI. Follow-up decisions 2026-09-15: float navigation and focus, `Tab` completion, the event-type filter, prettified tool rows, pane parse + highlight. |
 | `tree-ui-design-from-human-phase-2.md` | Implemented | 2026-09-25 | Build-ready spec for the four follow-up work items plus the `Tab` reservation. Key contract, row shapes, filter cycle, pane parse + highlight, test plan. Implemented 2026-09-15: prettified tool rows, pane parse + highlight, event-type filter, float focus and wrap navigation, `Tab` completion. Refined 2026-09-25: row tag class colors, the kitty keyboard protocol for `Ctrl+Shift+P`, and `Tab` replacing the typed text. |
-| `tui_feature_requests_from_human.md` | Active | 2026-09-15 | Slim index of all TUI feature requests with ship status. |
+| `tui_feature_requests_from_human.md` | Active | 2026-09-16 | Slim index of all TUI feature requests with ship status. |
 | `tui-ext-repo-split.md` | Historical | 2026-09-15 | The repo-split execution record. The TUI `rushi-common` git re-pointing (item A1) landed 2026-09-15. |
 | `tui-insta-snapshot-testing.md` | Implemented | 2026-09-11 | The insta-snapshot test method: harness, snapshot set, determinism rules. |
 | `tui-perf-freeze-investigation.md` | Investigation | 2026-09-13 | Freeze root cause: the synchronous full transcript build on each cache-key miss. |
