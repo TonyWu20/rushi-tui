@@ -198,4 +198,135 @@ outcomes below all fork.
   `bin/compact --up-to [--prompt]` flags are pending. No-op until the
   kernel side lands.
 - Tree indentation (`└─`, 3 spaces per level, post-fork) is not yet
-  rendered; rows are flat until it is implemented.
+  rendered. Rows are flat until it is implemented.
+
+### Follow-up spec decisions (2026-09-15)
+
+Feedback on the shipped View-only and Rewind-without-summary modes.
+Recorded 2026-09-15. Nothing below is built yet.
+
+#### Navigation and focus (all float windows)
+
+- Wrap-around is inherent to every float list.
+  `Up`/`Down` at the first item jumps to the last, and at the last
+  item jumps to the first.
+
+- Applies to the file picker, the session list, the tree event list,
+  and every future float.
+
+- Movement keys are `Ctrl+J` / `Ctrl+K` and the arrows.
+  Plain `j` / `k` are released back to query typing.
+  This unblocks queries that contain `j` or `k`.
+
+- Focus model, option B. `Ctrl+Shift+P` toggles focus between the
+  entry list and the preview pane. `Ctrl+U` / `Ctrl+D` half-page
+  scroll the focused pane. The focused preview pane gets a green
+  border.
+
+- The file picker adopts the same contract.
+  One scheme across the floats, not two.
+
+#### `Tab` reserved for completion
+
+- `Tab` completes the highlighted fuzzy-matched item.
+  It applies to the file picker, the session list, the tree event
+  list, and the root command list.
+
+- Completion inserts the item text and keeps the window open.
+  The user keeps typing to narrow further.
+
+- The file picker's `Tab` scope-cycle binding is removed.
+  Scope cycling stays on `Ctrl+I` only.
+
+- Open: `Tab` in the `TreeOptions` stage has no query to complete
+  into. No-op or commit is undecided.
+
+#### Event-type filter in the tree list
+
+- A type filter cycles on a key press.
+  Cycle: `full → user → assistant → tool → user+assistant → full`.
+
+- Recommended key: `Ctrl+F`.
+  Bare `f` types into the fuzzy query, so it cannot be the trigger.
+
+- `tool` keeps both `tool_call` and `tool_result`.
+  `user` includes `user_message_retract`.
+
+- The filter narrows candidates before fuzzy ranking.
+  It combines with the query in AND semantics.
+  The active filter shows in the input-bar hint.
+
+- The filter resets when the tree stage is left or the palette
+  closes.
+
+- Open: whether the same filter applies to the session sub-list.
+
+#### Prettified tool entries
+
+- The `bash` row shows `bash <arguments.command>`.
+
+- The `read` / `edit` / `write` rows show
+  `<tool> <arguments.file_path>`.
+  A missing `file_path` falls back to `path`.
+
+- The `tool_result` row shows the tool name, the status, and the
+  first line of the result text.
+
+- Built-in tools drop the angle brackets and the `tool:` prefix.
+  Custom tools stay raw for the moment.
+
+#### Preview pane: parse and highlight, fully scrollable
+
+- Tool call and tool result JSON is parsed with `jaq-core`.
+  `jaq` is the CLI crate. `jaq-core` is the library crate.
+
+- Parsed values are pretty-printed.
+  On parse failure, the pane shows the raw text.
+
+- The pane reuses the repo syntax highlighter unconditionally.
+  User and assistant text use the markdown pass.
+  Parsed JSON uses the JSON highlight.
+
+- The engine is the tree-sitter `tui-highlight` engine, the same
+  engine the transcript uses.
+
+- The raw-JSON toggle in the design doc is superseded for the tree
+  pane. The highlight is always on.
+
+- The pane is fully scrollable.
+  The 600-character body cap is dropped.
+  Windowed rendering follows `docs/tui-preview-pane-plan.md`.
+
+#### Resolved open points (2026-09-15)
+
+All four open points closed by decision.
+
+- Legacy terminals: `BackTab` is the fallback focus toggle.
+  `Ctrl+Shift+P` may arrive as plain `Ctrl+P` there, and
+  `BackTab` covers it.
+
+- `Tab` in the `TreeOptions` stage is a no-op. `Enter` commits.
+
+- The type filter is tree-list only. The session sub-list is
+  unaffected.
+
+- The `jaq-core` version is pinned to `3.1.1`, with `jaq-json` at
+  `2.0.3`. Verified against crates.io 2026-09-15. The parse entry
+  point and pretty printer are recorded in the phase-2 spec.
+
+- Open point (agent, spec pass), resolved by the human 2026-09-15:
+  `Tab` and `Ctrl+I` share byte `0x09` in standard terminals.
+  The picker scope cycle moves to `Ctrl+T`. `Ctrl+H` was rejected
+  as the backspace byte. `Ctrl+I` stays bound for terminals that
+  report it distinctly.
+
+The full build spec is
+`docs/tree-ui-design-from-human-phase-2.md`.
+
+#### Implementation order and tests
+
+- Order: prettified rows, pane parse + highlight, type filter,
+  navigation and focus, `Tab` completion.
+
+- Unit tests cover wrap, focus, filter cycling, and completion.
+  Snapshot tests cover the tree palette states.

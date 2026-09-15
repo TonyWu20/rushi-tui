@@ -491,3 +491,26 @@ macchiato` as the first internal color scheme. Shipped in
       The double-`s` now works in normal mode with a held
       draft. The quit gate (`q q`) still needs an empty draft.
       Tests: `browse_gate_tests` (`bin/tui/src/app.rs`).
+- [ ] Float lists wrap at both ends.
+      `Ctrl+J`/`Ctrl+K` and arrows move the cursor.
+      `Ctrl+Shift+P` toggles list/preview focus, and `Ctrl+U/D`
+      scrolls the focused pane.
+      The focused preview border is green. Detail:
+      `docs/tree-ui-design-from-human-phase-2.md`.
+- [ ] `Tab` completes the highlighted fuzzy item in every float
+      window: file picker, session list, tree event list, command
+      palette. The picker scope cycle moves to `Ctrl+T`;
+      `Ctrl+I` stays bound where terminals report it distinctly.
+      Detail: `docs/tree-ui-design-from-human-phase-2.md`.
+- [ ] `Ctrl+F` cycles the tree event type filter: full, user,
+      assistant, tool, user+assistant. Detail:
+      `docs/tree-ui-design-from-human-phase-2.md`.
+- [ ] Prettify tree tool rows. `bash` shows the command, and
+      `read`/`edit`/`write` show the `file_path`. Result rows show
+      name, status, and the first result line. Custom tools stay
+      raw. Detail: `docs/tree-ui-design-from-human-phase-2.md`.
+- [ ] The tree preview pane parses tool JSON with `jaq-core` and
+      highlights messages and JSON unconditionally (tree-sitter
+      engine). The pane scrolls fully. Detail:
+      `docs/tree-ui-design-from-human-phase-2.md`,
+      `docs/tui-preview-pane-plan.md`.

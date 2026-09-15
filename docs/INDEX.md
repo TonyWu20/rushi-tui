@@ -61,8 +61,9 @@ Method and conventions: `tui-insta-snapshot-testing.md`.
 | `vim-editor-design.md` | Implemented | 2026-09-10 | Vim modal input: modes, motions, operators, registers. |
 | `goal-ux.md` | Spec | 2026-09-08 | Goal UX: prompt template, TUI status, `goal pause` / `goal clear`. |
 | `goal-ui_feedback_from_human.md` | Draft | 2026-09-10 | Human-reported goal UI bugs and feature requests. |
-| `tree-ui-design-from-human.md` | Draft | 2026-09-11 | Draft for the rewind/tree browse UI. |
-| `tui_feature_requests_from_human.md` | Active | 2026-09-13 | Slim index of all TUI feature requests with ship status. |
+| `tree-ui-design-from-human.md` | Draft | 2026-09-15 | Draft for the rewind/tree browse UI. Follow-up decisions 2026-09-15: float navigation and focus, `Tab` completion, the event-type filter, prettified tool rows, pane parse + highlight. |
+| `tree-ui-design-from-human-phase-2.md` | Spec | 2026-09-15 | Build-ready spec for the four follow-up work items plus the `Tab` reservation. Key contract, row shapes, filter cycle, pane parse + highlight, test plan. Not yet implemented. |
+| `tui_feature_requests_from_human.md` | Active | 2026-09-15 | Slim index of all TUI feature requests with ship status. |
 | `tui-ext-repo-split.md` | Historical | 2026-09-08 | The repo-split execution record. Marked STALE for the re-pointing step. |
 | `tui-insta-snapshot-testing.md` | Implemented | 2026-09-11 | The insta-snapshot test method: harness, snapshot set, determinism rules. |
 | `tui-perf-freeze-investigation.md` | Investigation | 2026-09-13 | Freeze root cause: the synchronous full transcript build on each cache-key miss. |
