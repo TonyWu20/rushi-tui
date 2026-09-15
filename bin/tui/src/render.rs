@@ -3081,43 +3081,69 @@ fn caret_spans(l: &[Span<'static>], cc: usize, fg_override: Option<Style>) -> Ve
         }
         st
     };
+    // The caret block: a reversed black-on-white cell. An `fg_override`
+    // (a matched or active-match cursor row) retints it so the caret
+    // stays visible on top of the highlight tone.
+    let caret_style = || {
+        let mut c = Style::default()
+            .bg(Color::Black)
+            .fg(Color::White)
+            .add_modifier(Modifier::REVERSED);
+        if let Some(o) = fg_override {
+            c = o.patch(c);
+        }
+        c
+    };
     let mut out: Vec<Span<'static>> = Vec::new();
     let mut rest = cc;
+    // The caret was drawn on an earlier span: every later span runs
+    // past it and is pushed verbatim.
+    let mut drawn = false;
     for s in l {
-        if rest == 0 {
+        if drawn {
             out.push(Span::styled(s.content.clone(), patch(s)));
             continue;
         }
         let n = s.content.chars().count();
-        if rest < n {
+        if n == 0 {
+            // An empty span occupies no cell: the caret still waits
+            // for the next non-empty span (or the end-of-line cell).
+            out.push(Span::styled(s.content.clone(), patch(s)));
+            continue;
+        }
+        if rest == 0 {
+            // The caret lands on this span's first character: a span
+            // boundary or col 0. This is the start-of-word case
+            // (section 4.1) — `w` / `b` / `e` often leave the cursor
+            // exactly at a span start, and the caret must paint there.
+            let chars: Vec<char> = s.content.chars().collect();
+            let at = chars[0];
+            let post: String = chars[1..].iter().collect();
+            out.push(Span::styled(at.to_string(), caret_style()));
+            out.push(Span::styled(post, patch(s)));
+            drawn = true;
+        } else if rest < n {
+            // The caret is strictly inside this span, at local offset
+            // `rest`: split around it.
             let chars: Vec<char> = s.content.chars().collect();
             let pre: String = chars[..rest].iter().collect();
             let at = chars[rest];
             let post: String = chars[rest + 1..].iter().collect();
             out.push(Span::styled(pre, patch(s)));
-            let mut caret = Style::default()
-                .bg(Color::Black)
-                .fg(Color::White)
-                .add_modifier(Modifier::REVERSED);
-            if let Some(o) = fg_override {
-                caret = o.patch(caret);
-            }
-            out.push(Span::styled(at.to_string(), caret));
+            out.push(Span::styled(at.to_string(), caret_style()));
             out.push(Span::styled(post, patch(s)));
-            rest = 0;
+            drawn = true;
         } else {
+            // The caret sits past this span: keep the rest running.
             out.push(Span::styled(s.content.clone(), patch(s)));
             rest -= n;
         }
     }
-    if rest > 0 {
-        out.push(Span::styled(
-            " ",
-            Style::default()
-                .bg(Color::Black)
-                .fg(Color::White)
-                .add_modifier(Modifier::REVERSED),
-        ));
+    if !drawn {
+        // The caret sits one past the last character of the line
+        // (section 4.1: the col may rest at the line end): the block
+        // on a space cell.
+        out.push(Span::styled(" ", caret_style()));
     }
     out
 }
@@ -5096,6 +5122,76 @@ mod cursor_span_tests {
                 .any(|s| s.content == "main.rs" && s.style == inline_code),
             "inline code carries the InlineCode style: {code_line:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod caret_span_tests {
+    use super::caret_spans;
+    use ratatui::style::Modifier;
+    use ratatui::text::Span;
+
+    fn spans_of(texts: &[&str]) -> Vec<Span<'static>> {
+        texts.iter().map(|t| Span::raw(t.to_string())).collect()
+    }
+
+    fn out_text(out: &[Span<'static>]) -> String {
+        out.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    /// The index of the span carrying the reversed caret cell.
+    fn caret_index(out: &[Span<'static>]) -> Option<usize> {
+        out.iter()
+            .position(|s| s.style.add_modifier.contains(Modifier::REVERSED))
+    }
+
+    /// The caret must paint at col 0 (the start of the first span).
+    /// The old code swallowed the caret here: no caret at all.
+    #[test]
+    fn caret_paints_at_col_zero() {
+        let out = caret_spans(&spans_of(&["foo bar", "baz"]), 0, None);
+        assert_eq!(out_text(&out), "foo barbaz");
+        let i = caret_index(&out).expect("a caret is drawn");
+        assert_eq!(out[i].content.as_ref(), "f");
+    }
+
+    /// The caret must paint when it lands exactly on a span boundary
+    /// (the first char of a later span): the start-of-word case.
+    /// `w` / `b` often leave the cursor at a span start.
+    #[test]
+    fn caret_paints_on_a_span_boundary() {
+        // Spans "foo" + "bar" + "baz". cc = 3 is the start of "bar".
+        let out = caret_spans(&spans_of(&["foo", "bar", "baz"]), 3, None);
+        assert_eq!(out_text(&out), "foobarbaz");
+        let i = caret_index(&out).expect("a caret is drawn");
+        assert_eq!(out[i].content.as_ref(), "b");
+    }
+
+    /// Regression: the caret strictly inside a span still paints on
+    /// that character.
+    #[test]
+    fn caret_paints_inside_a_span() {
+        let out = caret_spans(&spans_of(&["foo", "bar"]), 4, None);
+        let i = caret_index(&out).expect("a caret is drawn");
+        assert_eq!(out[i].content.as_ref(), "a");
+    }
+
+    /// The caret at the line end (one past the last char) paints a
+    /// block on a space cell (section 4.1).
+    #[test]
+    fn caret_paints_at_line_end() {
+        let out = caret_spans(&spans_of(&["foo", "bar"]), 6, None);
+        let i = caret_index(&out).expect("a caret is drawn");
+        assert_eq!(out[i].content.as_ref(), " ");
+    }
+
+    /// An empty span never eats the caret: it still paints on the
+    /// first char of the next non-empty span.
+    #[test]
+    fn empty_span_does_not_eat_the_caret() {
+        let out = caret_spans(&spans_of(&["", "bar"]), 0, None);
+        let i = caret_index(&out).expect("a caret is drawn");
+        assert_eq!(out[i].content.as_ref(), "b");
     }
 }
 

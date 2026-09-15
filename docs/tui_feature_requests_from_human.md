@@ -467,16 +467,32 @@ macchiato` as the first internal color scheme. Shipped in
 ## New requests (2026-09-15)
 
 - [x] The browse cursor does not paint at the start of a word.
-      For a hyphenated word it paints on the hyphen. Shipped
-      2026-09-15: the browse word motion now runs under a
-      hyphen-folding word class (`WordClass::Browse`). A
-      hyphenated word like `foo-bar` is one word. `w` / `b` /
-      `e` land on a word start or word end, never on the
-      hyphen. The editor keeps the plain vim class
-      (`WordClass::Editor`). Detail: `WordClass` in
-      `bin/tui/src/vim_editor.rs`; the motion in
-      `bin/tui/src/browse.rs`. Tests: `word_motion_tests`,
-      `word_class_tests`.
+      For a hyphenated word it paints on the hyphen.
+      Shipped 2026-09-15 (two parts):
+      1. Hyphen word treatment: the browse word motion now runs
+         under a hyphen-folding word class (`WordClass::Browse`).
+         A hyphenated word like `foo-bar` is one word. `w` / `b`
+         / `e` land on a word start or word end, never on the
+         hyphen. The editor keeps the plain vim class
+         (`WordClass::Editor`). Detail: `WordClass` in
+         `bin/tui/src/vim_editor.rs`; the motion in
+         `bin/tui/src/browse.rs`. Tests: `word_motion_tests`,
+         `word_class_tests`. (5dcef90 only shipped this part.)
+      2. Caret painting: the caret cell was dropped whenever the
+         cursor col sat exactly at a span boundary — col 0 or a
+         word start whose first char begins its own span (the
+         usual case for `w` / `b` targets) — because
+         `caret_spans` treated "rest == 0" as "caret already
+         drawn" instead of "caret belongs on this span's first
+         char". Fixed 2026-09-15: `caret_spans`
+         (`bin/tui/src/render.rs`) now places the caret on the
+         first character of a span when the cursor sits on a span
+         boundary, and paints the block on a space cell when the
+         cursor sits one past the last character (line end).
+         `fg_override` (search/match highlighting) also applies
+         to the end-of-line block now. Tests: `caret_span_tests`
+         in `bin/tui/src/render.rs` (col 0, span boundary,
+         mid-span regression, line end, empty span).
 - [x] The vim `e` (end of word) motion is not registered while
       in browse mode. Shipped 2026-09-15: `e` is now in the
       browse key table (`char_key`). It is also in the `y`
