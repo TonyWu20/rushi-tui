@@ -297,6 +297,9 @@ macchiato` as the first internal color scheme. Shipped in
       `bin/tui/src/picker/state.rs` (P9). In a standard terminal
       `Ctrl+I` is the same byte as `Tab` (0x09), so the picker binds
       `Tab` to the cycle too. Detail: `docs/tui-file-picker.md`.
+      Updated 2026-09-15: `Tab` was reassigned to completion; the
+      scope cycle is now `Ctrl+T`, with `Ctrl+I` kept for terminals
+      that report it distinctly.
 - [x] When a file path in the `@` picker result list is too long to
       fit the column, trim the leading parent directory levels and
       replace them with `...` so the tail of the path stays visible
@@ -507,26 +510,95 @@ macchiato` as the first internal color scheme. Shipped in
       The double-`s` now works in normal mode with a held
       draft. The quit gate (`q q`) still needs an empty draft.
       Tests: `browse_gate_tests` (`bin/tui/src/app.rs`).
-- [ ] Float lists wrap at both ends.
+- [x] Float lists wrap at both ends.
       `Ctrl+J`/`Ctrl+K` and arrows move the cursor.
       `Ctrl+Shift+P` toggles list/preview focus, and `Ctrl+U/D`
       scrolls the focused pane.
       The focused preview border is green. Detail:
       `docs/tree-ui-design-from-human-phase-2.md`.
-- [ ] `Tab` completes the highlighted fuzzy item in every float
+      Shipped 2026-09-15: the `Focus` enum lives in
+      `bin/tui/src/float.rs`. The wrap and focus logic lives in
+      `bin/tui/src/palette/state.rs` and
+      `bin/tui/src/picker/state.rs`. `BackTab` is the legacy
+      fallback for the focus toggle. Tests: `move_down_wraps_from_
+      last_to_first`, `focus_toggle_keys_reach_the_state_machine`,
+      `the_focused_preview_pane_border_is_green`.
+- [x] `Tab` completes the highlighted fuzzy item in every float
       window: file picker, session list, tree event list, command
       palette. The picker scope cycle moves to `Ctrl+T`;
       `Ctrl+I` stays bound where terminals report it distinctly.
       Detail: `docs/tree-ui-design-from-human-phase-2.md`.
-- [ ] `Ctrl+F` cycles the tree event type filter: full, user,
+      Shipped 2026-09-15: `PickAction::Complete` and
+      `PaletteAction::Complete` carry the pick to `app.rs`, which
+      inserts the text and keeps the window open. `TreeOptions`
+      is a no-op. `Ctrl+T` cycles the scope, `Ctrl+I` stays.
+      Tests: `tab_completes_the_highlighted_item`,
+      `ctrl_t_cycles_the_scope`, `ctrl_i_still_cycles_the_scope`,
+      `tab_is_a_noop_in_tree_options`.
+- [x] `Ctrl+F` cycles the tree event type filter: full, user,
       assistant, tool, user+assistant. Detail:
       `docs/tree-ui-design-from-human-phase-2.md`.
-- [ ] Prettify tree tool rows. `bash` shows the command, and
+      Shipped 2026-09-15: `TreeFilter` (five-state cycle) lives on
+      `PaletteState` and the tree stage owns it. It resets on stage
+      exit and close. The active value shows in the input-bar hint
+      as `[f: <label>]`. The session sub-list is unaffected.
+      Tests: `filter_cycles_through_the_five_states`,
+      `filter_key_binds_only_in_the_tree_stage`,
+      `filter_resets_on_stage_exit_and_close`,
+      `the_event_type_filter_narrows_the_candidates`.
+- [x] Prettify tree tool rows. `bash` shows the command, and
       `read`/`edit`/`write` show the `file_path`. Result rows show
       name, status, and the first result line. Custom tools stay
       raw. Detail: `docs/tree-ui-design-from-human-phase-2.md`.
-- [ ] The tree preview pane parses tool JSON with `jaq-core` and
+      Shipped 2026-09-15: `tree_row_label`, `tree_event_tag`, and
+      `tree_event_preview` in `bin/tui/src/app.rs`. Built-ins drop
+      the brackets and the `tool:` prefix. `file_path` falls back
+      to `path`. Result names resolve through `App::call_names`.
+      Custom tools keep the raw row. Tests: `tree_prettify_tests`.
+- [x] The tree preview pane parses tool JSON with `jaq-core` and
       highlights messages and JSON unconditionally (tree-sitter
       engine). The pane scrolls fully. Detail:
       `docs/tree-ui-design-from-human-phase-2.md`,
       `docs/tui-preview-pane-plan.md`.
+      Shipped 2026-09-15: `bin/tui/src/palette/preview.rs` runs
+      the jaq parse, two-space pretty-print, and `tui-highlight`
+      pipeline. A parse failure falls back to the raw text. The
+      body cache is `TreePreviewCache` (LRU). The 600-char cap is
+      dropped; the pane scrolls. Tests: `palette::preview::tests`
+      (parse, fallback, cache) and `snap_tree_event_pane_lines`.
+
+## New feedback (2026-09-25)
+
+- [x] Color the tree row tags by class: user, assistant, and
+      tool rows each get a distinct fg color.
+      Shipped 2026-09-25: `PaletteItem.tag_fg` carries the role;
+      user/retract rows take the `Accent` tone, assistant rows the
+      `Report` tone, tool rows the `ToolName` tone (the same
+      identity colors as the transcript panels). The cursor row
+      keeps its accent highlight. Detail:
+      `docs/tree-ui-design-from-human-phase-2.md` item 1.
+      Tests: `the_row_tag_fg_classifies_user_assistant_and_tool`,
+      `tree_row_tags_carry_the_class_fg_color`.
+- [x] `Ctrl+Shift+P` must actually toggle list/preview focus; on a
+      legacy terminal it arrived as plain `Ctrl+P` and toggled the
+      preview pane instead.
+      Shipped 2026-09-25: `main.rs` now enables the kitty keyboard
+      protocol (`PushKeyboardEnhancementFlags` with
+      `DISAMBIGUATE_ESCAPE_CODES`, popped on exit) so capable
+      terminals report the shift modifier, and `key_input` accepts
+      both the legacy lowercase and the protocol-form uppercase
+      codepoint. `BackTab` remains the legacy fallback.
+      Detail: `docs/tree-ui-design-from-human-phase-2.md` item 4.
+      Tests: `key_input_tests` (protocol-form cases) and the PTY
+      case `csi_u_ctrl_shift_p_toggles_preview_focus`.
+- [x] In the command palette, `Tab` should replace the typed
+      query with the highlighted item, like the file picker does,
+      not append to it.
+      Shipped 2026-09-25: `PaletteState::apply_complete` replaces
+      the typed filter portion (after the goto prefix in a
+      sub-stage) with the item's text; the root stage replaces the
+      whole query. Detail:
+      `docs/tree-ui-design-from-human-phase-2.md` item 5.
+      Tests: `tab_replaces_the_typed_query_in_the_root_stage`,
+      `tab_replaces_the_filter_after_the_goto_prefix`,
+      `tab_replaces_the_tree_filter_with_the_row_label`.

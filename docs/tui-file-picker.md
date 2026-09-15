@@ -4,17 +4,17 @@ Status: Implemented 2026-09-03 (day-0 scope). The request lives in
 `docs/tui_feature_requests_from_human.md` (the 2026-09-08 item).
 Library research lives in `docs/tui-file-picker-research.md`.
 Sections 4 to 8 are the design and the build plan. Section 6 names
-the open decision for the human. The `Ctrl+I` file-scope cycle
-(section 4.1, P9) landed 2026-09-06: the picker starts with the
-default scope (hidden and git-ignored files excluded) and each
-`Ctrl+I` press cycles it wider — show git-ignored, then also show
-hidden — until a third press returns to the default. In a standard
-terminal `Ctrl+I` and `Tab` are the same key (both send byte 0x09,
-which crossterm parses as `KeyCode::Tab`), so the picker binds `Tab`
-to the cycle too; the `Ctrl+I` mapping stays for terminals that
-report it distinctly (e.g. the kitty keyboard protocol). The
+the open decision for the human. The file-scope cycle (section
+4.1, P9) landed 2026-09-06: the picker starts with the default
+scope, with hidden and git-ignored files excluded. Each press
+cycles the scope wider: show git-ignored, then also show hidden.
+A third press returns to the default. Tree-ui phase 2 (2026-09-15)
+moved the scope cycle to `Ctrl+T`, which works in every terminal.
+`Ctrl+I` stays bound for terminals that report it distinctly (e.g.
+the kitty keyboard protocol). `Tab` is now the completion key: it
+inserts `@<path>` into the draft and keeps the picker open. The
 long-path abbreviation (section 4.4, P10) landed 2026-09-06 as
-well: a result-list label wider than the list column — with the
+well. A result-list label wider than the list column — with the
 preview pane on or off — collapses its leading directory levels
 into a `...` prefix so the tail of the path stays visible.
 
@@ -84,10 +84,13 @@ parts. Each part has one job.
   and honors `.gitignore` by default. It uses `git ls-files` when a
   repo is present, and a plain walk otherwise.
 - `FileScope` (section P9): how much of the tree the source shows.
-  Three values, cycled by `Ctrl+I` while the picker is open — in a
-  standard terminal `Tab` is the same key (both send byte 0x09, which
-  crossterm parses as `KeyCode::Tab`), so `Tab` cycles the scope too:
-  `Standard` (the default — in a git repo: tracked plus untracked,
+  Three values, cycled by `Ctrl+T` while the picker is open.
+  Tree-ui phase 2 (item 5) moved the scope cycle off `Tab`.
+  `Ctrl+I` is the same key as `Tab` in a standard terminal.
+  Both send byte 0x09. Terminals that report `Ctrl+I` distinctly
+  keep the binding, and it also cycles the scope there.
+  The values: `Standard` (the default — in a git repo: tracked plus
+  untracked,
   not-ignored files; in a plain walk: everything except dot entries
   and build/dependency directories), `IncludeIgnored` (also the
   git-ignored set — in a plain walk, the build/dependency
@@ -117,12 +120,17 @@ parts. Each part has one job.
   scope (P9).
 - It is crossterm-free. Tests drive it directly, like `app.rs` and
   `browse.rs` do today.
-- Keys: type to edit the query, `Ctrl+J` / `Ctrl+K` or arrows to
-  move, `PgUp` / `PgDn` to page, `Home` / `End` to jump, `Enter` to
-  commit, `Esc` to close, `Ctrl+U` / `Ctrl+D` to scroll the preview
-  pane, `Ctrl+P` to toggle the preview pane, and `Ctrl+I` / `Tab` to
-  cycle the file scope (P9; in a standard terminal the two are the
-  same key — byte 0x09).
+- Keys: type to edit the query. `Ctrl+J` / `Ctrl+K` or arrows move.
+  `PgUp` / `PgDn` page. `Home` / `End` jump. `Enter` commits. `Esc`
+  closes.
+- `Ctrl+U` / `Ctrl+D` scroll the focused pane.
+- `Ctrl+Shift+P` toggles list/preview focus. `BackTab` is the legacy
+  fallback.
+- `Ctrl+P` toggles the preview pane.
+- `Tab` completes the highlighted item into the draft (tree-ui
+  phase 2, item 5).
+- `Ctrl+T` cycles the file scope (P9). Phase 2 moved it off `Tab`.
+  `Ctrl+I` stays bound for terminals that report it distinctly.
 
 ### 4.4 Body render and preview (`picker/render.rs`,
 `picker/preview.rs`)
@@ -181,17 +189,18 @@ a symbol picker share all four.
   plain `j`/`k` free for typing into the query.
 - The picker only opens on a freshly typed `@`; a stale `@` left in
   the draft after a previous pick or dismiss does not re-trigger it.
-- `Ctrl+I` cycles the file scope while the picker is open
-  (P9): default (hidden and git-ignored files excluded) → show
-  git-ignored → also show hidden → back to default. Each press
-  re-enumerates the current search root at the new scope and
+- `Ctrl+T` cycles the file scope while the picker is open (P9).
+  The cycle is: default (hidden and git-ignored files excluded) →
+  show git-ignored → also show hidden → back to default. Each
+  press re-enumerates the current search root at the new scope and
   re-ranks the live query. A flash line names the new mode, and the
   float title carries a scope tag while a widened scope is active.
   The scope resets to the default every time the picker opens or
-  closes. In a standard terminal `Ctrl+I` and `Tab` are the same
-  key (both send byte 0x09, which crossterm parses as
-  `KeyCode::Tab`), so the binding is `Tab` — pressing the physical
-  `Tab` key (i.e. `Ctrl+I`) cycles the scope. The `Ctrl+I` mapping
+  closes.
+- Tree-ui phase 2 moved the scope cycle off `Tab` (item 5): `Tab`
+  now completes the highlighted item. `Ctrl+I` is the same key as
+  `Tab` in a standard terminal (both send byte 0x09, which crossterm
+  parses as `KeyCode::Tab`). The `Ctrl+I` mapping
   (`KeyCode::Char('i')` + `CONTROL`) stays for terminals that report
   it distinctly (e.g. the kitty keyboard protocol).
 
@@ -378,11 +387,12 @@ P9. scope-cycle: given the picker is open at the default scope,
     files included; given a second press, observe the scope advance
     to "also show hidden"; given a third press, observe the scope
     return to the default (hidden and git-ignored excluded). The
-    cycle is driven by `Ctrl+I` — in a standard terminal the same
-    press arrives as `Tab` (byte 0x09, parsed by crossterm as
-    `KeyCode::Tab`), so both `Ctrl+I` and `Tab` drive it. Given the
-    picker closed, observe a scope-cycle press do nothing. Observe
-    the scope reset to the default on every picker open.
+    cycle is driven by `Ctrl+T`. `Ctrl+I` drives it too, in the
+    terminals that report it distinctly (standard terminals report
+    it as `Tab`, byte 0x09, which is now the completion key, tree-
+    ui phase 2 item 5). Given the picker closed, observe a scope-
+    cycle press do nothing. Observe the scope reset to the default
+    on every picker open.
 P10. path-abbrev: given a result-list path label wider than the
     result-list column (with the preview pane on or off), observe
     the leading directory levels collapsed into a `...` prefix and
@@ -408,7 +418,7 @@ and passes. `open` names the blocker and what unblocks it.
 | P6 | preview-cutoff | `preview_cutoff_hides_pane` in `bin/tui/src/picker/render.rs`, `toggle_preview_flips_when_above_cutoff` in `bin/tui/src/picker/state.rs` | proven |
 | P7 | orientation | `wide_layout_splits_side_by_side`, `narrow_layout_stacks_vertically`, `too_narrow_drops_preview`, `orientation_flips_on_resize` in `bin/tui/src/float.rs` | proven |
 | P8 | git-source | `file_item_source_is_a_git_repo`, `file_item_source_non_git_walks` in `bin/tui/src/picker/items.rs` | proven |
-| P9 | scope-cycle | `ctrl_i_cycles_the_scope_and_returns_recollect`, `tab_cycles_the_scope_like_ctrl_i`, `scope_starts_standard_and_resets_on_open_and_close`, `ctrl_i_does_nothing_when_closed`, `tab_does_nothing_when_closed` in `bin/tui/src/picker/state.rs`; `file_scope_cycles_standard_to_ignored_to_hidden`, `walk_scope_controls_hidden_and_build_dirs`, `git_scope_includes_ignored_and_hidden_files` in `bin/tui/src/picker/items.rs`; `ctrl_i_recollects_picker_items_under_new_scope`, `tab_recollects_picker_items_under_new_scope`, `ctrl_i_surfaces_git_ignored_session_files` in `bin/tui/src/app.rs`; `tab_maps_to_key_tab`, `ctrl_i_maps_to_key_ctrl_i` in `bin/tui/src/main.rs` | proven |
+| P9 | scope-cycle | `ctrl_t_cycles_the_scope`, `ctrl_i_still_cycles_the_scope`, `tab_completes_the_highlighted_item`, `open_and_close_reset_focus` in `bin/tui/src/picker/state.rs`; `file_scope_cycles_standard_to_ignored_to_hidden`, `walk_scope_controls_hidden_and_build_dirs`, `git_scope_includes_ignored_and_hidden_files` in `bin/tui/src/picker/items.rs`; `tab_maps_to_key_tab`, `ctrl_i_maps_to_key_ctrl_i`, `ctrl_shift_p_maps_to_key_ctrl_shift_p`, `back_tab_maps_to_key_back_tab` in `bin/tui/src/main.rs` | proven |
 | P10 | path-abbrev | `abbrev_keeps_fitting_labels_unchanged`, `abbrev_collapses_leading_parent_levels`, `abbrev_handles_absolute_labels`, `abbrev_falls_back_to_head_truncation`, `render_picker_abbreviates_long_paths_in_narrow_list_column` in `bin/tui/src/picker/render.rs` | proven |
 
 ## Gate

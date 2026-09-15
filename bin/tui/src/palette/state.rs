@@ -5,16 +5,22 @@
 //! the cursor index, the visible window, and the preview pane state.
 //!
 //! Keys handled by the state machine:
-//! - `j` / `k` or `Ctrl+J` / `Ctrl+K` → move cursor (or option cursor
-//!   when a Set item is highlighted)
-//! - `Down` / `Up` → same as j/k
-//! - other printable chars + `Backspace` → edit the query
-//! - `PgUp` / `PgDn` → page
+//! - `Ctrl+J` / `Ctrl+K` or arrows → move the cursor (wrapping; the
+//!   state machine wraps the index in the ring). Plain `j` and `k`
+//!   type into the query.
+//! - `PgUp` / `PgDn` → page (wrapping at both ends)
 //! - `Home` / `End` → jump
 //! - `Enter` → commit the highlighted item
 //! - `Esc` → close (Root) or drop the sub-stage (SessionList)
-//! - `Ctrl+U` / `Ctrl+D` → scroll the preview pane
+//! - `Ctrl+U` / `Ctrl+D` → half-page scroll the focused pane
 //! - `Ctrl+P` → toggle the preview pane
+//! - `Ctrl+Shift+P` / `BackTab` → toggle list/preview focus
+//! - `Ctrl+F` → cycle the tree event-type filter (TreeList stage only)
+//! - `Tab` → complete the highlighted item into the query
+
+use crate::event::EventKind;
+use crate::float::Focus;
+use crate::palette::preview::TreePreviewCache;
 
 /// The sub-stage of the palette.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +37,69 @@ pub enum PaletteStage {
     /// (docs/tree-ui-design-from-human.md). Entered from `TreeList` on
     /// an event commit. `Esc` returns to `TreeList`.
     TreeOptions,
+}
+
+/// The tree-list event-type filter (docs/tree-ui-design-from-human-
+/// phase-2.md item 3). `Ctrl+F` cycles it in the `TreeList` stage.
+/// It narrows candidates before fuzzy ranking; it ANDs with the
+/// query. It resets on stage exit and on palette close.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TreeFilter {
+    /// Every event.
+    #[default]
+    Full,
+    /// `user_message` + `user_message_retract`.
+    User,
+    /// `assistant_message` only.
+    Assistant,
+    /// `tool_call` + `tool_result`.
+    Tool,
+    /// The user and assistant sets together.
+    UserAssistant,
+}
+
+impl TreeFilter {
+    /// The next value in the `Ctrl+F` cycle:
+    /// full → user → assistant → tool → user+assistant → full.
+    pub fn next(self) -> Self {
+        match self {
+            Self::Full => Self::User,
+            Self::User => Self::Assistant,
+            Self::Assistant => Self::Tool,
+            Self::Tool => Self::UserAssistant,
+            Self::UserAssistant => Self::Full,
+        }
+    }
+
+    /// The short label for the input-bar hint, e.g. `tool`.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::User => "user",
+            Self::Assistant => "assistant",
+            Self::Tool => "tool",
+            Self::UserAssistant => "user+assistant",
+        }
+    }
+
+    /// Whether an event of `kind` survives the filter.
+    pub fn keeps(self, kind: EventKind) -> bool {
+        match self {
+            Self::Full => true,
+            Self::User => matches!(
+                kind,
+                EventKind::UserMessage | EventKind::UserMessageRetract
+            ),
+            Self::Assistant => kind == EventKind::AssistantMessage,
+            Self::Tool => matches!(kind, EventKind::ToolCall | EventKind::ToolResult),
+            Self::UserAssistant => matches!(
+                kind,
+                EventKind::UserMessage
+                    | EventKind::UserMessageRetract
+                    | EventKind::AssistantMessage
+            ),
+        }
+    }
 }
 
 /// The outcome of a palette key press.
@@ -55,6 +124,17 @@ pub enum PaletteAction {
     ScrollPreview,
     /// The preview pane visibility toggled.
     TogglePreview,
+    /// The list/preview focus toggled (docs/tree-ui-design-from-
+    /// human-phase-2.md item 4).
+    ToggleFocus,
+    /// The tree event-type filter cycled (docs/tree-ui-design-from-
+    /// human-phase-2.md item 3). The caller rebuilds the ranked
+    /// list, as for `Query`.
+    CycleFilter,
+    /// `Tab` completed the highlighted item. The caller reads the
+    /// cursor and inserts the item text into the query
+    /// (docs/tree-ui-design-from-human-phase-2.md item 5).
+    Complete,
     /// The key is not handled by the palette. The caller decides
     /// whether to fall through.
     Nothing,
@@ -90,6 +170,18 @@ pub struct PaletteState {
     /// the `TreeOptions` stage (docs/tree-ui-design-from-human.md).
     /// `None` outside that stage.
     pub tree_seq: Option<usize>,
+    /// Which pane has focus (docs/tree-ui-design-from-human-phase-2.md
+    /// item 4). Toggled by `Ctrl+Shift+P` / `BackTab`.
+    pub focus: Focus,
+    /// The tree-list event-type filter (docs/tree-ui-design-from-
+    /// human-phase-2.md item 3). Cycled by `Ctrl+F` in the
+    /// `TreeList` stage; resets on stage exit and palette close.
+    pub tree_filter: TreeFilter,
+    /// The LRU-bounded cache of highlighted tree-pane bodies, keyed
+    /// by the event's 1-based log seq (docs/tree-ui-design-from-
+    /// human-phase-2.md item 2, the windowed-highlighting model of
+    /// docs/tui-preview-pane-plan.md).
+    pub tree_preview_cache: TreePreviewCache,
 }
 
 impl Default for PaletteState {
@@ -114,6 +206,9 @@ impl PaletteState {
             preview_forced: false,
             option_cursor: 0,
             tree_seq: None,
+            focus: Focus::default(),
+            tree_filter: TreeFilter::default(),
+            tree_preview_cache: TreePreviewCache::default(),
         }
     }
 
@@ -132,6 +227,9 @@ impl PaletteState {
         self.preview_forced = false;
         self.option_cursor = 0;
         self.tree_seq = None;
+        self.focus = Focus::default();
+        self.tree_filter = TreeFilter::default();
+        self.tree_preview_cache.clear();
     }
 
     /// Close the palette, resetting all state.
@@ -146,6 +244,9 @@ impl PaletteState {
         self.preview_forced = false;
         self.option_cursor = 0;
         self.tree_seq = None;
+        self.focus = Focus::default();
+        self.tree_filter = TreeFilter::default();
+        self.tree_preview_cache.clear();
     }
 
     /// The current cursor index.
@@ -182,6 +283,8 @@ impl PaletteState {
         self.preview_scroll = 0;
         self.option_cursor = 0;
         self.tree_seq = None;
+        // The filter is owned by the tree stage; enter it fresh.
+        self.tree_filter = TreeFilter::default();
     }
 
     /// Enter the `TreeOptions` sub-stage, remembering the picked event's
@@ -218,6 +321,9 @@ impl PaletteState {
         self.preview_scroll = 0;
         self.option_cursor = 0;
         self.tree_seq = None;
+        // The filter resets on stage exit
+        // (docs/tree-ui-design-from-human-phase-2.md item 3).
+        self.tree_filter = TreeFilter::default();
     }
 
     /// The effective filter query for the current stage. In
@@ -279,8 +385,10 @@ impl PaletteState {
         PaletteAction::Query
     }
 
-    /// Move the list cursor down by one, clamped. If the highlighted
-    /// item has options, move the option cursor instead.
+    /// Move the list cursor down by one. Wrap in the ring: at the
+    /// last row the cursor jumps to the first
+    /// (docs/tree-ui-design-from-human-phase-2.md item 4). If the
+    /// highlighted item has options, move the option cursor instead.
     pub fn move_down(&mut self, count: usize, highlighted_options: usize) -> PaletteAction {
         if !self.open {
             return PaletteAction::Nothing;
@@ -292,18 +400,18 @@ impl PaletteState {
         if count == 0 {
             return PaletteAction::Nothing;
         }
-        if self.cursor < count - 1 {
-            self.cursor += 1;
-        }
+        self.cursor = (self.cursor + 1) % count;
         self.adjust_top(count);
         self.preview_scroll = 0;
         self.option_cursor = 0;
         PaletteAction::Move
     }
 
-    /// Move the list cursor up by one, clamped. If the highlighted
-    /// item has options, move the option cursor instead.
-    pub fn move_up(&mut self, highlighted_options: usize) -> PaletteAction {
+    /// Move the list cursor up by one. Wrap in the ring: at the
+    /// first row the cursor jumps to the last
+    /// (docs/tree-ui-design-from-human-phase-2.md item 4). If the
+    /// highlighted item has options, move the option cursor instead.
+    pub fn move_up(&mut self, count: usize, highlighted_options: usize) -> PaletteAction {
         if !self.open {
             return PaletteAction::Nothing;
         }
@@ -315,31 +423,43 @@ impl PaletteState {
             }
             return PaletteAction::OptionMove;
         }
-        self.cursor = self.cursor.saturating_sub(1);
-        self.adjust_top_count();
-        self.preview_scroll = 0;
-        self.option_cursor = 0;
-        PaletteAction::Move
-    }
-
-    /// Page down: move the cursor down by the visible window.
-    pub fn page_down(&mut self, count: usize) -> PaletteAction {
-        if !self.open || count == 0 {
+        if count == 0 {
             return PaletteAction::Nothing;
         }
-        self.cursor = (self.cursor + self.visible).min(count - 1);
+        self.cursor = (self.cursor + count - 1) % count;
         self.adjust_top(count);
         self.preview_scroll = 0;
         self.option_cursor = 0;
         PaletteAction::Move
     }
 
-    /// Page up: move the cursor up by the visible window.
-    pub fn page_up(&mut self, count: usize) -> PaletteAction {
-        if !self.open {
+    /// Page down: move the cursor down by the visible window. A page
+    /// that crosses the list end lands on the first row
+    /// (docs/tree-ui-design-from-human-phase-2.md item 4).
+    pub fn page_down(&mut self, count: usize) -> PaletteAction {
+        if !self.open || count == 0 {
             return PaletteAction::Nothing;
         }
-        self.cursor = self.cursor.saturating_sub(self.visible);
+        let next = self.cursor + self.visible;
+        self.cursor = if next >= count { 0 } else { next };
+        self.adjust_top(count);
+        self.preview_scroll = 0;
+        self.option_cursor = 0;
+        PaletteAction::Move
+    }
+
+    /// Page up: move the cursor up by the visible window. A page that
+    /// crosses the list start lands on the last row
+    /// (docs/tree-ui-design-from-human-phase-2.md item 4).
+    pub fn page_up(&mut self, count: usize) -> PaletteAction {
+        if !self.open || count == 0 {
+            return PaletteAction::Nothing;
+        }
+        self.cursor = if self.cursor >= self.visible {
+            self.cursor - self.visible
+        } else {
+            count - 1
+        };
         self.adjust_top(count);
         self.preview_scroll = 0;
         self.option_cursor = 0;
@@ -394,16 +514,6 @@ impl PaletteState {
         }
     }
 
-    /// Adjust top without a count (for move_up where count is unknown
-    /// to the state machine).
-    fn adjust_top_count(&mut self) {
-        // Without the count, just make sure top does not exceed
-        // cursor. The renderer will call `sync` to clamp.
-        if self.cursor < self.top {
-            self.top = self.cursor;
-        }
-    }
-
     /// Scroll the preview pane up by `page` lines.
     pub fn scroll_preview_up(&mut self, page: usize) -> PaletteAction {
         if !self.open {
@@ -443,6 +553,92 @@ impl PaletteState {
         PaletteAction::TogglePreview
     }
 
+    /// Half-page scroll of the focused entry list
+    /// (docs/tree-ui-design-from-human-phase-2.md item 4): the step
+    /// is half the visible rows, minimum one, wrapping in the ring
+    /// like the step keys.
+    pub fn scroll_list_down(&mut self, count: usize) -> PaletteAction {
+        if !self.open || count == 0 {
+            return PaletteAction::Nothing;
+        }
+        let step = (self.visible / 2).max(1);
+        self.cursor = (self.cursor + step) % count;
+        self.adjust_top(count);
+        self.preview_scroll = 0;
+        self.option_cursor = 0;
+        PaletteAction::Move
+    }
+
+    /// Half-page scroll up of the focused entry list (the mirror of
+    /// [`scroll_list_down`]).
+    pub fn scroll_list_up(&mut self, count: usize) -> PaletteAction {
+        if !self.open || count == 0 {
+            return PaletteAction::Nothing;
+        }
+        let step = (self.visible / 2).max(1);
+        self.cursor = (self.cursor + count - step) % count;
+        self.adjust_top(count);
+        self.preview_scroll = 0;
+        self.option_cursor = 0;
+        PaletteAction::Move
+    }
+
+    /// Toggle focus between the entry list and the preview pane
+    /// (docs/tree-ui-design-from-human-phase-2.md item 4). A no-op
+    /// while the preview pane is hidden.
+    pub fn toggle_focus(&mut self, count: usize, cutoff: usize) -> PaletteAction {
+        if !self.open {
+            return PaletteAction::Nothing;
+        }
+        if !self.preview_visible(count, cutoff) {
+            return PaletteAction::Nothing;
+        }
+        self.focus = match self.focus {
+            Focus::List => Focus::Preview,
+            Focus::Preview => Focus::List,
+        };
+        PaletteAction::ToggleFocus
+    }
+
+    /// Cycle the tree event-type filter
+    /// (docs/tree-ui-design-from-human-phase-2.md item 3). Tree stage
+    /// only; other stages leave the key unhandled.
+    pub fn cycle_filter(&mut self) -> PaletteAction {
+        if !self.open || self.stage != PaletteStage::TreeList {
+            return PaletteAction::Nothing;
+        }
+        self.tree_filter = self.tree_filter.next();
+        self.cursor = 0;
+        self.top = 0;
+        self.preview_scroll = 0;
+        self.option_cursor = 0;
+        PaletteAction::CycleFilter
+    }
+
+    /// `Tab` completion: replace the typed filter portion with `text`
+    /// (the highlighted item's label) and reset the window
+    /// (docs/tree-ui-design-from-human-phase-2.md item 5). The root
+    /// stage replaces the whole query; a sub-stage keeps its goto
+    /// prefix and replaces the filter typed after it. This mirrors
+    /// the picker's `@<path>` replacement model. The palette stays
+    /// open, so typing continues after the completion.
+    pub fn apply_complete(&mut self, text: &str) {
+        if !self.open {
+            return;
+        }
+        let prefix_len = self.goto_prefix_len.min(self.query.len());
+        let prefix = self.query[..prefix_len].to_string();
+        self.query = if prefix.is_empty() {
+            text.to_string()
+        } else {
+            format!("{prefix} {text}")
+        };
+        self.cursor = 0;
+        self.top = 0;
+        self.preview_scroll = 0;
+        self.option_cursor = 0;
+    }
+
     /// Handle one key. `count` is the current ranked item count.
     /// `highlighted_options` is the option count of the item at the
     /// current cursor (0 for non-Set items). `preview_page` and
@@ -471,15 +667,43 @@ impl PaletteState {
                 }
             },
             Key::Enter => PaletteAction::Commit,
-            Key::Char('j') | Key::CtrlJ | Key::Down => self.move_down(count, highlighted_options),
-            Key::Char('k') | Key::CtrlK | Key::Up => self.move_up(highlighted_options),
+            // Plain `j` / `k` fall through to the generic char arm
+            // below: they type into the query
+            // (docs/tree-ui-design-from-human-phase-2.md item 4).
+            Key::CtrlJ | Key::Down => self.move_down(count, highlighted_options),
+            Key::CtrlK | Key::Up => self.move_up(count, highlighted_options),
             Key::PgDn => self.page_down(count),
             Key::PgUp => self.page_up(count),
             Key::Home => self.go_home(),
             Key::End => self.go_end(count),
-            Key::CtrlU => self.scroll_preview_up(preview_page),
-            Key::CtrlD => self.scroll_preview_down(preview_page),
+            // `Ctrl+U` / `Ctrl+D` half-page scroll the focused pane
+            // (docs/tree-ui-design-from-human-phase-2.md item 4):
+            // the list in half-visible-row steps, the preview in
+            // `PREVIEW_PAGE` line steps.
+            Key::CtrlU => match self.focus {
+                Focus::List => self.scroll_list_up(count),
+                Focus::Preview => self.scroll_preview_up(preview_page),
+            },
+            Key::CtrlD => match self.focus {
+                Focus::List => self.scroll_list_down(count),
+                Focus::Preview => self.scroll_preview_down(preview_page),
+            },
             Key::CtrlP => self.toggle_preview(count, preview_cutoff),
+            // `Ctrl+Shift+P` toggles focus; `BackTab` is the legacy
+            // fallback (docs/tree-ui-design-from-human-phase-2.md
+            // item 4).
+            Key::CtrlShiftP | Key::BackTab => self.toggle_focus(count, preview_cutoff),
+            // `Ctrl+F` cycles the event-type filter in the tree stage
+            // only (docs/tree-ui-design-from-human-phase-2.md item 3).
+            Key::CtrlF => self.cycle_filter(),
+            // `Tab` completes the highlighted item into the query.
+            // The option list has no query to complete into, so it
+            // is a no-op there (docs/tree-ui-design-from-human-
+            // phase-2.md item 5).
+            Key::Tab => match self.stage {
+                PaletteStage::TreeOptions => PaletteAction::Nothing,
+                _ => PaletteAction::Complete,
+            },
             Key::Backspace => self.backspace(),
             Key::Char(c) => self.type_char(*c),
             _ => PaletteAction::Nothing,
@@ -488,3 +712,305 @@ impl PaletteState {
 }
 
 // ── tests ───────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::Key;
+
+    /// An open palette with the default focus, filter, and pane.
+    fn open() -> PaletteState {
+        let mut s = PaletteState::new();
+        s.open(10);
+        s
+    }
+
+    // ── wrap (item 4) ─────────────────────────────────────────
+
+    /// `Down` at the last row jumps to the first (ring wrap).
+    #[test]
+    fn move_down_wraps_from_last_to_first() {
+        let mut s = open();
+        s.cursor = 9;
+        assert_eq!(s.move_down(10, 0), PaletteAction::Move);
+        assert_eq!(s.cursor(), 0, "at the last row, down wraps to the first");
+    }
+
+    /// `Up` at the first row jumps to the last (ring wrap).
+    #[test]
+    fn move_up_wraps_from_first_to_last() {
+        let mut s = open();
+        assert_eq!(s.move_up(10, 0), PaletteAction::Move);
+        assert_eq!(s.cursor(), 9, "at the first row, up wraps to the last");
+    }
+
+    /// `PgDn` at the last row lands on the first row.
+    #[test]
+    fn page_down_from_last_lands_on_first() {
+        let mut s = open();
+        s.cursor = 9;
+        assert_eq!(s.page_down(10), PaletteAction::Move);
+        assert_eq!(s.cursor(), 0);
+    }
+
+    /// `PgUp` at the first row lands on the last row.
+    #[test]
+    fn page_up_from_first_lands_on_last() {
+        let mut s = open();
+        assert_eq!(s.page_up(10), PaletteAction::Move);
+        assert_eq!(s.cursor(), 9);
+    }
+
+    /// `Ctrl+U` / `Ctrl+D` on the focused list step half the visible
+    /// rows and wrap in the ring like the step keys.
+    #[test]
+    fn half_page_scroll_wraps_like_the_step_keys() {
+        let mut s = open();
+        // The step is half the visible rows: 10 / 2 = 5.
+        s.cursor = 4;
+        assert_eq!(s.scroll_list_down(20), PaletteAction::Move);
+        assert_eq!(s.cursor(), 9, "4 + 5");
+        s.cursor = 9;
+        assert_eq!(s.scroll_list_down(20), PaletteAction::Move);
+        assert_eq!(s.cursor(), 14, "9 + 5, still in range");
+        s.cursor = 15;
+        assert_eq!(s.scroll_list_down(20), PaletteAction::Move);
+        assert_eq!(s.cursor(), 0, "(15 + 5) % 20 wraps to the first");
+        s.cursor = 4;
+        assert_eq!(s.scroll_list_up(20), PaletteAction::Move);
+        assert_eq!(s.cursor(), 19, "(4 + 20 - 5) % 20 wraps to the last");
+    }
+
+    /// Plain `j` / `k` type into the query instead of moving the
+    /// cursor (item 4).
+    #[test]
+    fn plain_jk_type_into_the_query() {
+        let mut s = open();
+        assert_eq!(s.press(&Key::Char('j'), 5, 0, 5, 4), PaletteAction::Query);
+        assert_eq!(s.query, "j");
+        assert_eq!(s.cursor(), 0, "a query edit resets the cursor");
+        assert_eq!(s.press(&Key::Char('k'), 5, 0, 5, 4), PaletteAction::Query);
+        assert_eq!(s.query, "jk");
+    }
+
+    // ── focus (item 4) ────────────────────────────────────────
+
+    /// The toggle is a no-op while the preview pane is hidden.
+    #[test]
+    fn focus_toggle_noop_when_preview_hidden() {
+        let mut s = open();
+        // Two results is below the cutoff of four: the pane hides.
+        assert_eq!(s.toggle_focus(2, 4), PaletteAction::Nothing);
+        assert_eq!(s.focus, Focus::List);
+    }
+
+    /// The toggle flips when the preview pane is visible.
+    #[test]
+    fn focus_toggle_flips_when_preview_visible() {
+        let mut s = open();
+        assert_eq!(s.toggle_focus(10, 4), PaletteAction::ToggleFocus);
+        assert_eq!(s.focus, Focus::Preview);
+        assert_eq!(s.toggle_focus(10, 4), PaletteAction::ToggleFocus);
+        assert_eq!(s.focus, Focus::List);
+    }
+
+    /// `Ctrl+Shift+P` and the legacy `BackTab` fallback both reach
+    /// the toggle through `press`.
+    #[test]
+    fn focus_toggle_keys_reach_the_state_machine() {
+        let mut s = open();
+        assert_eq!(s.press(&Key::CtrlShiftP, 10, 0, 5, 4), PaletteAction::ToggleFocus);
+        assert_eq!(s.focus, Focus::Preview);
+        assert_eq!(s.press(&Key::BackTab, 10, 0, 5, 4), PaletteAction::ToggleFocus);
+        assert_eq!(s.focus, Focus::List);
+    }
+
+    /// `Ctrl+U` / `Ctrl+D` on the focused preview scroll the pane in
+    /// `PREVIEW_PAGE` line steps, not the list.
+    #[test]
+    fn preview_focus_scroll_moves_the_pane() {
+        let mut s = open();
+        s.focus = Focus::Preview;
+        s.preview_scroll = 10;
+        assert_eq!(s.press(&Key::CtrlU, 10, 0, 5, 4), PaletteAction::ScrollPreview);
+        assert_eq!(s.preview_scroll, 5, "a page up of five lines");
+        assert_eq!(s.press(&Key::CtrlD, 10, 0, 5, 4), PaletteAction::ScrollPreview);
+        assert_eq!(s.preview_scroll, 10, "a page down of five lines");
+        assert_eq!(s.cursor(), 0, "the list cursor is untouched");
+    }
+
+    // ── filter (item 3) ───────────────────────────────────────
+
+    /// `Ctrl+F` walks the five-state cycle: full → user → assistant
+    /// → tool → user+assistant → full.
+    #[test]
+    fn filter_cycles_through_the_five_states() {
+        let mut s = open();
+        s.goto_tree_list();
+        let expected = [
+            TreeFilter::User,
+            TreeFilter::Assistant,
+            TreeFilter::Tool,
+            TreeFilter::UserAssistant,
+            TreeFilter::Full,
+        ];
+        for exp in expected {
+            assert_eq!(s.cycle_filter(), PaletteAction::CycleFilter);
+            assert_eq!(s.tree_filter, exp, "the cycle order");
+        }
+    }
+
+    /// The filter keeps exactly its set of event kinds.
+    #[test]
+    fn filter_keeps_only_the_events_of_its_set() {
+        use crate::event::EventKind;
+        let user = EventKind::UserMessage;
+        let retract = EventKind::UserMessageRetract;
+        let assistant = EventKind::AssistantMessage;
+        let call = EventKind::ToolCall;
+        let result = EventKind::ToolResult;
+
+        assert!(TreeFilter::Full.keeps(user));
+        assert!(TreeFilter::Full.keeps(result));
+
+        assert!(TreeFilter::User.keeps(user));
+        assert!(TreeFilter::User.keeps(retract));
+        assert!(!TreeFilter::User.keeps(assistant));
+        assert!(!TreeFilter::User.keeps(call));
+
+        assert!(TreeFilter::Assistant.keeps(assistant));
+        assert!(!TreeFilter::Assistant.keeps(user));
+        assert!(!TreeFilter::Assistant.keeps(result));
+
+        assert!(TreeFilter::Tool.keeps(call));
+        assert!(TreeFilter::Tool.keeps(result));
+        assert!(!TreeFilter::Tool.keeps(user));
+
+        assert!(TreeFilter::UserAssistant.keeps(user));
+        assert!(TreeFilter::UserAssistant.keeps(retract));
+        assert!(TreeFilter::UserAssistant.keeps(assistant));
+        assert!(!TreeFilter::UserAssistant.keeps(call));
+    }
+
+    /// The filter resets on stage exit and on palette close.
+    #[test]
+    fn filter_resets_on_stage_exit_and_close() {
+        let mut s = open();
+        s.goto_tree_list();
+        s.cycle_filter();
+        assert_eq!(s.tree_filter, TreeFilter::User);
+        s.drop_sub_stage();
+        assert_eq!(s.tree_filter, TreeFilter::Full, "stage exit resets it");
+        s.goto_tree_list();
+        s.cycle_filter();
+        s.close();
+        assert_eq!(s.tree_filter, TreeFilter::Full, "close resets it");
+    }
+
+    /// `Ctrl+F` binds in the tree stage only. Other stages leave it
+    /// unhandled.
+    #[test]
+    fn filter_key_binds_only_in_the_tree_stage() {
+        let mut s = open();
+        assert_eq!(
+            s.press(&Key::CtrlF, 10, 0, 5, 4),
+            PaletteAction::Nothing,
+            "the root stage leaves it unhandled"
+        );
+        s.goto_session_list();
+        assert_eq!(
+            s.press(&Key::CtrlF, 10, 0, 5, 4),
+            PaletteAction::Nothing,
+            "the session sub-list is unaffected"
+        );
+        s.goto_tree_list();
+        assert_eq!(s.press(&Key::CtrlF, 10, 0, 5, 4), PaletteAction::CycleFilter);
+        assert_eq!(s.tree_filter, TreeFilter::User);
+    }
+
+    // ── completion (item 5) ───────────────────────────────────
+
+    /// `Tab` completes the highlighted item into the query and keeps
+    /// the palette open.
+    #[test]
+    fn tab_completes_the_item_into_the_query() {
+        let mut s = open();
+        assert_eq!(s.press(&Key::Tab, 10, 0, 5, 4), PaletteAction::Complete);
+        s.apply_complete("toggle-tools");
+        assert_eq!(s.query, "toggle-tools");
+        assert!(s.open, "the window stays open");
+        assert_eq!(s.cursor(), 0, "the window resets after the completion");
+    }
+
+    /// In the session sub-list, `Tab` inserts the full session name.
+    #[test]
+    fn tab_in_the_session_list_inserts_the_full_name() {
+        let mut s = open();
+        s.goto_session_list();
+        assert_eq!(s.press(&Key::Tab, 3, 0, 5, 4), PaletteAction::Complete);
+        s.apply_complete("browse-mode-issues");
+        assert_eq!(s.query, "browse-mode-issues");
+    }
+
+    /// The completion replaces the typed filter text; it does not
+    /// append to it (the picker's `@<path>` model, item 5).
+    #[test]
+    fn tab_replaces_the_typed_query_in_the_root_stage() {
+        let mut s = open();
+        s.query = "th".to_string();
+        assert_eq!(s.press(&Key::Tab, 10, 0, 5, 4), PaletteAction::Complete);
+        s.apply_complete("toggle-thinking");
+        assert_eq!(s.query, "toggle-thinking", "the typed text is replaced");
+    }
+
+    /// In a sub-stage the goto prefix stays; only the filter typed
+    /// after it is replaced by the completion.
+    #[test]
+    fn tab_replaces_the_filter_after_the_goto_prefix() {
+        let mut s = open();
+        s.query = "b".to_string();
+        s.goto_session_list();
+        s.query = "b br".to_string();
+        assert_eq!(s.press(&Key::Tab, 3, 0, 5, 4), PaletteAction::Complete);
+        s.apply_complete("browse-mode-issues");
+        assert_eq!(s.query, "b browse-mode-issues");
+    }
+
+    /// Same model in the tree sub-stage: the prefix survives, the
+    /// filter is replaced by the completed row label.
+    #[test]
+    fn tab_replaces_the_tree_filter_with_the_row_label() {
+        let mut s = open();
+        s.query = "tree".to_string();
+        s.goto_tree_list();
+        s.query = "tree sha".to_string();
+        assert_eq!(s.press(&Key::Tab, 2, 0, 5, 4), PaletteAction::Complete);
+        s.apply_complete("bash make -j4");
+        assert_eq!(s.query, "tree bash make -j4");
+    }
+
+    /// In the `TreeOptions` stage, `Tab` is a no-op.
+    #[test]
+    fn tab_is_a_noop_in_tree_options() {
+        let mut s = open();
+        s.goto_tree_options(1);
+        assert_eq!(s.press(&Key::Tab, 4, 0, 5, 4), PaletteAction::Nothing);
+        assert!(s.query.is_empty());
+    }
+
+    // ── resets (item 4) ───────────────────────────────────────
+
+    /// Open and close reset the focus and the filter.
+    #[test]
+    fn open_and_close_reset_focus_and_filter() {
+        let mut s = open();
+        s.tree_filter = TreeFilter::Tool;
+        s.focus = Focus::Preview;
+        s.close();
+        assert_eq!(s.tree_filter, TreeFilter::Full);
+        assert_eq!(s.focus, Focus::List);
+        s.open(10);
+        assert_eq!(s.tree_filter, TreeFilter::Full);
+        assert_eq!(s.focus, Focus::List);
+    }
+}

@@ -1,6 +1,6 @@
 # Tree UI phase 2: navigation, filter, rows, pane
 
-Status: Spec. Approved 2026-09-15, not yet implemented.
+Status: Implemented. Approved and shipped 2026-09-15. Refined 2026-09-25: tag colors (item 1), the kitty protocol enables `Ctrl+Shift+P` (item 4), and `Tab` replaces the typed text (item 5).
 Parent: `docs/tree-ui-design-from-human.md` ("Follow-up spec decisions
 (2026-09-15)"). Its open points are all resolved in this doc.
 Related: `docs/tui-preview-pane-plan.md` (the windowed pane model),
@@ -94,6 +94,12 @@ with compact JSON. The new rows:
   `truncate_one_line` helper in `app.rs`.
 
 - Custom and unknown tools keep today's raw `<tool:name>` rows.
+
+- Row tags are classified and colored (human feedback 2026-09-25):
+  `user` / `retract` rows take the `Accent` tone, `assistant` rows
+  the `Report` tone, tool rows the `ToolName` tone. Every other
+  class keeps the plain label. The cursor row keeps its accent
+  highlight and is not tag-colored.
 
 Functions to change:
 
@@ -201,6 +207,15 @@ State machine changes:
 - `BackTab` is already mapped in `main.rs`. It is the legacy
   fallback. Where `Ctrl+Shift+P` arrives as byte 0x10 it is
   indistinguishable from `Ctrl+P`.
+- The TUI enables the kitty keyboard protocol at startup
+  (`PushKeyboardEnhancementFlags` with
+  `DISAMBIGUATE_ESCAPE_CODES`, in `main.rs::TermGuard`). Capable
+  terminals then report the shift modifier, and
+  `main.rs::key_input` accepts the protocol-form uppercase
+  codepoint (`Ctrl+P` as `Char('P')`) for every control binding.
+  `BackTab` stays the fallback for legacy terminals. Shipped with
+  an end-to-end PTY test
+  (`csi_u_ctrl_shift_p_toggles_preview_focus`).
 - The palette drops `Char('j')` and `Char('k')` from its move arm.
   Those letters type into the query.
 - `move_down`, `move_up`, `page_down`, and `page_up` wrap in both
@@ -233,17 +248,22 @@ Render changes:
 
 ## 5. `Tab` completion
 
-`Tab` inserts the highlighted item's text. The window stays open,
-so typing continues after the completion.
+`Tab` completes the highlighted item. The completion replaces the
+typed filter text with the item's full text, mirroring the
+picker's `@<path>` replacement model. The window stays open, so
+typing continues after the completion.
 
-| window | `Tab` inserts |
+| window | `Tab` replaces the typed text with |
 |---|---|
-| file picker | `@<path>` into the draft |
+| file picker | `@<path>` in the draft |
 | session list | the full session name |
 | tree list | the row label |
 | root list | the command label |
 | `TreeOptions` | no-op (human decision 2026-09-15) |
 
+- In a sub-stage the goto prefix is kept: the filter typed after
+  the prefix is replaced, e.g. `tree sha` + Tab on `bash make -j4`
+  yields `tree bash make -j4` (human decision 2026-09-25).
 - `Enter` still commits and closes, as today.
 - The picker's `press` splits the current `CtrlI | Tab` arm.
   `Tab` completes. `Ctrl+T` cycles the scope. `Ctrl+I` stays

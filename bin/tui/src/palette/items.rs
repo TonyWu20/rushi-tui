@@ -18,6 +18,24 @@ pub enum CmdKind {
     Ext,
 }
 
+/// The preview-pane content pipeline for a palette item
+/// (docs/tree-ui-design-from-human-phase-2.md item 2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PreviewKind {
+    /// Help text, one plain line per row. The default for `Run` /
+    /// `Set` / `Goto` / `Ext` items and the tree option list.
+    #[default]
+    Plain,
+    /// `help` is raw JSON source. The tree-pane pipeline parses it
+    /// with `jaq-json` and pretty-prints it. Then it highlights the
+    /// text with the JSON pass. A parse failure shows the raw text.
+    /// It never crashes.
+    Json,
+    /// `help` is markdown source. The tree-pane pipeline highlights
+    /// it with the tree-sitter markdown pass.
+    Markdown,
+}
+
 /// One option of a `Set` or extension setting item.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CmdOption {
@@ -43,6 +61,14 @@ pub struct PaletteItem {
     pub options: Vec<CmdOption>,
     /// The extension name that owns this item, or `None` for built-in.
     pub ext: Option<String>,
+    /// The preview-pane content pipeline (docs/tree-ui-design-from-
+    /// human-phase-2.md item 2). `Plain` for every non-tree item.
+    pub preview_kind: PreviewKind,
+    /// The fg color role of the row's leading type tag, set for the
+    /// tree event rows (docs/tree-ui-design-from-human-phase-2.md
+    /// item 1). The list renderer colors the first label token with
+    /// it. `None` for every other row kind.
+    pub tag_fg: Option<crate::color::Role>,
 }
 
 /// The thinking-level values in cycle order
@@ -74,6 +100,8 @@ pub fn builtins(current_effort: &str) -> Vec<PaletteItem> {
             help: "Toggle tool-result fold/expand (all blocks).".into(),
             options: Vec::new(),
             ext: None,
+            preview_kind: PreviewKind::Plain,
+            tag_fg: None,
         },
         PaletteItem {
             id: "toggle-thinking".into(),
@@ -83,6 +111,8 @@ pub fn builtins(current_effort: &str) -> Vec<PaletteItem> {
             help: "Show or hide thinking blocks.".into(),
             options: Vec::new(),
             ext: None,
+            preview_kind: PreviewKind::Plain,
+            tag_fg: None,
         },
         PaletteItem {
             id: "expand-thinking".into(),
@@ -92,6 +122,8 @@ pub fn builtins(current_effort: &str) -> Vec<PaletteItem> {
             help: "Collapse or expand thinking blocks.".into(),
             options: Vec::new(),
             ext: None,
+            preview_kind: PreviewKind::Plain,
+            tag_fg: None,
         },
         PaletteItem {
             id: "thinking-level".into(),
@@ -103,6 +135,8 @@ pub fn builtins(current_effort: &str) -> Vec<PaletteItem> {
             ),
             options: effort_opts,
             ext: None,
+            preview_kind: PreviewKind::Plain,
+            tag_fg: None,
         },
         PaletteItem {
             id: "b".into(),
@@ -112,6 +146,8 @@ pub fn builtins(current_effort: &str) -> Vec<PaletteItem> {
             help: "Open the session buffer list. Type to filter.".into(),
             options: Vec::new(),
             ext: None,
+            preview_kind: PreviewKind::Plain,
+            tag_fg: None,
         },
         PaletteItem {
             id: "tree".into(),
@@ -121,6 +157,8 @@ pub fn builtins(current_effort: &str) -> Vec<PaletteItem> {
             help: "Open the session log tree. Type to filter events. Enter picks one and offers 4 options (docs/tree-ui-design-from-human.md).".into(),
             options: Vec::new(),
             ext: None,
+            preview_kind: PreviewKind::Plain,
+            tag_fg: None,
         },
         PaletteItem {
             id: "bn".into(),
@@ -130,6 +168,8 @@ pub fn builtins(current_effort: &str) -> Vec<PaletteItem> {
             help: "Cycle to the next session.".into(),
             options: Vec::new(),
             ext: None,
+            preview_kind: PreviewKind::Plain,
+            tag_fg: None,
         },
         PaletteItem {
             id: "bp".into(),
@@ -139,6 +179,8 @@ pub fn builtins(current_effort: &str) -> Vec<PaletteItem> {
             help: "Cycle to the previous session.".into(),
             options: Vec::new(),
             ext: None,
+            preview_kind: PreviewKind::Plain,
+            tag_fg: None,
         },
         PaletteItem {
             id: "new-session".into(),
@@ -148,6 +190,8 @@ pub fn builtins(current_effort: &str) -> Vec<PaletteItem> {
             help: "Start a new session. Opens the name input.".into(),
             options: Vec::new(),
             ext: None,
+            preview_kind: PreviewKind::Plain,
+            tag_fg: None,
         },
         PaletteItem {
             id: "edit-queue".into(),
@@ -157,6 +201,8 @@ pub fn builtins(current_effort: &str) -> Vec<PaletteItem> {
             help: "Recall all pending user messages into the editor for editing.".into(),
             options: Vec::new(),
             ext: None,
+            preview_kind: PreviewKind::Plain,
+            tag_fg: None,
         },
         PaletteItem {
             id: "e".into(),
@@ -166,6 +212,8 @@ pub fn builtins(current_effort: &str) -> Vec<PaletteItem> {
             help: "Open the external editor on the draft.".into(),
             options: Vec::new(),
             ext: None,
+            preview_kind: PreviewKind::Plain,
+            tag_fg: None,
         },
         PaletteItem {
             id: "q".into(),
@@ -175,6 +223,8 @@ pub fn builtins(current_effort: &str) -> Vec<PaletteItem> {
             help: "Quit the TUI. Loops keep running.".into(),
             options: Vec::new(),
             ext: None,
+            preview_kind: PreviewKind::Plain,
+            tag_fg: None,
         },
     ]
 }
@@ -205,6 +255,8 @@ pub fn from_extension(ext_name: &str, cmds: &[ExtCommand]) -> Vec<PaletteItem> {
                     .collect()
             },
             ext: Some(ext_name.to_string()),
+            preview_kind: PreviewKind::Plain,
+            tag_fg: None,
         })
         .collect()
 }

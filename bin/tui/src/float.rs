@@ -4,8 +4,29 @@
 //! The layout is a pure function of the terminal area and whether the
 //! preview pane should show. It flips orientation at width thresholds
 //! with no key press.
+//!
+//! The float focus contract (docs/tree-ui-design-from-human-phase-2.md
+//! item 4): every float with a list + preview pair shares the [`Focus`]
+//! model. `Ctrl+Shift+P` (or `BackTab`, the legacy fallback) toggles
+//! focus between the entry list and the preview pane; `Ctrl+U` /
+//! `Ctrl+D` half-page scroll the focused pane. The focused preview pane
+//! gets a green (`Success`) border. One scheme across the floats, not
+//! two.
 
 use ratatui::layout::Rect;
+
+/// Which pane of a float window has focus (docs/tree-ui-design-from-
+/// human-phase-2.md item 4). The entry list is the default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Focus {
+    /// The entry list has focus. `Ctrl+U` / `Ctrl+D` half-page scroll
+    /// the list (minimum one row, wrapping like the step keys).
+    #[default]
+    List,
+    /// The preview pane has focus. `Ctrl+U` / `Ctrl+D` scroll the
+    /// pane `PREVIEW_PAGE` lines. The pane border is green.
+    Preview,
+}
 
 /// The orientation of the float layout, a function of the float width.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

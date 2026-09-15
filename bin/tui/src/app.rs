@@ -57,6 +57,12 @@ pub enum Key {
     /// The picker preview-pane toggle (docs/tui-file-picker.md
     /// section 4.4).
     CtrlP,
+    /// The float list/preview focus toggle
+    /// (docs/tree-ui-design-from-human-phase-2.md item 4).
+    /// `Ctrl+Shift+P`. In legacy terminals the shift modifier is not
+    /// reported, so the press arrives as plain `Ctrl+P` and
+    /// `BackTab` is the legacy fallback.
+    CtrlShiftP,
     /// The picker file-scope cycle (docs/tui-file-picker.md P9):
     /// standard → show git-ignored → also show hidden → back to
     /// standard. The item list is re-enumerated on each press.
@@ -2504,6 +2510,24 @@ impl App {
         m
     }
 
+    /// Call-id to tool-name map (the name-only half of
+    /// [`call_details`]). The tree-row label build resolves a
+    /// tool-result's tool name from the call id without deep-cloning
+    /// the argument JSON (docs/tree-ui-design-from-human-phase-2.md
+    /// item 1).
+    pub fn call_names(&self) -> HashMap<String, String> {
+        let mut m: HashMap<String, String> = HashMap::new();
+        for e in &self.events {
+            if e.kind() == EventKind::ToolCall {
+                if let Some(id) = e.get_str("id") {
+                    let name = e.get_str("name").unwrap_or("tool");
+                    m.insert(id.to_string(), name.to_string());
+                }
+            }
+        }
+        m
+    }
+
     /// Latest `ext_status` values, id to value, for the active
     /// session. The extension host sends this map in every `tick`
     /// op, so a statusline consumes shared UI state through the log
@@ -2865,12 +2889,13 @@ impl App {
         }
     }
 
-    /// Re-enumerate the picker's item list after `Ctrl+I` / `Tab`
-    /// cycled the file scope (docs/tui-file-picker.md P9): collect the
-    /// current search root at the new scope, swap the matcher's list,
-    /// and re-rank the live query against the fresh list. The flash
-    /// line names the new mode so the user sees the switch without
-    /// inspecting the list.
+    /// Re-enumerate the picker's item list after a scope cycle.
+    /// `Ctrl+T` cycles the scope. `Ctrl+I` does the same where the
+    /// terminal reports it distinctly (docs/tui-file-picker.md P9).
+    /// Collect the current search root at the new scope. Swap the
+    /// matcher's list. Re-rank the live query against the fresh
+    /// list. The flash line names the new mode so the user sees
+    /// the switch without inspecting the list.
     fn recollect_picker_items(&mut self) {
         let Some(src) = self.picker_source.as_ref() else {
             return;
@@ -2980,6 +3005,8 @@ impl App {
                             help,
                             options: Vec::new(),
                             ext: None,
+                            preview_kind: crate::palette::items::PreviewKind::Plain,
+                            tag_fg: None,
                         }
                     })
                     .collect();
@@ -2989,9 +3016,11 @@ impl App {
                 ranked.into_iter().map(|i| items[i].clone()).collect()
             }
             // The tree sub-list: the active session's events, fuzzy-
-            // searchable (docs/tree-ui-design-from-human.md).
+            // searchable (docs/tree-ui-design-from-human.md). The
+            // event-type filter narrows the candidates first
+            // (docs/tree-ui-design-from-human-phase-2.md item 3).
             crate::palette::state::PaletteStage::TreeList => {
-                self.tree_event_items(state.filter_query())
+                self.tree_event_items(state.filter_query(), &state.tree_filter)
             }
             // The four outcome options for a tree-picked event. Fixed
             // order; the query does not rank them.
@@ -3014,20 +3043,34 @@ impl App {
     /// active session's events, one line each, type-tagged and
     /// fuzzy-ranked by `filter`. Each item's `id` is the event's 1-based
     /// log seq. ExtStatus events are skipped (they add no transcript row).
-    fn tree_event_items(&self, filter: &str) -> Vec<crate::palette::items::PaletteItem> {
+    /// The `TreeFilter` (docs/tree-ui-design-from-human-phase-2.md item 3)
+    /// narrows candidates before the fuzzy rank; it ANDs with the query.
+    fn tree_event_items(
+        &self,
+        filter: &str,
+        tree_filter: &crate::palette::state::TreeFilter,
+    ) -> Vec<crate::palette::items::PaletteItem> {
         use crate::palette::items::{CmdKind, PaletteItem};
         use crate::picker::fuzzy::rank_fuzzy;
         let events = self.events();
         // The transcript has no render cap, so every in-memory event
         // maps to a rendered line and the whole history is reachable.
         let start = 0;
+        // Call-id to tool-name map for the result-row name slot
+        // (docs/tree-ui-design-from-human-phase-2.md item 1). The
+        // label build never deep-clones the call argument JSON, so
+        // this is the name-only half of the `call_details` pattern.
+        let call_names = self.call_names();
         let mut candidates: Vec<(usize, String)> = Vec::new();
         for (i, e) in events[start..].iter().enumerate() {
             let i = start + i;
             if e.kind() == EventKind::ExtStatus {
                 continue;
             }
-            candidates.push((i, tree_row_label(e)));
+            if !tree_filter.keeps(e.kind()) {
+                continue;
+            }
+            candidates.push((i, tree_row_label(e, &call_names)));
         }
         let labels: Vec<String> = candidates.iter().map(|(_, l)| l.clone()).collect();
         let ranked = rank_fuzzy(&labels, filter);
@@ -3039,10 +3082,12 @@ impl App {
                 let label = labels[i].clone();
                 let seq = base + idx;
                 let picked = &events[idx];
-                let help = format!(
-                    "{}\n\nEnter offers the four options (View-only, Rewind without summary, Summarize the branch, Summarize with custom prompt).",
-                    tree_event_body(picked)
-                );
+                // The full body, uncapped (docs/tree-ui-design-from-
+                // human-phase-2.md item 2). The pane scrolls it; the
+                // "Enter offers the four options" suffix renders as a
+                // plain line after the highlighted body, not inside
+                // `help`.
+                let help = tree_event_body(picked);
                 PaletteItem {
                     id: seq.to_string(),
                     label,
@@ -3051,6 +3096,8 @@ impl App {
                     help,
                     options: Vec::new(),
                     ext: None,
+                    preview_kind: tree_preview_kind(picked),
+                    tag_fg: tree_tag_fg(picked),
                 }
             })
             .collect()
@@ -3071,6 +3118,8 @@ impl App {
                 help: "Scroll the viewport to this event. No rewind marker, no fork, no state change. Allowed while the loop runs.".into(),
                 options: Vec::new(),
                 ext: None,
+                preview_kind: crate::palette::items::PreviewKind::Plain,
+                tag_fg: None,
             },
             PaletteItem {
                 id: "rewind-no-summary".into(),
@@ -3080,6 +3129,8 @@ impl App {
                 help: "Append a rewind marker here (reason tui_pick). The abandoned branch drops out of the transcript; the fork marker stays. Requires the loop to be idle.".into(),
                 options: Vec::new(),
                 ext: None,
+                preview_kind: crate::palette::items::PreviewKind::Plain,
+                tag_fg: None,
             },
             PaletteItem {
                 id: "summarize-branch".into(),
@@ -3089,6 +3140,8 @@ impl App {
                 help: "Append the rewind marker and run bin/compact --up-to. Pending the kernel compact flag.".into(),
                 options: Vec::new(),
                 ext: None,
+                preview_kind: crate::palette::items::PreviewKind::Plain,
+                tag_fg: None,
             },
             PaletteItem {
                 id: "summarize-custom".into(),
@@ -3098,6 +3151,8 @@ impl App {
                 help: "Append the rewind marker and run bin/compact --up-to --prompt. Pending the kernel compact flag.".into(),
                 options: Vec::new(),
                 ext: None,
+                preview_kind: crate::palette::items::PreviewKind::Plain,
+                tag_fg: None,
             },
         ]
     }
@@ -3813,12 +3868,16 @@ impl App {
                     return Vec::new();
                 }
                 // Host keys pass through even while the picker is open.
-                // `Tab` is deliberately not here: in a standard terminal
-                // it is the `Ctrl+I` key (both send byte 0x09, which
-                // crossterm parses as `KeyCode::Tab`), and the picker
-                // binds it to the file-scope cycle (docs/tui-file-picker.md
-                // P9), so it reaches the state machine below.
-                Key::Quit | Key::CtrlC | Key::CtrlR | Key::BackTab => {}
+                // `Tab` is deliberately not here. In a standard
+                // terminal it is the `Ctrl+I` byte (0x09; crossterm
+                // parses it as `KeyCode::Tab`). The picker binds it
+                // to completion (docs/tree-ui-design-from-human-phase-
+                // 2.md item 5), so it reaches the state machine below.
+                // `BackTab` is not swallowed here either. It is the
+                // legacy focus-toggle key and reaches the picker state
+                // machine while the picker is open (docs/tree-ui-design-
+                // from-human-phase-2.md item 4).
+                Key::Quit | Key::CtrlC | Key::CtrlR => {}
                 // Esc, Enter, arrows, paging, preview keys: the state
                 // machine decides (docs/tui-file-picker.md section 5).
                 _ => {
@@ -3830,6 +3889,32 @@ impl App {
                     ) {
                         crate::picker::state::PickAction::Commit(sel) => {
                             self.commit_picker(sel);
+                        }
+                        crate::picker::state::PickAction::Complete => {
+                            // `Tab` completes the highlighted item:
+                            // the `@query` token is replaced with
+                            // `@<path>` in the draft and the picker
+                            // stays open (docs/tree-ui-design-from-
+                            // human-phase-2.md item 5).
+                            let idx =
+                                self.picker.cursor().min(count.saturating_sub(1));
+                            if let Some(m) = &self.picker_matcher {
+                                if let Some(item) = m.snapshot().items.get(idx) {
+                                    if let Some((_, at_col)) = self.picker_at {
+                                        // Keep the `@` so the model
+                                        // receives an unambiguous file-
+                                        // reference marker.
+                                        self.editor()
+                                            .replace_at_token(
+                                                at_col,
+                                                &format!("@{}", item.value),
+                                            );
+                                    }
+                                }
+                            }
+                            // The draft now holds the completed token:
+                            // re-sync the query and re-rank in place.
+                            self.sync_picker();
                         }
                         crate::picker::state::PickAction::Closed => {
                             self.picker_matcher = None;
@@ -3856,13 +3941,17 @@ impl App {
                         }
                         crate::picker::state::PickAction::ScrollPreview
                         | crate::picker::state::PickAction::TogglePreview
+                        | crate::picker::state::PickAction::ToggleFocus
                         | crate::picker::state::PickAction::Nothing => {}
                         crate::picker::state::PickAction::Recollect => {
-                            // `Ctrl+I` / `Tab` cycled the file scope
-                            // (docs/tui-file-picker.md P9): re-enumerate
-                            // the current search root at the new scope,
-                            // re-rank the live query, and flash the
-                            // scope line so the user sees the switch.
+                            // `Ctrl+T` / `Ctrl+I` cycled the file
+                            // scope. `Tab` no longer cycles it
+                            // (docs/tui-file-picker.md P9, docs/tree-
+                            // ui-design-from-human-phase-2.md item 5).
+                            // Re-enumerate the current search root at
+                            // the new scope. Re-rank the live query.
+                            // Flash the scope line so the user sees
+                            // the switch.
                             self.recollect_picker_items();
                         }
                     }
@@ -3913,11 +4002,29 @@ impl App {
                 | PaletteAction::OptionMove
                 | PaletteAction::ScrollPreview
                 | PaletteAction::TogglePreview
+                | PaletteAction::ToggleFocus
+                | PaletteAction::CycleFilter
                 | PaletteAction::Nothing => {
+                    // `CycleFilter` rebuilds the ranked list on the
+                    // next frame (docs/tree-ui-design-from-human-
+                    // phase-2.md item 3). `ToggleFocus` only flips
+                    // the focus field (item 4).
                     return Vec::new();
                 }
                 PaletteAction::Commit => {
                     return self.commit_palette();
+                }
+                PaletteAction::Complete => {
+                    // `Tab` completes the highlighted item into the
+                    // query. The window stays open so typing
+                    // continues after the completion
+                    // (docs/tree-ui-design-from-human-phase-2.md
+                    // item 5).
+                    let cursor = self.palette_state.cursor().min(n.saturating_sub(1));
+                    if let Some(item) = items.get(cursor) {
+                        self.palette_state_mut().apply_complete(&item.label);
+                    }
+                    return Vec::new();
                 }
                 PaletteAction::DropSubStage => {
                     // Stay open, back to root stage.
@@ -4200,6 +4307,14 @@ impl App {
                     .toggle_preview(0, crate::picker::render::PREVIEW_CUTOFF);
                 Vec::new()
             }
+            Key::CtrlShiftP => {
+                // The float list/preview focus toggle
+                // (docs/tree-ui-design-from-human-phase-2.md item 4).
+                // The float owns the key while open. In the main view
+                // it is a no-op. Legacy terminals send plain
+                // `Ctrl+P` here; `BackTab` covers the toggle then.
+                Vec::new()
+            }
             Key::AltUp => {
                 // Bulk recall of pending user messages
                 // (docs/user-message-editing.md).
@@ -4305,28 +4420,112 @@ impl App {
     }
 }
 
+/// The built-in tool names that get prettified rows in the tree
+/// list (docs/tree-ui-design-from-human-phase-2.md item 1). Every
+/// other tool stays raw.
+const BUILTIN_TREE_TOOLS: &[&str] = &["bash", "read", "edit", "write"];
+
+/// Whether `name` is a built-in tool with a prettified row shape.
+fn is_builtin_tree_tool(name: &str) -> bool {
+    BUILTIN_TREE_TOOLS.contains(&name)
+}
+
+/// Whether the event's tool row takes the bare (bracket-free)
+/// shape. That is a built-in call row, a built-in result row, or
+/// a result row with an unresolvable call id. The last case falls
+/// back to the bare `tool` tag (docs/tree-ui-design-from-human-
+/// phase-2.md item 1).
+fn is_bare_tool_row(e: &Event, call_names: &HashMap<String, String>) -> bool {
+    match e.kind() {
+        EventKind::ToolCall => {
+            e.get_str("name").is_some_and(is_builtin_tree_tool)
+        }
+        EventKind::ToolResult => {
+            // A resolved custom tool keeps the raw row. A built-in
+            // result and an unknown id take the bare tag.
+            match e.get_str("id").and_then(|id| call_names.get(id)) {
+                Some(n) => is_builtin_tree_tool(n),
+                None => true,
+            }
+        }
+        _ => false,
+    }
+}
+
+/// The fg color role of a tree row's leading type tag, classified
+/// by message-identity class (docs/tree-ui-design-from-human-
+/// phase-2.md item 1). `user` and `assistant` rows take the
+/// transcript identity colors. Tool rows take the tool-name
+/// color. Rows of any other class leave the tag uncolored.
+fn tree_tag_fg(e: &Event) -> Option<crate::color::Role> {
+    use crate::color::Role;
+    match e.kind() {
+        EventKind::UserMessage | EventKind::UserMessageRetract => Some(Role::Accent),
+        EventKind::AssistantMessage => Some(Role::Report),
+        EventKind::ToolCall | EventKind::ToolResult => Some(Role::ToolName),
+        _ => None,
+    }
+}
+
 /// The one-line tree row for an event (docs/tree-ui-design-from-human.md):
 /// a type tag up front and a truncated single-line preview. No wrapping.
-fn tree_row_label(e: &Event) -> String {
-    let tag = tree_event_tag(e);
-    let preview = tree_event_preview(e);
-    if preview.is_empty() {
-        format!("<{tag}>")
+///
+/// The tool rows are prettified
+/// (docs/tree-ui-design-from-human-phase-2.md item 1):
+/// - `bash` call: `bash <arguments.command>`.
+/// - `read` / `edit` / `write` call: `<tool> <arguments.file_path>`,
+///   with a fallback to `arguments.path`.
+/// - `tool_result`: `<name> <status> <first result line>`. The name
+///   resolves from the call id through `call_names`. An unknown id
+///   falls back to the bare `tool` tag.
+/// - Custom (non-built-in) tools keep the raw row of today: the tag
+///   in angle brackets, the preview outside.
+fn tree_row_label(e: &Event, call_names: &HashMap<String, String>) -> String {
+    let tag = tree_event_tag(e, call_names);
+    let preview = tree_event_preview(e, call_names);
+    if is_bare_tool_row(e, call_names) {
+        // Built-in tools drop the angle brackets and the `tool:`
+        // prefix (docs/tree-ui-design-from-human-phase-2.md item 1).
+        // The shape is `bash <command>` / `read <file_path>`.
+        if preview.is_empty() {
+            tag
+        } else {
+            format!("{tag} {preview}")
+        }
     } else {
-        format!("<{tag}> {preview}")
+        // Custom tools keep the raw row of today: the tag in angle
+        // brackets, the preview outside.
+        if preview.is_empty() {
+            format!("<{tag}>")
+        } else {
+            format!("<{tag}> {preview}")
+        }
     }
 }
 
 /// The short type tag at the front of a tree row.
-fn tree_event_tag(e: &Event) -> String {
+fn tree_event_tag(e: &Event, call_names: &HashMap<String, String>) -> String {
     match e.kind() {
         EventKind::UserMessage => "user".to_string(),
         EventKind::AssistantMessage => "assistant".to_string(),
         EventKind::ToolCall => match e.get_str("name") {
+            // Built-in tools drop the angle brackets and the `tool:`
+            // prefix (docs/tree-ui-design-from-human-phase-2.md
+            // item 1).
+            Some(n) if is_builtin_tree_tool(n) => n.to_string(),
             Some(n) => format!("tool:{n}"),
             None => "tool".to_string(),
         },
-        EventKind::ToolResult => "tool-result".to_string(),
+        EventKind::ToolResult => {
+            // Resolve the tool name from the call id (item 1). A
+            // custom tool keeps the raw row. An unknown id falls
+            // back to the bare `tool` tag.
+            match e.get_str("id").and_then(|id| call_names.get(id)) {
+                Some(n) if is_builtin_tree_tool(n) => n.to_string(),
+                Some(_) => "tool-result".to_string(),
+                None => "tool".to_string(),
+            }
+        }
         EventKind::ApprovalRequest => "approval".to_string(),
         EventKind::Approval => "decision".to_string(),
         EventKind::Cancel => "cancel".to_string(),
@@ -4342,16 +4541,65 @@ fn tree_event_tag(e: &Event) -> String {
 }
 
 /// The one-line preview of an event's content for the tree row.
-fn tree_event_preview(e: &Event) -> String {
+fn tree_event_preview(e: &Event, call_names: &HashMap<String, String>) -> String {
     let raw = match e.kind() {
         EventKind::UserMessage | EventKind::AssistantMessage => {
             e.get_str("content").unwrap_or("").to_string()
         }
-        EventKind::ToolCall => e
-            .get("arguments")
-            .map(|v| v.to_string())
-            .unwrap_or_default(),
-        EventKind::ToolResult => e.get("value").map(|v| v.to_string()).unwrap_or_default(),
+        EventKind::ToolCall => match e.get_str("name") {
+            // `bash <arguments.command>` (docs/tree-ui-design-from-
+            // human-phase-2.md item 1).
+            Some("bash") => e
+                .get("arguments")
+                .and_then(|a| a.get("command"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            // `<tool> <arguments.file_path>`, falling back to
+            // `path` (item 1). This mirrors `tool_display.rs`,
+            // which reads `file_path` then `path` from the call
+            // arguments.
+            Some(n) if n == "read" || n == "edit" || n == "write" => e
+                .get("arguments")
+                .and_then(|a| a.get("file_path").or_else(|| a.get("path")))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            // Custom and unknown tools keep the raw compact JSON.
+            _ => e
+                .get("arguments")
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+        },
+        EventKind::ToolResult => {
+            let name = e.get_str("id").and_then(|id| call_names.get(id));
+            match name {
+                // A custom tool keeps today's raw row: the compact
+                // JSON of the result value.
+                Some(n) if !is_builtin_tree_tool(n) => e
+                    .get("value")
+                    .map(|v| v.to_string())
+                    .unwrap_or_default(),
+                // Built-in, or an unknown call id (the tag falls
+                // back to the bare `tool`): `<name> <status>
+                // <first result line>` (item 1).
+                _ => {
+                    let status =
+                        if e.get_bool("is_error").unwrap_or(false) { "err" } else { "ok" };
+                    // The first result line: the `text` field of the
+                    // result value when it is a string, else the
+                    // compact value JSON.
+                    let first = e
+                        .get("value")
+                        .and_then(|v| v.get("text"))
+                        .and_then(|t| t.as_str())
+                        .map(|s| s.to_string())
+                        .or_else(|| e.get("value").map(|v| v.to_string()))
+                        .unwrap_or_default();
+                    format!("{status} {first}")
+                }
+            }
+        }
         EventKind::Rewind => format!(
             "rewound to seq {} ({})",
             e.get("target_seq")
@@ -4367,8 +4615,11 @@ fn tree_event_preview(e: &Event) -> String {
 
 /// The multi-line body of an event for the tree preview pane
 /// (docs/tree-ui-design-from-human.md "The preview pane shows the
-/// preview of the full content of the event"). Capped so one event does
-/// not dominate the pane.
+/// preview of the full content of the event").
+///
+/// The 600-character cap is dropped
+/// (docs/tree-ui-design-from-human-phase-2.md item 2): the pane
+/// scrolls the full content, clamped to the content length.
 fn tree_event_body(e: &Event) -> String {
     let raw = match e.kind() {
         EventKind::UserMessage | EventKind::AssistantMessage => {
@@ -4389,12 +4640,21 @@ fn tree_event_body(e: &Event) -> String {
         EventKind::ApprovalRequest => e.get_str("prompt").unwrap_or("").to_string(),
         _ => String::new(),
     };
-    const CAP: usize = 600;
-    if raw.chars().count() <= CAP {
-        raw
-    } else {
-        let cut: String = raw.chars().take(CAP).collect();
-        format!("{cut}...")
+    raw
+}
+
+/// The preview-pane pipeline of a tree item
+/// (docs/tree-ui-design-from-human-phase-2.md item 2). Tool calls
+/// and results carry JSON, so they parse and highlight as JSON.
+/// Messages use the markdown pass.
+fn tree_preview_kind(e: &Event) -> crate::palette::items::PreviewKind {
+    use crate::palette::items::PreviewKind;
+    match e.kind() {
+        EventKind::ToolCall | EventKind::ToolResult => PreviewKind::Json,
+        EventKind::UserMessage
+        | EventKind::AssistantMessage
+        | EventKind::UserMessageRetract => PreviewKind::Markdown,
+        _ => PreviewKind::Plain,
     }
 }
 
@@ -4479,7 +4739,7 @@ mod full_history_tests {
         let n = 3000;
         let mut app = App::new();
         app.set_active(SessionId::new("s1"), many_events(n), n as u64);
-        let items = app.tree_event_items("");
+        let items = app.tree_event_items("", &crate::palette::state::TreeFilter::default());
         assert_eq!(items.len(), n, "the tree lists every event");
         assert_eq!(items[0].id, "1", "the first log seq leads the list");
         assert!(
@@ -4514,7 +4774,7 @@ mod full_history_tests {
         ];
         let mut app = App::new();
         app.set_active(SessionId::new("s1"), events, 3);
-        let items = app.tree_event_items("");
+        let items = app.tree_event_items("", &crate::palette::state::TreeFilter::default());
         let marker = items
             .iter()
             .find(|it| it.label.contains("rewind"))
@@ -4605,7 +4865,8 @@ mod full_history_tests {
             events.clone(),
             events.len() as u64,
         );
-        let items = app.tree_event_items("");
+        let items =
+            app.tree_event_items("", &crate::palette::state::TreeFilter::default());
         let first_idx = events
             .iter()
             .position(|e| e.kind() != EventKind::ExtStatus)
@@ -4613,7 +4874,7 @@ mod full_history_tests {
         assert_eq!(items[0].id, "1", "the first log seq leads the list");
         assert_eq!(
             items[0].label,
-            super::tree_row_label(&events[first_idx]),
+            super::tree_row_label(&events[first_idx], &app.call_names()),
             "the first row is the first listed event"
         );
         let lines = crate::render::build_transcript_lines(&app, 100, None);
@@ -5386,5 +5647,302 @@ mod browse_gate_tests {
         let _ = app.press(Key::Char('s'));
         let _ = app.press(Key::Char('s'));
         assert!(app.browse.active());
+    }
+}
+
+#[cfg(test)]
+mod tree_prettify_tests {
+    //! The prettified tree rows and the event-type filter
+    //! (docs/tree-ui-design-from-human-phase-2.md items 1, 3).
+
+    use super::App;
+    use crate::event::Event;
+    use crate::palette::state::TreeFilter;
+    use crate::port::SessionId;
+
+    fn app_with(events: Vec<Event>) -> App {
+        let log_lines = events.len() as u64;
+        let mut app = App::new();
+        app.set_active(SessionId::new("s1"), events, log_lines);
+        app
+    }
+
+    fn rows(app: &App, filter: &TreeFilter) -> Vec<crate::palette::items::PaletteItem> {
+        app.tree_event_items("", filter)
+    }
+
+    fn row(app: &App, seq: &str, filter: &TreeFilter) -> String {
+        rows(app, filter)
+            .into_iter()
+            .find(|i| i.id == seq)
+            .map(|i| i.label)
+            .unwrap_or_else(|| "missing".to_string())
+    }
+
+    /// A `bash` call row reads `bash <arguments.command>`. No
+    /// brackets, no `tool:` prefix.
+    #[test]
+    fn bash_call_row_is_prettified() {
+        let events = vec![
+            Event::parse_line(
+                r#"{"v":1,"type":"tool_call","ts":"t","id":"c1","name":"bash","arguments":{"command":"ls -la"}}"#,
+            )
+            .unwrap(),
+        ];
+        let app = app_with(events);
+        assert_eq!(
+            row(&app, "1", &TreeFilter::default()),
+            "bash ls -la",
+            "the bash row drops the brackets and the tool: prefix"
+        );
+    }
+
+    /// The `read` / `write` rows show `arguments.file_path`. A
+    /// missing `file_path` falls back to `path`.
+    #[test]
+    fn read_and_write_rows_use_file_path_with_path_fallback() {
+        let events = vec![
+            Event::parse_line(
+                r#"{"v":1,"type":"tool_call","ts":"t","id":"r1","name":"read","arguments":{"file_path":"/tmp/a.txt"}}"#,
+            )
+            .unwrap(),
+            Event::parse_line(
+                r#"{"v":1,"type":"tool_call","ts":"t","id":"w1","name":"write","arguments":{"path":"/tmp/b.txt"}}"#,
+            )
+            .unwrap(),
+        ];
+        let app = app_with(events);
+        let f = TreeFilter::default();
+        assert_eq!(
+            row(&app, "1", &f),
+            "read /tmp/a.txt",
+            "the read row shows the file_path"
+        );
+        assert_eq!(
+            row(&app, "2", &f),
+            "write /tmp/b.txt",
+            "a missing file_path falls back to path"
+        );
+    }
+
+    /// A custom tool keeps the raw row: the tag and the compact
+    /// JSON preview in angle brackets.
+    #[test]
+    fn custom_tool_rows_stay_raw() {
+        let events = vec![
+            Event::parse_line(
+                r#"{"v":1,"type":"tool_call","ts":"t","id":"x1","name":"myext.tool","arguments":{"x":1}}"#,
+            )
+            .unwrap(),
+            Event::parse_line(
+                r#"{"v":1,"type":"tool_result","ts":"t","id":"x1","value":{"text":"done","exit_code":0},"is_error":false}"#,
+            )
+            .unwrap(),
+        ];
+        let app = app_with(events);
+        let f = TreeFilter::default();
+        assert_eq!(
+            row(&app, "1", &f),
+            "<tool:myext.tool> {\"x\":1}",
+            "the custom call row keeps today's raw shape"
+        );
+        assert_eq!(
+            row(&app, "2", &f),
+            "<tool-result> {\"exit_code\":0,\"text\":\"done\"}",
+            "the custom result row keeps today's raw shape"
+        );
+    }
+
+    /// A result row whose call id cannot be resolved falls back to
+    /// the bare `tool` tag with the status and the first result
+    /// line.
+    #[test]
+    fn unknown_call_id_result_uses_the_bare_tool_tag() {
+        let events = vec![Event::parse_line(
+            r#"{"v":1,"type":"tool_result","ts":"t","id":"cX","value":{"text":"orphan result\nsecond line"},"is_error":false}"#,
+        )
+        .unwrap()];
+        let app = app_with(events);
+        assert_eq!(
+            row(&app, "1", &TreeFilter::default()),
+            "tool ok orphan result",
+            "an unresolvable id takes the bare tool tag"
+        );
+    }
+
+    /// A built-in result row reads `<name> <status> <first line>`,
+    /// and the status is `err` when `is_error` is true.
+    #[test]
+    fn builtin_result_rows_show_name_status_and_first_line() {
+        let events = vec![
+            Event::parse_line(
+                r#"{"v":1,"type":"tool_call","ts":"t","id":"c1","name":"bash","arguments":{"command":"make"}}"#,
+            )
+            .unwrap(),
+            Event::parse_line(
+                r#"{"v":1,"type":"tool_result","ts":"t","id":"c1","value":{"text":"line1\nline2"},"is_error":false}"#,
+            )
+            .unwrap(),
+            Event::parse_line(
+                r#"{"v":1,"type":"tool_result","ts":"t","id":"c1","value":{"text":"boom"},"is_error":true}"#,
+            )
+            .unwrap(),
+        ];
+        let app = app_with(events);
+        let f = TreeFilter::default();
+        assert_eq!(
+            row(&app, "2", &f),
+            "bash ok line1",
+            "the ok result shows the name, status, and first line"
+        );
+        assert_eq!(
+            row(&app, "3", &f),
+            "bash err boom",
+            "is_error true reads err"
+        );
+    }
+
+    /// The event-type filter narrows the tree candidates before the
+    /// fuzzy rank.
+    #[test]
+    fn the_event_type_filter_narrows_the_candidates() {
+        let events = vec![
+            Event::parse_line(
+                r#"{"v":1,"type":"user_message","ts":"t","id":"u1","content":"hi"}"#,
+            )
+            .unwrap(),
+            Event::parse_line(
+                r#"{"v":1,"type":"user_message_retract","ts":"t","id":"u2","target":"u1"}"#,
+            )
+            .unwrap(),
+            Event::parse_line(
+                r#"{"v":1,"type":"assistant_message","ts":"t","id":"a1","content":"hello","tool_calls":[],"stop_reason":"stop","usage":{"input_tokens":1,"output_tokens":1},"reasoning":{}}"#,
+            )
+            .unwrap(),
+            Event::parse_line(
+                r#"{"v":1,"type":"tool_call","ts":"t","id":"c1","name":"bash","arguments":{"command":"make"}}"#,
+            )
+            .unwrap(),
+            Event::parse_line(
+                r#"{"v":1,"type":"tool_result","ts":"t","id":"c1","value":{"text":"done"},"is_error":false}"#,
+            )
+            .unwrap(),
+        ];
+        let app = app_with(events);
+
+        let tool = rows(&app, &TreeFilter::Tool);
+        assert_eq!(tool.len(), 2, "the tool filter keeps both tool kinds");
+        assert!(
+            tool.iter().all(|i| i.label.starts_with('b') || i.label.starts_with('<')),
+            "only the tool rows survive: {:?}",
+            tool.iter().map(|i| i.label.clone()).collect::<Vec<_>>()
+        );
+
+        let user = rows(&app, &TreeFilter::User);
+        assert_eq!(user.len(), 2, "the user filter keeps user_message and the retract");
+
+        let assistant = rows(&app, &TreeFilter::Assistant);
+        assert_eq!(assistant.len(), 1, "the assistant filter keeps one row");
+
+        let ua = rows(&app, &TreeFilter::UserAssistant);
+        assert_eq!(ua.len(), 3, "the combined filter keeps user and assistant");
+
+        let full = rows(&app, &TreeFilter::Full);
+        assert_eq!(full.len(), 5, "full keeps every event");
+    }
+
+    /// The event body no longer caps at 600 characters: the pane
+    /// scrolls the full content (docs/tree-ui-design-from-human-
+    /// phase-2.md item 2).
+    #[test]
+    fn the_event_body_has_no_cap() {
+        let long = "x".repeat(700);
+        let events = vec![
+            Event::parse_line(
+                &format!(r#"{{"v":1,"type":"user_message","ts":"t","id":"u1","content":"{long}"}}"#),
+            )
+            .unwrap(),
+        ];
+        let app = app_with(events);
+        let item = &rows(&app, &TreeFilter::default())[0];
+        assert_eq!(item.help.len(), 700, "the body is the full source text");
+    }
+
+    /// The preview-kind flag routes each event to its pipeline.
+    #[test]
+    fn the_preview_kind_routes_the_event_to_its_pipeline() {
+        use crate::palette::items::PreviewKind;
+        let events = vec![
+            Event::parse_line(
+                r#"{"v":1,"type":"user_message","ts":"t","id":"u1","content":"hi"}"#,
+            )
+            .unwrap(),
+            Event::parse_line(
+                r#"{"v":1,"type":"tool_call","ts":"t","id":"c1","name":"bash","arguments":{"command":"make"}}"#,
+            )
+            .unwrap(),
+            Event::parse_line(
+                r#"{"v":1,"type":"tool_result","ts":"t","id":"c1","value":{"text":"done"},"is_error":false}"#,
+            )
+            .unwrap(),
+            Event::parse_line(
+                r#"{"v":1,"type":"rewind","ts":"t","id":"w1","target_seq":1,"mode":"on","reason":"tui_pick"}"#,
+            )
+            .unwrap(),
+        ];
+        let app = app_with(events);
+        let items = rows(&app, &TreeFilter::default());
+        assert_eq!(
+            items[0].preview_kind,
+            PreviewKind::Markdown,
+            "user messages highlight as markdown"
+        );
+        assert_eq!(
+            items[1].preview_kind,
+            PreviewKind::Json,
+            "tool calls parse as JSON"
+        );
+        assert_eq!(
+            items[2].preview_kind,
+            PreviewKind::Json,
+            "tool results parse as JSON"
+        );
+        assert_eq!(
+            items[3].preview_kind,
+            PreviewKind::Plain,
+            "every other event stays plain"
+        );
+    }
+
+    /// The row tag color class: user, assistant, and tool rows take
+    /// the transcript identity tones; every other class stays
+    /// uncolored (docs/tree-ui-design-from-human-phase-2.md item 1).
+    #[test]
+    fn the_row_tag_fg_classifies_user_assistant_and_tool() {
+        use crate::color::Role;
+        let events = vec![
+            Event::parse_line(
+                r#"{"v":1,"type":"user_message","ts":"t","id":"u1","content":"hi"}"#,
+            )
+            .unwrap(),
+            Event::parse_line(
+                r#"{"v":1,"type":"assistant_message","ts":"t","id":"a1","content":"ok","tool_calls":[],"stop_reason":"stop"}"#,
+            )
+            .unwrap(),
+            Event::parse_line(
+                r#"{"v":1,"type":"tool_call","ts":"t","id":"c1","name":"bash","arguments":{"command":"make"}}"#,
+            )
+            .unwrap(),
+            Event::parse_line(
+                r#"{"v":1,"type":"rewind","ts":"t","id":"w1","target_seq":1,"mode":"on","reason":"tui_pick"}"#,
+            )
+            .unwrap(),
+        ];
+        let app = app_with(events);
+        let items = rows(&app, &TreeFilter::default());
+        assert_eq!(items[0].tag_fg, Some(Role::Accent), "user rows take the Accent tone");
+        assert_eq!(items[1].tag_fg, Some(Role::Report), "assistant rows take the Report tone");
+        assert_eq!(items[2].tag_fg, Some(Role::ToolName), "tool rows take the ToolName tone");
+        assert_eq!(items[3].tag_fg, None, "unclassed rows stay uncolored");
     }
 }

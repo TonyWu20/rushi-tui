@@ -898,7 +898,7 @@ fn picker_preview_wide_line_wraps_not_truncates() {
 #[test]
 fn palette_preview_wide_help_line_wraps() {
     use crate::float::compute_float_layout;
-    use crate::palette::items::{CmdKind, CmdOption, PaletteItem};
+    use crate::palette::items::{CmdKind, CmdOption, PaletteItem, PreviewKind};
     use crate::palette::render::render_palette;
     use crate::palette::state::PaletteState;
     use ratatui::layout::Rect;
@@ -918,6 +918,8 @@ fn palette_preview_wide_help_line_wraps() {
             current: true,
         }],
         ext: None,
+        preview_kind: PreviewKind::Plain,
+        tag_fg: None,
     };
     let items = vec![item];
     let mut state = PaletteState::new();
@@ -1257,4 +1259,158 @@ fn cached_transcript_drops_offpath_after_live_marker() {
     assert!(lines
         .iter()
         .any(|l| l.to_string().contains("rewound to seq 3")));
+}
+
+// ── tree phase 2: pane pipeline, filter hint, focus border ─────────
+// docs/tree-ui-design-from-human-phase-2.md items 2, 3, 4.
+
+/// A session covering the tree-stage row families: a user message, a
+/// `bash` call and its result, and an assistant message.
+fn tree_phase2_events() -> Vec<Event> {
+    vec![
+        ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u1","content":"build the project"}"#),
+        ev(r#"{"v":1,"type":"tool_call","ts":"t","id":"c1","name":"bash","arguments":{"command":"make -j4"}}"#),
+        ev(r#"{"v":1,"type":"tool_result","ts":"t","id":"c1","value":{"text":"All targets up to date"},"is_error":false}"#),
+        ev(r#"{"v":1,"type":"assistant_message","ts":"t","id":"a1","content":"Done.","tool_calls":[],"stop_reason":"stop","usage":{"input_tokens":1,"output_tokens":1},"reasoning":{}}"#),
+    ]
+}
+
+/// Open the palette on the tree stage for the given session.
+fn tree_stage_app(events: Vec<Event>) -> App {
+    let mut app = app_with_session(events);
+    app.open_palette();
+    app.palette_state_mut().goto_tree_list();
+    app
+}
+
+/// Render one frame and return the terminal buffer, for style
+/// assertions the text snapshot cannot express (the green focused
+/// border, item 4).
+fn render_buffer(app: &mut App, host: &ExtHost, w: u16, h: u16) -> ratatui::buffer::Buffer {
+    let backend = TestBackend::new(w, h);
+    let mut term = Terminal::new(backend).expect("test backend");
+    let _ = term.draw(|f| {
+        let mut cursor = None;
+        draw(f, app, &mut cursor, host);
+    });
+    term.backend().buffer().clone()
+}
+
+/// The fg colors of the preview pane's border cells, from the
+/// float layout's preview rect.
+fn preview_border_fg(buffer: &ratatui::buffer::Buffer, w: u16, h: u16) -> Vec<ratatui::style::Color> {
+    use ratatui::layout::Rect;
+    let layout = crate::float::compute_float_layout(Rect::new(0, 0, w, h), true);
+    let p = layout
+        .preview
+        .expect("the preview pane must be visible in this layout");
+    let mut out = Vec::new();
+    for x in p.x..(p.x + p.width) {
+        out.push(buffer[(x, p.y)].fg);
+        out.push(buffer[(x, p.y + p.height - 1)].fg);
+    }
+    for y in (p.y + 1)..(p.y + p.height - 1) {
+        out.push(buffer[(p.x, y)].fg);
+        out.push(buffer[(p.x + p.width - 1, y)].fg);
+    }
+    out
+}
+
+/// Item 2: the tree stage's preview pane shows the highlighted JSON
+/// body plus the plain option-hint suffix.
+#[test]
+fn snap_tree_event_pane_lines() {
+    let mut app = tree_stage_app(tree_phase2_events());
+    // Highlight the `bash` call: the pane runs the JSON pipeline.
+    app.palette_state_mut().move_down(4, 0);
+    let (host, _tmp) = empty_host();
+    let out = render(&mut app, &host, 100, 30);
+    insta::assert_snapshot!(out);
+}
+
+/// Item 3: cycling the filter to `tool` narrows the list and the
+/// input bar shows `[f: tool]`.
+#[test]
+fn snap_tree_filter_hint_in_input_bar() {
+    let mut app = tree_stage_app(tree_phase2_events());
+    let st = app.palette_state_mut();
+    st.cycle_filter();
+    st.cycle_filter();
+    st.cycle_filter();
+    let (host, _tmp) = empty_host();
+    let out = render(&mut app, &host, 100, 30);
+    insta::assert_snapshot!(out);
+}
+
+/// Item 4: the focused preview pane gets a green (`Success`)
+/// border. The unfocused pane keeps the `Status` border.
+#[test]
+fn the_focused_preview_pane_border_is_green() {
+    use crate::color::Role;
+    let events = tree_phase2_events();
+    let (host, _tmp) = empty_host();
+
+    // Unfocused: the pane border stays `Status`, never `Success`.
+    let mut app = tree_stage_app(events.clone());
+    let status = app.palette().color(Role::Status);
+    let success = app.palette().color(Role::Success);
+    let buf = render_buffer(&mut app, &host, 100, 30);
+    let fg = preview_border_fg(&buf, 100, 30);
+    assert!(
+        !fg.contains(&success),
+        "the unfocused pane border keeps the Status color, got {fg:?}"
+    );
+    assert!(fg.contains(&status), "the unfocused pane border is Status");
+
+    // Focused: the pane border takes the green `Success` color.
+    let mut app = tree_stage_app(events);
+    app.palette_state_mut()
+        .toggle_focus(4, crate::picker::render::PREVIEW_CUTOFF);
+    let buf = render_buffer(&mut app, &host, 100, 30);
+    let fg = preview_border_fg(&buf, 100, 30);
+    assert!(
+        fg.iter().filter(|c| **c == success).count() > 0,
+        "the focused pane border must be the Success color"
+    );
+}
+
+/// Item 1: the tree row's leading type tag carries its class's fg
+/// color: user rows take the `Accent` tone, assistant rows the
+/// `Report` tone, tool rows the `ToolName` tone. The cursor row
+/// keeps the accent highlight over the whole row.
+#[test]
+fn tree_row_tags_carry_the_class_fg_color() {
+    use crate::color::Role;
+    let events = tree_phase2_events();
+    let (host, _tmp) = empty_host();
+    let mut app = tree_stage_app(events);
+    let accent = app.palette().color(Role::Accent);
+    let report = app.palette().color(Role::Report);
+    let tool = app.palette().color(Role::ToolName);
+    let plain = app.palette().color(Role::PlainText);
+    let buf = render_buffer(&mut app, &host, 100, 30);
+
+    // Narrow layout at 100x30: the list's inner rows start at
+    // `list.y + 1`. The label starts 5 cells in from the list's
+    // left border (2-cell marker, the kind letter, one space).
+    let layout =
+        crate::float::compute_float_layout(ratatui::layout::Rect::new(0, 0, 100, 30), true);
+    let list = layout.list;
+    let tag_x = list.x + 5;
+    // Row 0 is the cursor row: the whole row keeps the accent
+    // highlight, so the user tag cell is the highlight fg (black),
+    // not the `Accent` tone.
+    assert_ne!(buf[(tag_x, list.y + 1)].fg, accent, "the cursor row keeps the accent highlight");
+    // Row 1: the `bash` call. Row 2: its result. Both tool rows
+    // take the `ToolName` tone.
+    assert_eq!(buf[(tag_x, list.y + 2)].fg, tool, "the tool call row tag is the ToolName tone");
+    assert_eq!(buf[(tag_x, list.y + 3)].fg, tool, "the tool result row tag is the ToolName tone");
+    // Row 3: the assistant row takes the `Report` tone; its preview
+    // text stays plain.
+    assert_eq!(buf[(tag_x, list.y + 4)].fg, report, "the assistant row tag is the Report tone");
+    assert_eq!(
+        buf[(tag_x + 12, list.y + 4)].fg,
+        plain,
+        "the tag color stops at the tag; the preview stays plain"
+    );
 }

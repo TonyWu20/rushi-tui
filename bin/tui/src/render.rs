@@ -1285,11 +1285,13 @@ fn wrap_styled(segs: Vec<(Style, String)>, width: usize) -> Vec<Line<'static>> {
 /// cells, preserving segment styling across wrap points.
 ///
 /// Each input line is a `Vec<Seg>` (one hard line of the previewer
-/// output). Each output line is at most `width` cells: words wrap at
-/// spaces, and a word longer than the width is hard-broken. A hard
-/// line whose segments are all empty (a blank line) yields one empty
-/// display line, so blank lines stay visible. Re-running this every
-/// frame with the pane's current inner width is what makes the
+/// output). Segments of one line flow continuously: word-wrapping
+/// crosses segment (style) boundaries, and a newline inside a
+/// segment's text is a hard break. Each output line is at most
+/// `width` cells; a word longer than the width hard-breaks. A hard
+/// line whose segments are all empty (a blank line) yields one
+/// empty display line, so blank lines stay visible. Re-running this
+/// every frame with the pane's current inner width is what makes the
 /// preview pane reflow when the terminal resizes instead of
 /// clipping (docs/tui-ratatui-ecosystem-audit.md §4.8).
 pub fn wrap_hard_lines(
@@ -1304,7 +1306,10 @@ pub fn wrap_hard_lines(
                 // A blank line: keep exactly one empty display row.
                 return vec![Line::from("")];
             }
-            wrap_styled(segs.clone(), width)
+            // One hard line's segments flow as a continuous stream:
+            // word-wrapping crosses segment (style) boundaries, and a
+            // '\n' inside a segment text stays a hard break.
+            wrap_styled_continuous(segs, width)
         })
         .collect()
 }
@@ -4773,7 +4778,16 @@ pub fn draw(
         let rows = layout.list.height.saturating_sub(2).max(1) as usize;
         app.picker().visible = rows;
 
-        let hints = "enter ok · esc keep · ctrl-j/ctrl-k move · ctrl-p preview · ctrl-i scope";
+        // The picker input-bar hints. `Tab` completes the
+        // highlighted item into the draft; `Ctrl+T` cycles the file
+        // scope (docs/tree-ui-design-from-human-phase-2.md item 5);
+        // `Ctrl+Shift+P` toggles list/preview focus (item 4).
+        let mut hints = String::from(
+            "enter ok · esc keep · ctrl-j/k move · ctrl-p preview · ctrl-shift-p focus · tab complete · ctrl-t scope",
+        );
+        if app.picker_ref().focus == crate::float::Focus::Preview {
+            hints.push_str(" · preview focus");
+        }
         // Clone the palette so the mutable picker borrow below does not
         // overlap an immutable borrow of the same app.
         let palette = app.palette().clone();
@@ -4783,7 +4797,7 @@ pub fn draw(
             .snapshot(&snap)
             .layout(&layout)
             .previewer(&previewer)
-            .hints(hints)
+            .hints(&hints)
             .palette(&palette)
             .cursor(cursor)
             .call();

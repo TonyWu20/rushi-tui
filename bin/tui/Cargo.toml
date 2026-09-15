@@ -48,6 +48,14 @@ rushi-common = { git = "https://github.com/TonyWu20/rushi", branch = "main" }
 notify = "8.2.0"
 notify-debouncer-mini = "0.7"
 ansi-to-tui = "8.0.1"
+# Tree-pane preview pipeline (docs/tree-ui-design-from-human-phase-2.md
+# item 2): parse tool-call/tool-result JSON and pretty-print it.
+# `jaq` is the CLI crate and is NOT the dependency. `jaq-core` is the
+# filter engine (provides the parse context); `jaq-json` is the JSON
+# value / reader / writer half. Pinned per the phase-2 spec
+# (crates.io-verified 2026-09-15).
+jaq-core = "3.1.1"
+jaq-json = "2.0.3"
 
 [dev-dependencies]
 insta = "1.48.0"

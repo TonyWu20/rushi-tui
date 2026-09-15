@@ -74,6 +74,15 @@ impl TermGuard {
         out.execute(terminal::EnterAlternateScreen)?;
         terminal::enable_raw_mode()?;
         out.execute(cevent::EnableMouseCapture)?;
+        // Progressive enhancement: terminals that speak the kitty
+        // keyboard protocol report keyed input as CSI-u, so
+        // `Ctrl+Shift+P` carries the shift modifier and stays
+        // distinct from `Ctrl+P` (docs/tree-ui-design-from-human-
+        // phase-2.md item 4). Legacy terminals ignore the sequence
+        // and keep sending plain bytes; `BackTab` covers that case.
+        out.execute(cevent::PushKeyboardEnhancementFlags(
+            cevent::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
+        ))?;
         Ok(TermGuard)
     }
 }
@@ -83,6 +92,9 @@ impl Drop for TermGuard {
         let _ = terminal::disable_raw_mode();
         let mut out = std::io::stdout();
         let _ = out.execute(cevent::DisableMouseCapture);
+        // Pop the keyboard-enhancement stack on the way out so the
+        // terminal returns to its default key reporting.
+        let _ = out.execute(cevent::PopKeyboardEnhancementFlags);
         crossterm::execute!(out, terminal::LeaveAlternateScreen, crossterm::cursor::Show).ok();
         let _ = out.flush();
     }
@@ -114,23 +126,43 @@ fn install_shutdown_handlers() {
 /// Map a crossterm key event to the app-level [`Key`].
 fn key_input(k: &cevent::KeyEvent) -> Option<Key> {
     if k.modifiers.contains(cevent::KeyModifiers::CONTROL) {
-        return match k.code {
-            cevent::KeyCode::Char('c') => Some(Key::CtrlC),
-            cevent::KeyCode::Char('e') => Some(Key::CtrlE),
-            cevent::KeyCode::Char('j') => Some(Key::CtrlJ),
-            cevent::KeyCode::Char('k') => Some(Key::CtrlK),
-            cevent::KeyCode::Char('o') => Some(Key::CtrlO),
-            cevent::KeyCode::Char('t') => Some(Key::CtrlT),
-            cevent::KeyCode::Char('x') => Some(Key::CtrlX),
-            cevent::KeyCode::Char('f') => Some(Key::CtrlF),
-            cevent::KeyCode::Char('l') => Some(Key::CtrlL),
-            cevent::KeyCode::Char('p') => Some(Key::CtrlP),
-            cevent::KeyCode::Char('i') => Some(Key::CtrlI),
-            cevent::KeyCode::Char('q') => Some(Key::Quit),
-            cevent::KeyCode::Char('r') => Some(Key::CtrlR),
-            cevent::KeyCode::Char('u') => Some(Key::CtrlU),
-            cevent::KeyCode::Char('d') => Some(Key::CtrlD),
-            cevent::KeyCode::Char('z') => Some(Key::CtrlZ),
+        // Legacy terminals send the control byte and crossterm
+        // reports the lowercase letter. Terminals that speak the
+        // kitty keyboard protocol report the base letter as its
+        // uppercase codepoint. Accept both forms.
+        let letter = match k.code {
+            cevent::KeyCode::Char(c) => c.to_ascii_uppercase(),
+            _ => return None,
+        };
+        return match letter {
+            'C' => Some(Key::CtrlC),
+            'E' => Some(Key::CtrlE),
+            'J' => Some(Key::CtrlJ),
+            'K' => Some(Key::CtrlK),
+            'O' => Some(Key::CtrlO),
+            'T' => Some(Key::CtrlT),
+            'X' => Some(Key::CtrlX),
+            'F' => Some(Key::CtrlF),
+            'L' => Some(Key::CtrlL),
+            // `Ctrl+Shift+P` is the list/preview focus toggle
+            // (docs/tree-ui-design-from-human-phase-2.md item 4).
+            // Terminals that report the shift modifier send it here;
+            // legacy terminals send plain `Ctrl+P` (byte 0x10),
+            // which keeps the preview-toggle binding. `BackTab`
+            // covers that case.
+            'P' => {
+                if k.modifiers.contains(cevent::KeyModifiers::SHIFT) {
+                    Some(Key::CtrlShiftP)
+                } else {
+                    Some(Key::CtrlP)
+                }
+            }
+            'I' => Some(Key::CtrlI),
+            'Q' => Some(Key::Quit),
+            'R' => Some(Key::CtrlR),
+            'U' => Some(Key::CtrlU),
+            'D' => Some(Key::CtrlD),
+            'Z' => Some(Key::CtrlZ),
             _ => None,
         };
     }
@@ -1554,4 +1586,113 @@ fn edit_in_terminal(
 
 fn finish(term: &mut Terminal<CrosstermBackend<std::io::Stdout>>) {
     let _ = term.clear();
+}
+
+#[cfg(test)]
+mod key_input_tests {
+    //! The crossterm-to-app key map for the tree-ui phase-2 keys
+    //! (docs/tree-ui-design-from-human-phase-2.md items 4, 5):
+    //! `Ctrl+Shift+P` must reach the app as a distinct key, and the
+    //! `Tab` / `Ctrl+I` split must stay as wired.
+
+    use super::{key_input, Key};
+    use crossterm::event as cevent;
+
+    fn key(code: cevent::KeyCode, modifiers: cevent::KeyModifiers) -> cevent::KeyEvent {
+        cevent::KeyEvent {
+            code,
+            modifiers,
+            kind: cevent::KeyEventKind::Press,
+            state: cevent::KeyEventState::NONE,
+        }
+    }
+
+    /// `Tab` is the completion key (item 5).
+    #[test]
+    fn tab_maps_to_key_tab() {
+        assert_eq!(
+            key_input(&key(
+                cevent::KeyCode::Tab,
+                cevent::KeyModifiers::NONE
+            )),
+            Some(Key::Tab)
+        );
+    }
+
+    /// `Ctrl+I` (reported distinctly by the terminal) maps to
+    /// `Key::CtrlI`, the scope-cycle key (item 5).
+    #[test]
+    fn ctrl_i_maps_to_key_ctrl_i() {
+        assert_eq!(
+            key_input(&key(
+                cevent::KeyCode::Char('i'),
+                cevent::KeyModifiers::CONTROL
+            )),
+            Some(Key::CtrlI)
+        );
+    }
+
+    /// Plain `Ctrl+P` (no shift) keeps the preview-toggle binding.
+    #[test]
+    fn ctrl_p_without_shift_maps_to_ctrl_p() {
+        assert_eq!(
+            key_input(&key(
+                cevent::KeyCode::Char('p'),
+                cevent::KeyModifiers::CONTROL
+            )),
+            Some(Key::CtrlP)
+        );
+    }
+
+    /// A shift-held `Ctrl+P` is the focus-toggle key (item 4).
+    #[test]
+    fn ctrl_shift_p_maps_to_key_ctrl_shift_p() {
+        assert_eq!(
+            key_input(&key(
+                cevent::KeyCode::Char('p'),
+                cevent::KeyModifiers::CONTROL | cevent::KeyModifiers::SHIFT
+            )),
+            Some(Key::CtrlShiftP)
+        );
+    }
+
+    /// Under the kitty keyboard protocol the base letter arrives as
+    /// its uppercase codepoint (item 4): `Ctrl+P` stays the
+    /// preview toggle.
+    #[test]
+    fn ctrl_p_protocol_form_maps_to_ctrl_p() {
+        assert_eq!(
+            key_input(&key(
+                cevent::KeyCode::Char('P'),
+                cevent::KeyModifiers::CONTROL
+            )),
+            Some(Key::CtrlP)
+        );
+    }
+
+    /// Under the kitty keyboard protocol, a shift-held `Ctrl+P`
+    /// reports `Char('P')` with both modifiers: the focus-toggle
+    /// key (item 4).
+    #[test]
+    fn ctrl_shift_p_protocol_form_maps_to_key_ctrl_shift_p() {
+        assert_eq!(
+            key_input(&key(
+                cevent::KeyCode::Char('P'),
+                cevent::KeyModifiers::CONTROL | cevent::KeyModifiers::SHIFT
+            )),
+            Some(Key::CtrlShiftP)
+        );
+    }
+
+    /// `BackTab` is the legacy focus-toggle fallback (item 4).
+    #[test]
+    fn back_tab_maps_to_key_back_tab() {
+        assert_eq!(
+            key_input(&key(
+                cevent::KeyCode::BackTab,
+                cevent::KeyModifiers::NONE
+            )),
+            Some(Key::BackTab)
+        );
+    }
 }

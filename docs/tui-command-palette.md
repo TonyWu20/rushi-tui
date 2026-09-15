@@ -74,15 +74,31 @@ is not a text edit:
 - In normal mode, `:` first cancels a pending operator. `d:` drops
   the `d` and opens the palette, matching vim.
 - The palette owns its key table while open. While it is open:
-  - printable chars and Backspace edit the query
-  - `j` / `k` or `Ctrl+J` / `Ctrl+K` move the cursor
-  - `PgUp` / `PgDn` page, `Home` / `End` jump
+  - printable chars and Backspace edit the query. Plain `j` and
+    `k` also type into the query (tree-ui phase 2, item 4).
+  - `Ctrl+J` / `Ctrl+K` or the arrows move the cursor. Every float
+    list wraps at both ends.
+  - `PgUp` / `PgDn` page, wrapping at both ends. `Home` / `End`
+    jump.
   - `Enter` commits the highlighted item
   - `Esc` closes, dropping any sub-stage
   - `Ctrl+P` toggles the preview pane
-  - `Ctrl+U` / `Ctrl+D` scroll the preview pane
+  - `Ctrl+Shift+P` toggles list/preview focus (item 4). The TUI
+    requests the kitty keyboard protocol at startup so capable
+    terminals report the shift modifier; `BackTab` is the legacy
+    fallback where it arrives as plain byte 0x10. The focused
+    preview pane gets a green (`Success`) border.
+  - `Ctrl+U` / `Ctrl+D` half-page scroll the focused pane (item 4)
+  - `Ctrl+F` cycles the event-type filter in the tree stage only
+    (item 3). The active value shows in the input-bar hint, e.g.
+    `[f: tool]`.
+  - `Tab` completes the highlighted item: it replaces the typed
+    query (or the filter after the goto prefix) with the item's
+    full text, like the picker's `@<path>` model, and keeps the
+    window open (item 5).
 - Host keys pass through unchanged: `Ctrl+C` (stop), `Ctrl+R`
-  (run), `Tab` / `Shift+Tab`, and `q` when the quit gate is open.
+  (run), and `q` when the quit gate is open. `Tab` is no longer a
+  pass-through. It completes the highlighted item.
 - `Alt+Up` does not open the palette. It recalls the pending
   message queue, a separate feature in
   `docs/user-message-editing.md`.
@@ -327,10 +343,15 @@ P1. colon-trigger: given the `:` keypress in normal mode with an empty
     draft, observe the floating command palette open over the
     transcript; a non-empty draft does not block the open.
 P2. key-table: given the palette is open, observe printable characters
-    and Backspace edit the query, `j`/`k` and `Ctrl+J`/`Ctrl+K` move
-    the cursor, `Enter` commits, `Esc` closes dropping any sub-stage,
-    `Ctrl+P` toggles the preview pane, and host keys (`Ctrl+C`,
-    `Ctrl+R`, `Tab`, `Shift+Tab`, `q` when quit gate open) pass
+    and Backspace edit the query, `Ctrl+J`/`Ctrl+K` or the arrows
+    move the cursor with ring wrap, `Enter` commits, `Esc` closes
+    dropping any sub-stage, `Ctrl+P` toggles the preview pane,
+    `Ctrl+Shift+P` (or `BackTab`) toggles list/preview focus,
+    `Ctrl+U`/`Ctrl+D` half-page scroll the focused pane, `Ctrl+F`
+    cycles the event-type filter in the tree stage, and `Tab`
+    replaces the typed filter text with the highlighted item's
+    text (tree-ui phase 2 items 4, 5).
+    `Ctrl+C`, `Ctrl+R`, and `q` when the quit gate is open pass
     through unchanged.
 P3. command-kinds: given a `Run` item, observe `Enter` fires the
     action and closes; given a `Set` item, observe `Enter` applies the

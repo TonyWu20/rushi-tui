@@ -861,3 +861,56 @@ fn picker_preview_cancel_inflight() {
     assert!(double_q_quit(&mut pty, 4.0), "still running after double-q");
     let _ = std::fs::remove_dir_all(&fix);
 }
+
+/// Item 4 end-to-end: the TUI enables the kitty keyboard protocol at
+/// startup, so a `Ctrl+Shift+P` press encoded as CSI-u (`\x1b[80;6u`,
+/// codepoint 80 = `P`, modifier 6 = 1+shift+ctrl) toggles the float's
+/// focus to the preview pane.
+#[test]
+fn csi_u_ctrl_shift_p_toggles_preview_focus() {
+    // Wide terminal so the full input-bar hint stays visible.
+    let mut pty = Pty::spawn_in_sized(
+        tui_bin(),
+        "tui-test",
+        &repo_cfg(),
+        None,
+        std::path::Path::new("."),
+        40,
+        200,
+    );
+    pty.pump(1.5);
+    assert!(pty.alive(), "process died during startup");
+    // The TUI boots in insert mode. Esc returns to normal mode;
+    // only in normal mode does `:` open the command palette.
+    pty.write_input(b"\x1b");
+    pty.pump(0.3);
+    pty.write_input(b":");
+    pty.pump(0.7);
+    let text = pty.screen.text().to_string();
+    assert!(
+        text.contains("enter ok"),
+        "the palette did not open:\n{text}"
+    );
+    // Protocol-form `Ctrl+Shift+P`: focus moves to the preview pane.
+    pty.write_input(b"\x1b[80;6u");
+    pty.pump(0.7);
+    let text = pty.screen.text().to_string();
+    assert!(
+        text.contains("preview focus"),
+        "the focus hint is missing after CSI-u Ctrl+Shift+P:\n{text}"
+    );
+    // Press it again: focus returns to the list, the hint disappears.
+    pty.write_input(b"\x1b[80;6u");
+    pty.pump(0.7);
+    let text = pty.screen.text().to_string();
+    assert!(
+        !text.contains("preview focus"),
+        "the focus hint must be gone after toggling back:\n{text}"
+    );
+    pty.kill(libc::SIGTERM);
+    let end = Instant::now() + Duration::from_secs(10);
+    while pty.alive() && Instant::now() < end {
+        pty.pump(0.2);
+    }
+    pty.reap();
+}

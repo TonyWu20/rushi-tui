@@ -10,9 +10,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 use ratatui::Frame;
 
-use crate::float::FloatLayout;
+use crate::float::{Focus, FloatLayout};
 use crate::palette::items::PaletteItem;
-use crate::palette::preview::render_preview;
+use crate::palette::preview::{footer_for_stage, render_preview};
 use crate::palette::state::PaletteState;
 
 /// Draw the palette body into a pre-computed float layout.
@@ -68,12 +68,24 @@ pub fn render_palette<'frame>(
         }
     }
 
-    // The input bar: the `:query` prompt and key hints.
+    // The input bar: the `:query` prompt and key hints. The hints
+    // reflect the new keys, the active filter, and the focused pane
+    // (docs/tree-ui-design-from-human-phase-2.md items 3, 4, 5).
+    let mut hints = String::from(
+        "enter ok · esc close · ctrl-j/k move · ctrl-p preview · ctrl-shift-p focus · tab complete",
+    );
+    if state.stage == crate::palette::state::PaletteStage::TreeList {
+        // The active filter shows in the hint, e.g. `[f: tool]`.
+        // It leads the hint so a narrow float cannot clip it.
+        hints = format!("[f: {}] · {hints}", state.tree_filter.label());
+    }
+    if state.focus == Focus::Preview {
+        hints.push_str(" · preview focus");
+    }
     let query_display = format!(":{}", state.query);
     let query_len = query_display.chars().count();
     let prose = palette.color(crate::color::Role::PlainText);
     let hint_style = Style::default().fg(palette.color(crate::color::Role::Hint));
-    let hints = "j/k move · enter ok · esc close · ctrl-p preview";
     let input_line = Line::from(vec![
         Span::styled(
             query_display.clone(),
@@ -88,6 +100,17 @@ pub fn render_palette<'frame>(
     let caret = layout.input.x + query_len as u16;
     let max_x = layout.input.x + layout.input.width.saturating_sub(1);
     *cursor = Some((caret.min(max_x), layout.input.y));
+}
+
+/// Split a tree-row label into its leading type tag (the first
+/// whitespace-delimited token, brackets included) and the rest of
+/// the label, delimiter and all. A label without a space is its own
+/// tag and the rest is empty.
+fn split_tag(label: &str) -> (&str, &str) {
+    match label.find(' ') {
+        Some(i) => (&label[..i], &label[i..]),
+        None => (label, ""),
+    }
 }
 
 /// Draw the command list in the left (or top) pane.
@@ -144,12 +167,35 @@ fn render_list(
                 item.label.clone()
             };
 
+            // The label: the leading type tag carries its class color
+            // (docs/tree-ui-design-from-human-phase-2.md item 1).
+            // The cursor row keeps the accent highlight over the
+            // whole row, so the tag color applies to plain rows only.
+            let label_spans: Vec<Span> = if is_cursor {
+                vec![Span::styled(label_display, label_style)]
+            } else {
+                match item.tag_fg {
+                    Some(role) => {
+                        let (tag, rest) = split_tag(&label_display);
+                        let mut spans = vec![Span::styled(
+                            tag.to_string(),
+                            Style::default().fg(palette.color(role)),
+                        )];
+                        if !rest.is_empty() {
+                            spans.push(Span::styled(rest.to_string(), label_style));
+                        }
+                        spans
+                    }
+                    None => vec![Span::styled(label_display, label_style)],
+                }
+            };
+
             let mut spans: Vec<Span> = vec![
                 Span::styled(marker, marker_style),
                 Span::styled(kind_marker.to_string(), label_style),
                 Span::styled(" ", label_style),
-                Span::styled(label_display, label_style),
             ];
+            spans.extend(label_spans);
 
             // Show the hint (current value or keybinding) after the label.
             if !item.hint.is_empty() {
@@ -192,7 +238,15 @@ fn render_preview_pane(
         item.label.clone()
     };
 
-    let content = render_preview(item, state.option_cursor, palette);
+    // The tree stage shows the "Enter offers the four options"
+    // suffix as a plain line after the highlighted body
+    // (docs/tree-ui-design-from-human-phase-2.md item 2).
+    let footer = footer_for_stage(&state.stage);
+    // The highlighted body is cached per event seq in the state's
+    // LRU bound (docs/tui-preview-pane-plan.md, windowed
+    // highlighting).
+    let content =
+        render_preview(item, state.option_cursor, palette, footer, &mut state.tree_preview_cache);
     let pane_h = preview_rect.height as usize;
     // The block border consumes 2 rows (top + bottom) and 2 columns
     // (left + right).
@@ -251,9 +305,17 @@ fn render_preview_pane(
         .cloned()
         .collect();
 
+    // The focused preview pane gets a green border
+    // (docs/tree-ui-design-from-human-phase-2.md item 4). Unfocused
+    // panes keep the `Status` border.
+    let border_role = if state.focus == Focus::Preview {
+        crate::color::Role::Success
+    } else {
+        crate::color::Role::Status
+    };
     let preview_block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(palette.color(crate::color::Role::Status)))
+        .border_style(Style::default().fg(palette.color(border_role)))
         .title(Line::from(Span::styled(
             header,
             Style::default().fg(palette.color(crate::color::Role::Hint)),
