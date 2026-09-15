@@ -251,6 +251,20 @@ impl Pty {
         Self::spawn_in_sized(bin, session, cfg, extra_path, cwd, 24, 80)
     }
 
+    /// Spawn with a custom window size, inheriting the test cwd.
+    /// The transcript tests that need more than the default 24 rows
+    /// use this; the picker file list is not under test there.
+    pub fn spawn_sized(
+        bin: &str,
+        session: &str,
+        cfg: &Path,
+        extra_path: Option<&str>,
+        rows: usize,
+        cols: usize,
+    ) -> Self {
+        Self::spawn_inner(bin, session, cfg, extra_path, None, rows, cols)
+    }
+
     /// Like `spawn_in` with a custom window size. The picker's
     /// preview pane drops out of the float layout below 85 columns,
     /// so the preview tests (docs/tui-preview-pane-plan.md, plan

@@ -417,6 +417,33 @@ fn ext_statusline_slowgit() {
     assert!(orphans.is_empty(), "orphan layer processes: {orphans:?}");
 }
 
+/// Open every fold so the full transcript is visible on screen.
+/// The editor starts in insert mode, so escape to normal first.
+/// The double-s gate then enters browse mode. There, `z R` runs
+/// `fold_open_all` (docs/tui-turn-fold.md). The shared `turn_fold`
+/// set drives both views, so the main view shows the content too.
+fn open_all_folds(pty: &mut Pty) {
+    pty.write_input(b"\x1b");
+    pty.pump(0.3);
+    pty.write_input(b"s");
+    pty.pump(0.3);
+    pty.write_input(b"s");
+    pty.pump(0.4);
+    pty.write_input(b"z");
+    pty.pump(0.2);
+    pty.write_input(b"R");
+    pty.pump(0.4);
+}
+
+/// Leave browse mode with the double-s exit gate. The fold state
+/// survives: the `turn_fold` set is shared by both views.
+fn leave_browse(pty: &mut Pty) {
+    pty.write_input(b"s");
+    pty.pump(0.3);
+    pty.write_input(b"s");
+    pty.pump(0.4);
+}
+
 #[test]
 fn ext_tool_result_kill() {
     ensure_ext_bins();
@@ -433,6 +460,10 @@ fn ext_tool_result_kill() {
     seed_session(&sessions, "tui-test-ext", &seed_events());
     let log = sessions.join("tui-test-ext/events.jsonl");
     let mut pty = Pty::spawn(tui_bin(), "tui-test-ext", &cfg, None);
+    // The turn-fold rescope (docs/tui-turn-fold.md) leaves turns
+    // collapsed by default. Open every fold so the ext-rendered
+    // body is on screen.
+    open_all_folds(&mut pty);
     let missing = wait_markers(&mut pty, &["[ext] tool:call_1"], 15.0, 10.0);
     assert!(pty.alive(), "process died during startup");
     assert!(
@@ -440,12 +471,20 @@ fn ext_tool_result_kill() {
         "tool_result ext state not shown: {missing:?}\n{}",
         pty.screen.text()
     );
+    // Kill the ext and latch the "dead" flash as it fires. The
+    // flash has a 4 s TTL, so latching during the loop keeps the
+    // catch reliable.
+    let mut saw_dead = false;
     let kill_end = Instant::now() + Duration::from_secs(10);
     while Instant::now() < kill_end {
         for p in procs_with_cwd_under(&tr_dir, true) {
             unsafe {
                 libc::kill(p as i32, libc::SIGKILL);
             }
+        }
+        pty.pump(0.25);
+        if pty.screen.text().contains("ext tool_result is dead") {
+            saw_dead = true;
         }
         std::thread::sleep(Duration::from_millis(500));
     }
@@ -460,15 +499,21 @@ fn ext_tool_result_kill() {
         let mut f = std::fs::OpenOptions::new().append(true).open(&log).unwrap();
         f.write_all(extra.as_bytes()).unwrap();
     }
-    let mut saw_dead = false;
+    // The late call_9 block arrives folded, at the transcript
+    // tail. Each pass re-opens every fold and jumps to the tail.
+    // The z R catches the block once the tailer ingests it. The G
+    // keeps the tail in view, so the builtin body reaches the
+    // screen.
     let mut saw_builtin = false;
     let end = Instant::now() + Duration::from_secs(15);
-    while !(saw_dead && saw_builtin) {
+    while !saw_builtin {
+        pty.write_input(b"z");
+        pty.pump(0.1);
+        pty.write_input(b"R");
+        pty.pump(0.1);
+        pty.write_input(b"G");
         pty.pump(0.25);
         let text = pty.screen.text();
-        if text.contains("ext tool_result is dead") {
-            saw_dead = true;
-        }
         if text.contains("late result") && !text.contains("[ext] tool:call_9") {
             saw_builtin = true;
         }
@@ -486,6 +531,8 @@ fn ext_tool_result_kill() {
         "the builtin tool_result row did not show:\n{}",
         pty.screen.text()
     );
+    // Back to the main view, so the q q quit gate is live.
+    leave_browse(&mut pty);
     assert!(double_q_quit(&mut pty, 4.0), "still running after double-q");
     let orphans = settled_orphans(&layer, 6.0);
     assert!(orphans.is_empty(), "orphan layer processes: {orphans:?}");
@@ -527,7 +574,13 @@ fn ext_mermaid() {
     ];
     let (cfg, sessions) = layer_cfg(&layer, Some("smoke-model"));
     seed_session(&sessions, "tui-test-mmd", &events);
-    let mut pty = Pty::spawn(tui_bin(), "tui-test-mmd", &cfg, None);
+    // The diagram plus both messages span more than the default 24
+    // rows, so spawn a taller window.
+    let mut pty = Pty::spawn_sized(tui_bin(), "tui-test-mmd", &cfg, None, 50, 80);
+    // The turn-fold rescope (docs/tui-turn-fold.md) leaves turns
+    // collapsed by default. Open every fold so both messages sit on
+    // screen.
+    open_all_folds(&mut pty);
     let missing = wait_markers(
         &mut pty,
         &["\u{2502} A \u{2502}", "not a diagram"],
@@ -545,6 +598,8 @@ fn ext_mermaid() {
         !text.contains("graph TD"),
         "the raw fence leaked into the screen:\n{text}"
     );
+    // Back to the main view, so the q q quit gate is live.
+    leave_browse(&mut pty);
     assert!(double_q_quit(&mut pty, 4.0), "still running after double-q");
     let orphans = settled_orphans(&layer, 6.0);
     assert!(orphans.is_empty(), "orphan layer processes: {orphans:?}");

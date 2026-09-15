@@ -2514,21 +2514,27 @@ fn reader_thread(inner: Arc<HostInner>, idx: usize, stdout: std::fs::File) {
 /// One extension process: the pid plus the parent's pipe ends.
 pub struct ExtChild {
     pid: i32,
+    /// Signal that stopped the child, or 0 for a normal exit.
+    /// Set by [`ExtChild::wait`].
+    term_sig: i32,
 }
 
 impl ExtChild {
     /// Wait for the extension to exit. Returns the exit code, or
     /// `-1` when killed by a signal. The monitor thread is the only
-    /// caller, so the child is reaped there.
-    fn wait(&self) -> i32 {
+    /// caller, so the child is reaped there. Records the stop signal
+    /// in `term_sig` (0 on a normal exit).
+    fn wait(&mut self) -> i32 {
         let mut status = 0i32;
         let r = unsafe { libc::waitpid(self.pid, &mut status, 0) };
         if r != self.pid {
             return -1;
         }
         if libc::WIFEXITED(status) {
+            self.term_sig = 0;
             libc::WEXITSTATUS(status)
         } else {
+            self.term_sig = libc::WTERMSIG(status);
             -1
         }
     }
@@ -2684,7 +2690,13 @@ fn spawn_gen(
                 let stdout = std::fs::File::from_raw_fd(out_pipe[0]);
                 slot.pid.store(n, Ordering::SeqCst);
                 *slot.stdin.lock().unwrap() = Some(BufWriter::new(stdin));
-                Ok((ExtChild { pid: n }, Some(stdout)))
+                Ok((
+                    ExtChild {
+                        pid: n,
+                        term_sig: 0,
+                    },
+                    Some(stdout),
+                ))
             }
         }
     }
@@ -2707,7 +2719,7 @@ fn monitor_thread(
     let mut gen: Option<(ExtChild, Option<std::fs::File>)> = Some(first);
     let mut attempt: usize = 0;
     loop {
-        if let Some((child, so)) = gen.take() {
+        if let Some((mut child, so)) = gen.take() {
             if let Some(so) = so {
                 let rinner = inner.clone();
                 std::thread::Builder::new()
@@ -2717,8 +2729,8 @@ fn monitor_thread(
             }
             let code = child.wait();
             ext_log(&format!(
-                "death {} gen={} exit={}",
-                slot.name, attempt, code
+                "death {} gen={} exit={} sig={}",
+                slot.name, attempt, code, child.term_sig
             ));
         }
         // The generation ended: it exited, or the last spawn failed.
