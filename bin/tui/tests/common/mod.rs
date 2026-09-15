@@ -278,7 +278,7 @@ impl Pty {
     ) -> Self {
         let mut amaster: libc::c_int = 0;
         let mut aslave: libc::c_int = 0;
-        let mut winsz = libc::winsize {
+        let winsz = libc::winsize {
             ws_row: rows as u16,
             ws_col: cols as u16,
             ws_xpixel: 0,
@@ -290,7 +290,7 @@ impl Pty {
                 &mut aslave,
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
-                &mut winsz,
+                &winsz,
             ) != 0
             {
                 panic!("openpty failed: {}", std::io::Error::last_os_error());
@@ -325,7 +325,7 @@ impl Pty {
                 let c_sess = CString::new(session).expect("session has no NUL");
                 let c_cfg = CString::new(cfg.to_string_lossy().as_ref()).expect("cfg has no NUL");
                 let c_flag = c"--config";
-                let args = vec![
+                let args = [
                     c_bin.as_ptr(),
                     c_sess.as_ptr(),
                     c_flag.as_ptr(),
@@ -577,7 +577,7 @@ fn is_zombie(pid: u32) -> bool {
             // Field 3 after the parenthesized comm field is the state.
             let rest = s.rsplit(')').next()?;
             rest.split_whitespace()
-                .nth(0)?
+                .next()?
                 .chars()
                 .next()
                 .map(|c| c == 'Z')
@@ -641,7 +641,7 @@ pub fn cleanup_layer(child: i32, prefix: &Path) {
 
 pub fn purge_strays() {
     let exts = exts_root();
-    let prefixes = vec![exts.join("ui_extensions"), exts.join("ext-rs")];
+    let prefixes = [exts.join("ui_extensions"), exts.join("ext-rs")];
     let mut killed = 0usize;
     for d in std::fs::read_dir("/proc").into_iter().flatten() {
         let Ok(d) = d else { continue };

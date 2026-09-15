@@ -24,7 +24,7 @@ use crate::color::{Palette, Role};
 // frame does not re-parse.
 #[cfg(test)]
 thread_local! {
-    pub(crate) static MARKDOWN_PARSE_CALLS: std::cell::Cell<u32> = std::cell::Cell::new(0);
+    pub(crate) static MARKDOWN_PARSE_CALLS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
 /// A [`RichTextTheme`] backed by the TUI's active [`Palette`].

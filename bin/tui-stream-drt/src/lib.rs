@@ -406,16 +406,16 @@ pub mod line {
             for bad in [
                 "garbage",
                 "",
-                "2 0 0: 0 0",      // ft not a bit
-                "1 x 0: 0 0",      // scroll not decimal
-                "1 0 1:zz 0 0",    // bad hex
-                "1 0 1:6 0 0",     // odd-length hex
-                "1 0 2:61 0 0",    // count/length mismatch
-                "1 0 0: 2 0",      // 4 fields
-                "1 0 0: 0 0 0",    // 6 fields
-                "1 0 0: 0 1,0,0",  // settled count mismatch
-                "1 0 0: 0 2,0,0,0",// trailing token after m responses
-                "1 0 0: 0 0,1",    // token after a zero response count
+                "2 0 0: 0 0",       // ft not a bit
+                "1 x 0: 0 0",       // scroll not decimal
+                "1 0 1:zz 0 0",     // bad hex
+                "1 0 1:6 0 0",      // odd-length hex
+                "1 0 2:61 0 0",     // count/length mismatch
+                "1 0 0: 2 0",       // 4 fields
+                "1 0 0: 0 0 0",     // 6 fields
+                "1 0 0: 0 1,0,0",   // settled count mismatch
+                "1 0 0: 0 2,0,0,0", // trailing token after m responses
+                "1 0 0: 0 0,1",     // token after a zero response count
             ] {
                 assert_eq!(run(bad), None, "{bad}");
             }
@@ -458,10 +458,7 @@ mod tests {
     /// settles to "abcd" (one transcript entry).
     #[test]
     fn ex_stream_hello() {
-        let v = run_response(
-            &View::initial(),
-            &[vec![b'a', b'b'], vec![b'c', b'd']],
-        );
+        let v = run_response(&View::initial(), &[vec![b'a', b'b'], vec![b'c', b'd']]);
         assert_eq!(v.settled, vec![vec![b'a', b'b', b'c', b'd']]);
     }
 
@@ -469,10 +466,7 @@ mod tests {
     /// draft is cleared.
     #[test]
     fn ex_stream_clean() {
-        let v = run_response(
-            &View::initial(),
-            &[vec![b'a', b'b'], vec![b'c', b'd']],
-        );
+        let v = run_response(&View::initial(), &[vec![b'a', b'b'], vec![b'c', b'd']]);
         assert!(v.draft.is_empty());
     }
 
@@ -487,10 +481,7 @@ mod tests {
     /// The spec's `ex_two_responses`: two responses settle in order.
     #[test]
     fn ex_two_responses() {
-        let v = run_responses(
-            &View::initial(),
-            &[vec![vec![b'a']], vec![vec![b'b']]],
-        );
+        let v = run_responses(&View::initial(), &[vec![vec![b'a']], vec![vec![b'b']]]);
         assert_eq!(v.settled, vec![vec![b'a'], vec![b'b']]);
     }
 
@@ -507,7 +498,10 @@ mod tests {
         };
         let r = vec![vec![b'1', b'2'], vec![b'3']];
         let out = run_response(&v, &r);
-        assert_eq!(out.settled, vec![vec![b'o', b'l', b'd'], vec![b'x', b'1', b'2', b'3']]);
+        assert_eq!(
+            out.settled,
+            vec![vec![b'o', b'l', b'd'], vec![b'x', b'1', b'2', b'3']]
+        );
     }
 
     /// P2 clean settle: the draft is empty after every response.
@@ -558,16 +552,9 @@ mod tests {
     fn p6_multi_converges() {
         let out = run_responses(
             &View::initial(),
-            &[
-                vec![vec![b'a'], vec![b'b']],
-                Vec::new(),
-                vec![vec![b'c']],
-            ],
+            &[vec![vec![b'a'], vec![b'b']], Vec::new(), vec![vec![b'c']]],
         );
-        assert_eq!(
-            out.settled,
-            vec![vec![b'a', b'b'], Vec::new(), vec![b'c']]
-        );
+        assert_eq!(out.settled, vec![vec![b'a', b'b'], Vec::new(), vec![b'c']]);
     }
 
     /// The initial view: empty transcript, following the tail.

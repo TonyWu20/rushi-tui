@@ -27,7 +27,6 @@ use crate::port::SessionId;
 use crate::render::draw;
 use crate::tool_display::Preset;
 use crate::tool_display::ToolDisplay;
-use serde_json;
 
 // ── shared harness ──────────────────────────────────────────────────
 
@@ -913,7 +912,7 @@ fn palette_preview_wide_help_line_wraps() {
         label: "demo".into(),
         kind: CmdKind::Set,
         hint: String::new(),
-        help: help,
+        help,
         options: vec![CmdOption {
             value: "a".into(),
             current: true,

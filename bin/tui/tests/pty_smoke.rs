@@ -277,7 +277,7 @@ fn ext_statusline_real() {
     let end = Instant::now() + Duration::from_secs(6);
     while (!bell || !osc) && Instant::now() < end {
         pty.pump(0.25);
-        bell = pty.screen.raw.iter().any(|&b| b == 0x07);
+        bell = pty.screen.raw.contains(&0x07);
         osc = String::from_utf8_lossy(&pty.screen.raw).contains("turn finished");
     }
     assert!(bell, "no terminal bell in the pty stream");
@@ -578,7 +578,7 @@ fn ext_rus() {
     let end = Instant::now() + Duration::from_secs(7);
     while !bell && Instant::now() < end {
         pty.pump(0.25);
-        bell = pty.screen.raw.iter().any(|&b| b == 0x07);
+        bell = pty.screen.raw.contains(&0x07);
     }
     assert!(bell, "no terminal bell in the pty stream");
     assert!(double_q_quit(&mut pty, 4.0), "still running after double-q");

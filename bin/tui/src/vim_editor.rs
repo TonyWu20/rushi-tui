@@ -465,24 +465,6 @@ impl Editor {
         self.col = at_col + value.chars().count();
     }
 
-    /// The number of lines the text currently holds (at least 1).
-    /// Test-only accessor: no production caller.
-    #[cfg(test)]
-    pub fn n_lines(&self) -> usize {
-        if self.lines.is_empty() {
-            1
-        } else {
-            self.lines.len()
-        }
-    }
-
-    /// The cursor position in the document: `(row, col)`. Test-only
-    /// accessor: no production caller.
-    #[cfg(test)]
-    pub fn cursor(&self) -> (usize, usize) {
-        (self.row, self.col)
-    }
-
     /// The visible display rows at `scroll` (the index of the first
     /// visible *display row*), at most `height` rows, with long lines
     /// word-wrapped to `width` columns. Both `scroll` and `height` are

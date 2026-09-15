@@ -1919,7 +1919,6 @@ mod stream_pin_tests {
         // with no settled event. The stream-length change alone must
         // pin the view, not re-center on the cursor.
         let grew = last_stream != 20;
-        last_stream = 20;
         b.sync(120, 20, &mut scroll, grew);
         assert_eq!(
             b.line - top(120, scroll, 20),

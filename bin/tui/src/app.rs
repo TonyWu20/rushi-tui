@@ -237,7 +237,7 @@ impl StreamBuf {
 // untouched (docs/tui-perf-streaming-incremental-plan.md test 7).
 #[cfg(test)]
 thread_local! {
-    pub(crate) static REASONING_JOIN_CALLS: std::cell::Cell<u32> = std::cell::Cell::new(0);
+    pub(crate) static REASONING_JOIN_CALLS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
 /// Incremental cache for the live stream block.
@@ -1117,12 +1117,6 @@ impl App {
         self.transcript_visible_start = idx;
     }
 
-    /// Test-only accessor for the per-block animation targets.
-    #[cfg(test)]
-    pub fn block_targets_for_test(&self) -> &std::collections::HashMap<String, f64> {
-        &self.block_targets
-    }
-
     /// The transcript pane height in lines (set during draw).
     pub fn viewport_height(&self) -> usize {
         self.viewport
@@ -1734,14 +1728,6 @@ impl App {
     /// advances smoothly (docs/tui-streaming-response.md §6.5).
     pub fn stream_live(&self) -> bool {
         !self.stream_pending.is_empty() || self.stream_buf.as_ref().is_some_and(|b| !b.done)
-    }
-
-    /// The characters waiting in the pace queue (§6.5). Test and
-    /// diagnostic use: the main loop decides the cadence with
-    /// [`App::stream_live`].
-    #[cfg(test)]
-    pub fn stream_pending_chars(&self) -> usize {
-        self.stream_pending_chars
     }
 
     // ── new-session name input ──────────────────────────────
@@ -4606,7 +4592,7 @@ mod full_history_tests {
         let events: Vec<Event> = text
             .lines()
             .filter(|l| !l.trim().is_empty())
-            .filter_map(|l| Event::parse_line(l))
+            .filter_map(Event::parse_line)
             .collect();
         assert!(
             events.len() >= 2800,
@@ -5121,7 +5107,7 @@ mod perf_bgbuild_tests {
 
         // Commit one more event at the same width. The events version
         // bump is a cache-key miss that must build immediately.
-        let sid = app.active().clone().expect("an active session");
+        let sid = app.active().expect("an active session");
         app.set_active(sid.clone(), heavy_events(N_HEAVY + 1), (N_HEAVY + 1) as u64);
         let t_miss = Instant::now();
         let _ = app.transcript_lines(80, None);

@@ -5414,7 +5414,7 @@ mod table_fix_tests {
             "| A | B                          |".to_string(),
             "|---|--------------------------|".to_string(),
             "| x | a very long value that exceeds the column width comfortably and should wrap to a second visual line inside the box |".to_string(),
-        ].into_iter().map(String::from).collect::<Vec<_>>();
+        ].into_iter().collect::<Vec<_>>();
         let grid = table_grid(&rows, 30, &palette);
         let joined: String = grid
             .iter()
@@ -5793,7 +5793,7 @@ mod stream_cache_tests {
     fn make_app(engine: HighlightEngine) -> App {
         let mut app = App::new();
         app.set_palette(Palette::builtin(Level::Rgb));
-        let mut td = app.tool_display().clone();
+        let mut td = *app.tool_display();
         td.highlight_engine = engine;
         app.set_tool_display(td);
         app
@@ -5801,12 +5801,14 @@ mod stream_cache_tests {
 
     /// Build a live stream buffer from reasoning pairs and response text.
     fn stream_buf(text: &str, reasoning: &[(&str, &str)], done: bool) -> StreamBuf {
-        let mut buf = StreamBuf::default();
-        buf.text = text.to_string();
+        let mut buf = StreamBuf {
+            text: text.to_string(),
+            done,
+            ..Default::default()
+        };
         for (k, v) in reasoning {
             buf.reasoning.insert((*k).to_string(), (*v).to_string());
         }
-        buf.done = done;
         buf
     }
 
@@ -5846,7 +5848,7 @@ mod stream_cache_tests {
     }
 
     /// 1. Feeding 10 KB of thinking in ten 1 KB chunks must match a
-    /// fresh full rebuild of each prefix.
+    ///    fresh full rebuild of each prefix.
     #[test]
     fn incremental_thinking_matches_full_rebuild() {
         let mut app = make_app(HighlightEngine::Builtin);
@@ -5875,7 +5877,7 @@ mod stream_cache_tests {
     }
 
     /// 2. A code fence open in chunk 1 and closed in chunk 2 keeps the
-    /// fence state coherent, and the line after it is prose.
+    ///    fence state coherent, and the line after it is prose.
     #[test]
     fn thinking_code_fence_spans_delta_boundary() {
         let mut app = make_app(HighlightEngine::Builtin);
@@ -5915,7 +5917,7 @@ mod stream_cache_tests {
     }
 
     /// 3. A width change invalidates the cache, a fresh build of both
-    /// the thinking and text sections.
+    ///    the thinking and text sections.
     #[test]
     fn width_change_invalidates_cache() {
         let mut app = make_app(HighlightEngine::Builtin);
@@ -5945,7 +5947,7 @@ mod stream_cache_tests {
     }
 
     /// 4. An unchanged response text returns the cached lines with no
-    /// markdown re-parse. A changed one re-parses.
+    ///    markdown re-parse. A changed one re-parses.
     #[test]
     fn text_unchanged_returns_cache() {
         let mut app = make_app(HighlightEngine::Builtin);
@@ -5977,8 +5979,8 @@ mod stream_cache_tests {
     }
 
     /// 5. Growing the earliest reasoning id changes the join at a
-    /// non-suffix position, so a full rebuild runs and matches a
-    /// fresh full rebuild.
+    ///    non-suffix position, so a full rebuild runs and matches a
+    ///    fresh full rebuild.
     #[test]
     fn reasoning_reorder_triggers_full_rebuild() {
         let mut app = make_app(HighlightEngine::Builtin);
@@ -6043,7 +6045,7 @@ mod stream_cache_tests {
     }
 
     /// 7. An unchanged reasoning map skips the O(T) join on idle
-    /// frames.
+    ///    frames.
     #[test]
     fn join_skip_on_unchanged_reasoning() {
         let mut app = make_app(HighlightEngine::Builtin);
@@ -6060,7 +6062,7 @@ mod stream_cache_tests {
     }
 
     /// 8. A changed reasoning map re-joins, and the incremental path
-    /// picks up the new suffix.
+    ///    picks up the new suffix.
     #[test]
     fn join_triggers_on_reasoning_change() {
         let mut app = make_app(HighlightEngine::Builtin);
@@ -6100,9 +6102,9 @@ mod stream_cache_tests {
     }
 
     /// 9. Perf gate. 200 KB of thinking fed in 60 frames of about 3
-    /// KB each. Every frame stays under 100 ms and the average under
-    /// 10 ms. The Builtin engine isolates the cache mechanism. The
-    /// tree-sitter highlighter internal re-parse is out of scope.
+    ///    KB each. Every frame stays under 100 ms and the average under
+    ///    10 ms. The Builtin engine isolates the cache mechanism. The
+    ///    tree-sitter highlighter internal re-parse is out of scope.
     #[test]
     fn streaming_thinking_per_frame_stays_under_budget() {
         let mut app = make_app(HighlightEngine::Builtin);
@@ -6128,8 +6130,8 @@ mod stream_cache_tests {
     }
 
     /// 10. Perf gate. A warm cache with no new delta is an idle frame.
-    /// It skips the join, the highlight, and the markdown re-parse,
-    /// and stays under 2 ms.
+    ///     It skips the join, the highlight, and the markdown re-parse,
+    ///     and stays under 2 ms.
     #[test]
     fn idle_frame_is_cached() {
         let mut app = make_app(HighlightEngine::Builtin);
@@ -6195,7 +6197,7 @@ mod stream_cache_independent_tests {
     fn make_app() -> App {
         let mut app = App::new();
         app.set_palette(Palette::builtin(Level::Rgb));
-        let mut td = app.tool_display().clone();
+        let mut td = *app.tool_display();
         td.highlight_engine = HighlightEngine::Builtin;
         app.set_tool_display(td);
         app
@@ -6204,8 +6206,10 @@ mod stream_cache_independent_tests {
     /// Build a live-stream buffer from a response-text string and a
     /// list of (id, value) reasoning pairs.
     fn buf(text: &str, reasoning: &[(&str, &str)]) -> StreamBuf {
-        let mut b = StreamBuf::default();
-        b.text = text.to_string();
+        let mut b = StreamBuf {
+            text: text.to_string(),
+            ..Default::default()
+        };
         for (k, v) in reasoning {
             b.reasoning.insert((*k).to_string(), (*v).to_string());
         }
@@ -6446,7 +6450,7 @@ mod stream_cache_independent_tests {
             Rc::ptr_eq(&text_a, &text_b),
             "the thinking-expanded toggle must leave the text section alone"
         );
-        assert_eq!(cache_of(&app).thinking_expanded, true);
+        assert!(cache_of(&app).thinking_expanded);
 
         // Ctrl+X: thinking_shown flips. No section rebuilds.
         let _ = app.press(Key::CtrlX);
