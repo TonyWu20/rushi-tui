@@ -33,9 +33,24 @@ Two git hooks and one allowlist file, all under `.githooks/`:
 - Default: no co-author trailers at all. The allowlist is empty.
 - To allow an identity, add one line to `.githooks/coauthor-allowlist`
   and commit it. The change is visible in the history.
-- The two polluted commits (`683390f`, `8b032c7`) stay in history.
-  Rewriting history is a separate owner decision, since it forces a
-  push.
+
+## History cleanup record (2026-09-15)
+
+The two polluted commits were rewritten with
+`git filter-branch --msg-filter`. The filter strips the
+`Co-Authored-By` trailer line and the blank line after it. The trees
+are unchanged, so no code moved.
+
+| Old hash | New hash | Subject |
+| --- | --- | --- |
+| `683390f` | `b8c779c` | tui: add the width debounce for transcript rebuilds (stage 4) |
+| `8b032c7` | `e39e3ed` | tui: size table columns to natural content width, not an even share |
+
+`main` was force-pushed to the rewritten tip `22c418f`. The local
+branch `backup/main-pre-coauthor-rewrite` holds the pre-rewrite
+history for recovery. The local `ratatui-widget-based` ref moved with
+the rewrite. Its remote ref still points at the old chain and needs
+its own push or deletion.
 
 ## Known limits
 
