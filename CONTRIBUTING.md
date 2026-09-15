@@ -96,8 +96,13 @@ cargo test -p tui
 Success: the build is clean and the whole suite is green. The suite holds
 42 insta snapshot tests plus roughly 350 logic tests. If the baseline
 fails, that is an environment problem. Resolve it before starting feature
-work. Without a sibling `rushi-exts` checkout, the extension PTY tests
-skip themselves.
+work. The extension PTY cases read the kernel's `scripts/ext-fixture`
+inputs, so set `KERNEL_ROOT` to the **absolute** path of any kernel
+checkout (e.g. after `git clone https://github.com/TonyWu20/rushi`) and
+`EXTS_ROOT` to the absolute path of a `rushi-exts` checkout. Without
+those, the extension PTY cases print `SKIP` and count as no-ops. Use
+absolute paths: `cargo test` runs each test binary with cwd `bin/tui`,
+so relative values would resolve against the wrong directory.
 
 ## Step 4 — Feature branch
 

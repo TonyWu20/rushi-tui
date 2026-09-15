@@ -39,13 +39,26 @@ pub fn fixture_root() -> PathBuf {
             return PathBuf::from(p);
         }
     }
+    // The ext-fixture inputs live in the kernel repo
+    // (`scripts/ext-fixture/`). Point KERNEL_ROOT at any kernel checkout
+    // (e.g. a clone of github.com/TonyWu20/rushi), the same convention as
+    // the kernel's ext-env.sh and the PTY smoke's `<kernel-root>` arg.
+    if let Ok(p) = std::env::var("KERNEL_ROOT") {
+        if !p.is_empty() {
+            let dir = Path::new(&p).join("scripts/ext-fixture");
+            if dir.is_dir() {
+                return dir.canonicalize().unwrap_or(dir);
+            }
+        }
+    }
     let repo = repo_root();
     let in_repo = repo.join("scripts/ext-fixture");
     if in_repo.is_dir() {
         return in_repo;
     }
-    let in_harness = repo.join("../rust-unix-harness/scripts/ext-fixture");
-    in_harness.canonicalize().unwrap_or(in_harness)
+    // No fixture inputs found: the ext-PTY cases self-skip via
+    // skip_if_missing.
+    in_repo
 }
 
 pub fn tmpdir() -> PathBuf {
