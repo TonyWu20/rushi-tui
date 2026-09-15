@@ -1,0 +1,41 @@
+#!/bin/sh
+# - Blocks pushes of commits carrying a co-author trailer the allowlist does not list.
+# - It is the backstop for commit-msg: it catches --no-verify commits, rebases, and tool-made commits.
+# - See docs/coauthor-guard.md for the policy.
+
+_cc_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+. "$_cc_dir/_coauthor_check.sh"
+
+_cc_zero=0000000000000000000000000000000000000000
+_cc_fail=0
+
+while read -r _cc_ref _cc_local _cc_remote
+do
+  [ "$_cc_local" = "$_cc_zero" ] && continue
+
+  if [ "$_cc_remote" = "$_cc_zero" ]
+  then
+    _cc_rev="$_cc_local --not --remotes"
+  else
+    _cc_rev="$_cc_remote..$_cc_local"
+  fi
+
+  _cc_msgs=$(git log --format='%B' $_cc_rev 2>/dev/null)
+  [ -n "$_cc_msgs" ] || continue
+
+  if ! printf '%s\n' "$_cc_msgs" | _coauthor_check "$_cc_dir/coauthor-allowlist"
+  then
+    _cc_fail=1
+  fi
+done
+
+if [ "$_cc_fail" = 1 ]
+then
+  echo "pre-push: coauthor-guard blocked this push."
+  echo "A commit being pushed carries a co-author trailer the allowlist does not list."
+  echo "Drop the trailer (git rebase --edit-msg), or add the identity to .githooks/coauthor-allowlist."
+  exit 1
+fi
+
+exit 0

@@ -35,6 +35,18 @@ gh auth status
 The first `nix develop` fetches `nixpkgs`, the kernel flake, and the Lean
 toolchain, so it can take a while. That is normal, not a failure.
 
+Install the coauthor-guard hooks, once per clone:
+
+```sh
+scripts/install-githooks.sh
+```
+
+Success: `git config --get core.hooksPath` prints `.githooks`. The
+hooks reject `Co-authored-by` trailers the allowlist does not list.
+The allowlist is `.githooks/coauthor-allowlist`. It is empty by
+default, so no co-author trailer is accepted. See
+`docs/coauthor-guard.md` for the policy.
+
 ## Step 1 — Fork and clone
 
 The human forks `TonyWu20/rushi-tui` into their own account (GitHub web UI:
@@ -156,6 +168,11 @@ stage `sessions/`, `target/`, `result`, `.direnv/`, or `config*.toml`.
 They are gitignored. Check with `git status` that only intended paths are
 staged.
 
+No `Co-authored-by` or `Co-Authored-By` trailers in commit messages.
+The coauthor-guard hooks reject a trailer the allowlist does not
+list. The default allowlist is empty. To allow an identity, add one
+line to `.githooks/coauthor-allowlist` and commit that file.
+
 ## Step 8 — Push and open the PR
 
 ```sh
@@ -210,3 +227,6 @@ Run this checklist before opening the PR:
 - Keep the branch focused: one change per branch.
 - If a gate fails, fix the cause. Do not loosen tests, snapshots, or
   clippy to make the gate pass.
+- Never add `Co-authored-by` trailers to commit messages. The
+  coauthor-guard hooks reject any trailer the allowlist does not
+  list.

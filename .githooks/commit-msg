@@ -1,0 +1,16 @@
+#!/bin/sh
+# - Blocks commits carrying a co-author trailer the allowlist does not list.
+# - See docs/coauthor-guard.md for the policy and the allowlist.
+# - Bypass: git commit --no-verify. The pre-push hook still blocks the push.
+
+_cc_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+. "$_cc_dir/_coauthor_check.sh"
+
+if ! _coauthor_check "$_cc_dir/coauthor-allowlist" < "$1"
+then
+  echo "commit-msg: coauthor-guard blocked this commit."
+  echo "The message carries a co-author trailer the allowlist does not list."
+  echo "Remove the trailer, or add the identity to .githooks/coauthor-allowlist."
+  exit 1
+fi

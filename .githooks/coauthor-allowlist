@@ -1,0 +1,11 @@
+# - coauthor-guard allowlist, one co-author identity per line.
+# - The commit-msg and pre-push hooks block trailers not listed here.
+# - An empty allowlist blocks every co-author trailer, which is the default.
+# - A line is a name plus an email in angle brackets, or an email alone.
+# - Matching uses the email when one is present, lowercased. Else the whole value.
+# - Blank lines and lines starting with # are ignored.
+# - Default policy: this repo allows no co-author trailers.
+# - The history was polluted by unwelcome Co-Authored-By Claude trailers.
+# - To allow an identity, add one line below, like:
+# -
+# -   Your Name <you@example.com>
