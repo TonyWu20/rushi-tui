@@ -22,12 +22,13 @@ separator, and showed the thinking level as a bare number.
 The marker's presentation is the title bit and the working
 row. The `statuses` map stays on the tick payload.
 
-Revision (2026-09-16): an open request. The `working` state
-splits the `wait` phase into two: the request pending on the
-server, and the response streaming back. The state is TUI-
-derived from the session's `.model-stream` side channel. The
-kernel emits no new marker. The `ext_status` vocabulary is
-unchanged. Detail: `docs/tui-working-status.md`.
+Revision (2026-09-16): the `working` state splits the `wait`
+phase into two: the request pending on the server, and the
+response streaming back. The state is TUI-derived from the
+session's `.model-stream` side channel. The kernel emits no new
+marker. The `ext_status` vocabulary is unchanged. Shipped: the
+derived `working` row and the `[working]` bit
+(`docs/tui-working-status.md`).
 
 ## 1. Purpose and justification
 
@@ -92,19 +93,23 @@ The loop is the `rushi` binary in the harness repo
 ### Render rules (TUI side, `bin/tui`)
 
 The TUI reads the log. It keeps the last `ext_status` value per
-id, per active session. It derives one of four display states
-from two inputs. The input is the last `loop_phase` value. The
-other input is the FT-003 loop-running bit.
+id, per active session. It derives one of five display states
+from three inputs. One input is the last `loop_phase` value.
+Another is the FT-003 loop-running bit. The third is the
+session's `.model-stream` buffer
+(`docs/tui-streaming-response.md`), open while at least one
+delta line has been read.
 
 | State | Condition | Title bit | Working row |
 |---|---|---|---|
 | `idle` | loop not running | `[idle]` | no row |
 | `running-unknown` | loop running, no marker or a value outside `wait`/`tools` | `[running]` | `Working...` |
-| `wait` | loop running, last value `wait` | `[wait]` | `waiting for model · Ns` |
+| `wait` | loop running, last value `wait`, and the session stream buffer is closed | `[wait]` | `waiting for model · Ns` |
+| `working` | loop running, last value `wait`, and the session stream buffer is open (TUI-derived at draw time, `docs/tui-working-status.md`) | `[working]` | `model working · Ns` |
 | `tools` | loop running, last value `tools` | `[tools]` | `tools running · Ns` |
 
-The state is observable. It is a pure function of the log and
-the running bit. It survives a TUI restart.
+The state is observable. It is a pure function of the log, the
+running bit, and the stream buffer. It survives a TUI restart.
 
 Working row rules (after the `pi` working indicator):
 

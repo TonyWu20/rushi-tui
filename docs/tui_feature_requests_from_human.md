@@ -533,7 +533,7 @@ macchiato` as the first internal color scheme. Shipped in
 
 ## New requests (2026-09-16)
 
-- [ ] The `wait` loop-phase state covers two sub-phases of the
+- [x] The `wait` loop-phase state covers two sub-phases of the
       model call, and the TUI shows `waiting for model · Ns` for
       both: the sent request pending on the server (no response
       data yet), and the response streaming back (deltas arriving
@@ -557,3 +557,9 @@ macchiato` as the first internal color scheme. Shipped in
       `docs/tui-working-status.md` (the open-request design),
       `docs/tui-model-wait-indicator.md` (the base contract),
       `docs/tui-streaming-response.md`.
+      Shipped 2026-09-16: `PhaseState::Working` plus the `working`
+      state-table row are TUI-derived in `bin/tui/src/render.rs`
+      (`phase_state` reads the last `loop_phase` value and the
+      session stream buffer; `[working]` bit; `model working · Ns`
+      row). No kernel change. Tests: `working_status_tests` in
+      `bin/tui/src/render.rs`.
