@@ -418,6 +418,15 @@ and verification record.
   or `.`) keeps the input up with a hint. Tab cycles to an existing
   session and ends the input; with no session to cycle to, the input
   stays up.
+- Config resolution when `--config` is omitted (issue #11,
+  mirroring the kernel's `resolve_config_path`). The order is:
+  the `$CONFIG` env var, then the side-by-side
+  `<exe_dir>/../config.toml`, then the CWD `config.toml`.
+  A missing file falls back to defaults with a warning.
+- The side-by-side step targets the Nix package layout. The
+  package ships `config.toml` plus `ui_extensions/` next to
+  `bin/tui`. A delivered binary is therefore self-contained:
+  its bundled extension layer loads with no wrapper shim.
 - Approval wire format: an `approval` event may carry `arguments`
   (the edited JSON object). This is an additive field. The log stays
   at `v: 1`.

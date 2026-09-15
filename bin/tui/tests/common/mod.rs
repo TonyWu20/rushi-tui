@@ -247,7 +247,15 @@ pub struct Pty {
 
 impl Pty {
     pub fn spawn(bin: &str, session: &str, cfg: &Path, extra_path: Option<&str>) -> Self {
-        Self::spawn_inner(bin, session, cfg, extra_path, None, 24, 80)
+        Self::spawn_inner(bin, session, Some(cfg), extra_path, None, 24, 80)
+    }
+
+    /// Spawn without a `--config` flag and with `CONFIG` unset in the
+    /// child: the binary must find its config through its own
+    /// resolution ladder (issue #11: side-by-side, then CWD). The
+    /// cwd is a controlled empty directory so no CWD config exists.
+    pub fn spawn_no_config(bin: &str, session: &str, extra_path: Option<&str>, cwd: &Path) -> Self {
+        Self::spawn_inner(bin, session, None, extra_path, Some(cwd), 24, 80)
     }
 
     /// Spawn the TUI in a custom working directory. The picker
@@ -275,7 +283,7 @@ impl Pty {
         rows: usize,
         cols: usize,
     ) -> Self {
-        Self::spawn_inner(bin, session, cfg, extra_path, None, rows, cols)
+        Self::spawn_inner(bin, session, Some(cfg), extra_path, None, rows, cols)
     }
 
     /// Like `spawn_in` with a custom window size. The picker's
@@ -291,13 +299,13 @@ impl Pty {
         rows: usize,
         cols: usize,
     ) -> Self {
-        Self::spawn_inner(bin, session, cfg, extra_path, Some(cwd), rows, cols)
+        Self::spawn_inner(bin, session, Some(cfg), extra_path, Some(cwd), rows, cols)
     }
 
     fn spawn_inner(
         bin: &str,
         session: &str,
-        cfg: &Path,
+        cfg: Option<&Path>,
         extra_path: Option<&str>,
         cwd: Option<&Path>,
         rows: usize,
@@ -350,15 +358,33 @@ impl Pty {
                 }
                 let c_bin = CString::new(bin).expect("bin has no NUL");
                 let c_sess = CString::new(session).expect("session has no NUL");
-                let c_cfg = CString::new(cfg.to_string_lossy().as_ref()).expect("cfg has no NUL");
+                let c_cfg: Option<CString> = match cfg {
+                    Some(c) => {
+                        Some(CString::new(c.to_string_lossy().as_ref()).expect("cfg has no NUL"))
+                    }
+                    None => {
+                        // No --config flag: the binary resolves its own
+                        // config path through its ladder (issue #11).
+                        // Drop an inherited CONFIG so the test exercises
+                        // the ladder steps, not a dev-machine env var.
+                        let c_key = CString::new("CONFIG").unwrap();
+                        let _ = libc::unsetenv(c_key.as_ptr());
+                        None
+                    }
+                };
+                // Build argv while every CString is still alive: the
+                // raw pointers must outlive the execvp call below.
                 let c_flag = c"--config";
-                let args = [
-                    c_bin.as_ptr(),
-                    c_sess.as_ptr(),
-                    c_flag.as_ptr(),
-                    c_cfg.as_ptr(),
-                    std::ptr::null(),
-                ];
+                let args: Vec<*const std::ffi::c_char> = match &c_cfg {
+                    Some(c) => vec![
+                        c_bin.as_ptr(),
+                        c_sess.as_ptr(),
+                        c_flag.as_ptr(),
+                        c.as_ptr(),
+                        std::ptr::null(),
+                    ],
+                    None => vec![c_bin.as_ptr(), c_sess.as_ptr(), std::ptr::null()],
+                };
                 libc::execvp(c_bin.as_ptr(), args.as_ptr());
                 libc::_exit(127);
             }

@@ -357,6 +357,75 @@ fn ext_statusline_repo() {
 }
 
 #[test]
+fn side_by_side_package_layout() {
+    // Issue #11: a binary delivered in a package layout
+    // (`pkg/bin/tui` next to `pkg/config.toml` + `pkg/ui_extensions/`)
+    // must load that config and its bundled extension layer with no
+    // --config flag and no $CONFIG env var, run from a CWD that has
+    // no config.toml.
+    purge_strays();
+    use std::os::unix::fs::PermissionsExt;
+    let root = tmpdir();
+    let pkg = root.join("pkg");
+    let bin_dir = pkg.join("bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    let exe = bin_dir.join("tui");
+    std::fs::copy(tui_bin(), &exe).unwrap();
+    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let sessions = pkg.join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    // Package-root config: no [tui] ext_dirs, so discovery falls
+    // back to the side-by-side `<config-dir>/ui_extensions`.
+    std::fs::write(
+        pkg.join("config.toml"),
+        format!("[paths]\nsessions_root = \"{}\"\n", sessions.display()),
+    )
+    .unwrap();
+    // The bundled extension layer (self-contained stub).
+    let stub = pkg.join("ui_extensions").join("stub");
+    std::fs::create_dir_all(&stub).unwrap();
+    std::fs::write(
+        stub.join("stub.sh"),
+        r#"#!/usr/bin/env bash
+# A stub status extension: it answers every tick op with a
+# fixed status row.
+while IFS= read -r line; do
+  case "$line" in
+    *'"op":"tick"'*)
+      printf '{"v":1,"op":"status","lines":[["EXT pkg alive",{"fg":"green"}]]}\n'
+      ;;
+  esac
+done
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        stub.join("ext.toml"),
+        "[ext]\ncommand = \"bash\"\nargs = [\"stub.sh\"]\ncaps = [\"status\"]\ntick_ms = 300\nprotocol_v = 1\n",
+    )
+    .unwrap();
+
+    // Empty CWD: no config.toml here, and CONFIG is unset in the
+    // child — the binary's only route is the side-by-side step.
+    let cwd = root.join("empty-cwd");
+    std::fs::create_dir_all(&cwd).unwrap();
+
+    let mut pty = Pty::spawn_no_config(exe.to_str().unwrap(), "tui-test-pkg", None, &cwd);
+    let missing = wait_markers(&mut pty, &["EXT pkg alive"], 10.0, 10.0);
+    assert!(pty.alive(), "process died during startup");
+    assert!(
+        missing.is_empty(),
+        "bundled extension marker not seen: {missing:?}\n{}",
+        pty.screen.text()
+    );
+    assert!(double_q_quit(&mut pty, 8.0), "still running after double-q");
+    pty.reap();
+    let orphans = settled_orphans(&pkg.join("ui_extensions"), 6.0);
+    assert!(orphans.is_empty(), "orphan layer processes: {orphans:?}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn ext_statusline_slowgit() {
     ensure_ext_bins();
     purge_strays();
