@@ -2,7 +2,8 @@
 //!
 //! The TUI reads these parts of the shared harness config file:
 //! - `[paths] sessions_root` — where session directories live
-//!   (shared with the kernel; the TUI only re-reads this key)
+//!   (shared with the kernel; the TUI only re-reads this key). A
+//!   relative value resolves against the process working directory.
 //! - `[active] model` — the active model name (shared with the kernel;
 //!   the TUI re-reads it for the extension `tick` payload)
 //! - `[loop]` — the opaque loop command (docs/tui.md section 2.3)
@@ -11,9 +12,10 @@
 //!   `color_scheme`, `color_schemes`, `tool_display`, `clipboard`
 //!
 //! The kernel-owned sections (`[model]`, `[limits]`, `[hooks]`,
-//! `[system_prompt]`) are ignored here. Relative paths resolve against
-//! the config file's directory, so the TUI behaves the same no matter
-//! where it is launched from.
+//! `[system_prompt]`) are ignored here. Tool and extension paths
+//! resolve against the config file's directory. `sessions_root`
+//! resolves against the process working directory, so a Nix store
+//! install keeps sessions in the user's project.
 
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
@@ -58,11 +60,11 @@ impl LoopCommand {
 /// Everything the TUI needs from the config file.
 #[derive(Debug, Clone)]
 pub struct TuiConfig {
-    /// Absolute directory that contains session directories.
+    /// Directory that contains session directories. A relative
+    /// `sessions_root` resolves against the process working
+    /// directory, so a Nix install keeps sessions in the user's
+    /// project, not the read-only store.
     pub sessions_root: PathBuf,
-    /// Absolute schema directory for producer-side event validation, if
-    /// one exists next to the config. `None` skips schema validation.
-    pub schemas_dir: Option<PathBuf>,
     /// The opaque loop command, if configured.
     pub loop_cmd: Option<LoopCommand>,
     /// Absolute directory containing the config file.
@@ -285,14 +287,15 @@ impl TuiConfig {
             .as_ref()
             .and_then(|p| p.sessions_root.clone())
             .unwrap_or_else(|| "sessions".to_string());
-        let sessions_root = resolve(&config_dir, sessions_root);
-
-        let schemas_path = config_dir.join("schemas").join("events").join("v1");
-        let schemas_dir = if schemas_path.is_dir() {
-            Some(schemas_path)
-        } else {
-            None
-        };
+        // Sessions are project state, not package state. A relative
+        // sessions_root resolves against the process working
+        // directory (the user's project), not the config dir. Under
+        // Nix the config dir is a read-only store path, so sessions
+        // must stay in the user's project. The kernel resolves a
+        // relative sessions_root the same way (bin/rushi/src/config.rs
+        // keeps it relative and joins it against the loop cwd at use
+        // time). An absolute value is kept as given.
+        let sessions_root = resolve_cwd(&sessions_root);
 
         let loop_cmd = match raw.loop_cmd {
             Some(l) => {
@@ -324,8 +327,11 @@ impl TuiConfig {
         let active_model = raw.active.as_ref().and_then(|a| a.model.clone());
 
         // An explicit `[tui] color` forces the level; unknown names are a
-        // hard error, like the other keys. Absent means detect.
+        // hard error, like the other keys. Absent or empty means detect.
+        // A generator that materializes every key (Nix) writes `""` for
+        // keys the kernel does not set, so an empty value reads as absent.
         let color = match raw.tui.as_ref().and_then(|t| t.color.clone()) {
+            Some(c) if c.trim().is_empty() => None,
             Some(c) => {
                 let lvl = Level::from_cfg(&c).ok_or_else(|| {
                     format!(
@@ -349,8 +355,10 @@ impl TuiConfig {
             std::collections::HashMap<crate::color::Role, String>,
         > = std::collections::HashMap::new();
         // Merge `color_schemes` and the `custom_schemes` alias.
-        let mut raw_schemes: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>> =
-            std::collections::BTreeMap::new();
+        let mut raw_schemes: std::collections::BTreeMap<
+            String,
+            std::collections::BTreeMap<String, String>,
+        > = std::collections::BTreeMap::new();
         if let Some(t) = raw.tui.as_ref() {
             for (name, table) in t.color_schemes.iter() {
                 raw_schemes.insert(name.clone(), table.clone());
@@ -389,7 +397,15 @@ impl TuiConfig {
             }
             custom_schemes.insert(name, roles);
         }
-        if let Some(name) = raw.tui.as_ref().and_then(|t| t.color_scheme.clone()) {
+        // An empty `color_scheme` is the "unset" marker a generator
+        // writes for a key the kernel does not set. It reads as absent:
+        // the built-in palette stands.
+        let raw_scheme = raw
+            .tui
+            .as_ref()
+            .and_then(|t| t.color_scheme.clone())
+            .filter(|n| !n.trim().is_empty());
+        if let Some(name) = raw_scheme.clone() {
             let normalized = name.replace('-', " ");
             let known = name == crate::color::SCHEME_CATPPUCCIN_MACCHIATO
                 || normalized == crate::color::SCHEME_CATPPUCCIN_MACCHIATO
@@ -403,13 +419,15 @@ impl TuiConfig {
                 ));
             }
         }
-        let color_scheme = raw.tui.as_ref().and_then(|t| t.color_scheme.clone());
+        let color_scheme = raw_scheme;
 
         // The `[tui] clipboard` flag (docs/tui-conversation-browsing.md
         // section 11.3): `unnamed` routes a bare browse `y` to the
         // host clipboard (the OSC 52 write). An unknown value is a
-        // hard error at load, like the other keys.
+        // hard error at load, like the other keys. An empty value is
+        // the "unset" marker and reads as the default.
         let clipboard_unnamed = match raw.tui.as_ref().and_then(|t| t.clipboard.clone()) {
+            Some(v) if v.trim().is_empty() => false,
             Some(v) if v.eq_ignore_ascii_case("unnamed") => true,
             Some(v) => {
                 return Err(format!(
@@ -462,8 +480,8 @@ impl TuiConfig {
                     })?;
             }
             if let Some(m) = t.highlight_engine.as_deref() {
-                tool_display.highlight_engine =
-                    crate::tool_display::parse_highlight_engine(m).ok_or_else(|| {
+                tool_display.highlight_engine = crate::tool_display::parse_highlight_engine(m)
+                    .ok_or_else(|| {
                         format!(
                             "config [tui.tool_display] highlight_engine: unknown value {m:?} \
                              (expected tree-sitter (the default) or builtin)"
@@ -498,7 +516,6 @@ impl TuiConfig {
 
         Ok(TuiConfig {
             sessions_root,
-            schemas_dir,
             loop_cmd,
             config_dir,
             config_path: canonical,
@@ -525,15 +542,8 @@ impl TuiConfig {
                     .map(|p| p.to_path_buf())
                     .unwrap_or_else(|| PathBuf::from("."))
             });
-        let schemas_path = config_dir.join("schemas").join("events").join("v1");
-        let schemas_dir = if schemas_path.is_dir() {
-            Some(schemas_path)
-        } else {
-            None
-        };
         TuiConfig {
-            sessions_root: config_dir.join("sessions"),
-            schemas_dir,
+            sessions_root: resolve_cwd("sessions"),
             loop_cmd: None,
             config_dir,
             config_path: path.to_path_buf(),
@@ -559,6 +569,22 @@ fn resolve(base: &Path, p: String) -> PathBuf {
     }
 }
 
+/// Resolve a `sessions_root` value: an absolute path is kept as
+/// given, a relative path anchors to the process working directory.
+/// The config dir is wrong for sessions: a Nix install keeps
+/// `config.toml` in the read-only store, and session directories must
+/// be writable inside the user's project.
+fn resolve_cwd(p: &str) -> PathBuf {
+    let p = PathBuf::from(p);
+    if p.is_absolute() {
+        p
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(p)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -573,7 +599,10 @@ mod tests {
         let p = dir.path().join("config.toml");
         let cfg = TuiConfig::load(p.to_str().unwrap()).unwrap();
         assert!(cfg.loop_cmd.is_none());
-        assert_eq!(cfg.sessions_root, dir.path().join("sessions"));
+        assert_eq!(
+            cfg.sessions_root,
+            std::env::current_dir().unwrap().join("sessions")
+        );
     }
 
     #[test]
@@ -593,7 +622,10 @@ arg_style = "append_session"
 "#,
         );
         let cfg = TuiConfig::load(dir.path().join("config.toml").to_str().unwrap()).unwrap();
-        assert_eq!(cfg.sessions_root, dir.path().join("my-sessions"));
+        assert_eq!(
+            cfg.sessions_root,
+            std::env::current_dir().unwrap().join("my-sessions")
+        );
         let lc = cfg.loop_cmd.as_ref().unwrap();
         let argv = lc.argv(&crate::port::SessionId::new("s1"));
         assert_eq!(argv, vec!["bash", "scripts/loop.sh", "s1"]);
@@ -604,7 +636,20 @@ arg_style = "append_session"
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "config.toml", "[loop]\ncommand = \"bash\"\n");
         let cfg = TuiConfig::load(dir.path().join("config.toml").to_str().unwrap()).unwrap();
-        assert_eq!(cfg.sessions_root, dir.path().join("sessions"));
+        assert_eq!(
+            cfg.sessions_root,
+            std::env::current_dir().unwrap().join("sessions")
+        );
+    }
+
+    #[test]
+    fn sessions_root_absolute_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let abs = dir.path().join("abs-sessions");
+        let body = format!("[paths]\nsessions_root = \"{}\"\n", abs.display());
+        write(dir.path(), "config.toml", &body);
+        let cfg = TuiConfig::load(dir.path().join("config.toml").to_str().unwrap()).unwrap();
+        assert_eq!(cfg.sessions_root, abs);
     }
 
     #[test]
@@ -800,6 +845,71 @@ plain_text = "#cdd6f4"
             "no scheme: the built-in palette stands"
         );
         assert!(cfg.custom_schemes.is_empty());
+    }
+
+    // A config generator that writes every key (Nix, `rushi setup`)
+    // emits `""` for fields the kernel does not set. Empty values must
+    // read as absent, not as unknown values.
+
+    #[test]
+    fn empty_color_value_reads_as_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "config.toml", "[tui]\ncolor = \"\"\n");
+        let cfg = TuiConfig::load(dir.path().join("config.toml").to_str().unwrap()).unwrap();
+        assert!(cfg.color.is_none(), "empty color means detect");
+    }
+
+    #[test]
+    fn empty_color_scheme_value_reads_as_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "config.toml", "[tui]\ncolor_scheme = \"\"\n");
+        let cfg = TuiConfig::load(dir.path().join("config.toml").to_str().unwrap()).unwrap();
+        assert!(
+            cfg.color_scheme.is_none(),
+            "empty scheme means the built-in palette stands"
+        );
+    }
+
+    #[test]
+    fn empty_clipboard_value_reads_as_default() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "config.toml", "[tui]\nclipboard = \"\"\n");
+        let cfg = TuiConfig::load(dir.path().join("config.toml").to_str().unwrap()).unwrap();
+        assert!(!cfg.clipboard_unnamed, "empty clipboard means the default");
+    }
+
+    #[test]
+    fn generated_full_materialized_tui_section_loads() {
+        // Mirrors the `[tui]` block a Nix `rushi-configured` package
+        // generates: empty strings for the kernel-unset keys, real
+        // values for the module-set ones. Loading must succeed.
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "config.toml",
+            r#"
+[tui]
+binary = ""
+clipboard = "unnamed"
+color = ""
+color_scheme = ""
+ext_dirs = []
+
+[tui.tool_display]
+preset = "opencode"
+bash_collapsed_lines = 5
+highlight_engine = "tree-sitter"
+expand_mode = "click"
+anim_ms = 400
+diff_collapsed_lines = 12
+diff_view = "auto"
+"#,
+        );
+        let cfg = TuiConfig::load(dir.path().join("config.toml").to_str().unwrap()).unwrap();
+        assert!(cfg.color.is_none());
+        assert!(cfg.color_scheme.is_none());
+        assert!(cfg.clipboard_unnamed, "unnamed keeps the flag on");
+        assert!(cfg.ext_dirs.is_empty());
     }
 
     // The `custom_schemes` TOML key is an alias for `color_schemes`;

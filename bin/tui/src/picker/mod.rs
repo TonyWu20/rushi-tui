@@ -11,8 +11,8 @@
 //! `match` is a Rust keyword, so the match layer lives in `fuzzy.rs`
 //! instead of the spec's `match.rs`.
 
-pub mod items;
 pub mod fuzzy;
-pub mod state;
-pub mod render;
+pub mod items;
 pub mod preview;
+pub mod render;
+pub mod state;

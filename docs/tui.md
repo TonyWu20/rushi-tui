@@ -405,8 +405,8 @@ and verification record.
   `Stdout`, `Stderr` and exactly one final `Exited(code)`.
 - No `tui-textarea` dependency. The input is a one-line widget. Long
   input and edit-then-allow shell out to `$VISUAL`/`$EDITOR`.
-- `read_events` reads the last 50 MB of the log. Cursor-based
-  pagination is a later enhancement.
+- `read_events` reads the whole log. Every event is replayed
+  so the session start stays reachable.
 - The CLI takes the session as a positional argument:
   `tui [SESSION] --config config.toml`. Without a session argument the
   TUI does not resume the most recent session: it opens a name input
@@ -524,7 +524,8 @@ on the next poll. It never re-emits an event.
   `schemas/events/v1` yet, so the producer-side G3 check skips them.
 - The minimal JSON-schema validator is a third copy (see
   `notes/itches.md`).
-- A session that grows past 50 MB reads only its tail.
+- `read_events` loads the whole log. Memory grows with the
+  session, so very long sessions use more RAM.
 - The tailer is per active session. One std thread per switched
   session; a dropped receiver stops it on the next send.
 

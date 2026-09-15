@@ -27,9 +27,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 use ratatui::Frame;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
-use crate::app::App;
+use crate::app::{App, StreamBlockCache};
 use crate::event::{Event, EventKind};
 use crate::highlight;
 use crate::picker::preview::Previewer;
@@ -49,15 +50,24 @@ const LABEL: &str = " ";
 /// Uniform left gutter in visual columns: label, gap, then content.
 /// Continuation lines align under the content of the first line.
 const GUTTER: usize = 12;
+/// Inner content width of the user message panel.
+/// The two border columns and one column of left pad
+/// are subtracted. The result is clamped to a minimum
+/// of four.
+fn user_box_content_w(width: usize) -> usize {
+    width.saturating_sub(4).max(4)
+}
+/// Content width of an assistant body.
+/// One cell of left pad is subtracted.
+fn assistant_body_content_w(width: usize) -> usize {
+    width.saturating_sub(1)
+}
 /// Body lines a single tool call's `command` argument may occupy.
 /// The `content` field of user and assistant messages has no cap:
 /// it displays in full (docs/tui_feature_requests_from_human.md item
 /// 1). Tool result bodies fold at render time (docs/
 /// tui-tool-display-port.md).
 const TOOL_CALL_BODY_LINES: usize = 4;
-/// Events rendered into the transcript at once. The oldest are dropped
-/// to bound memory on huge logs. The log file is the record.
-pub const TRANSCRIPT_EVENT_CAP: usize = 2000;
 /// Raw JSON lines a fallback event block may show. The fallback is for
 /// opaque data the TUI does not model; the log keeps the full text.
 const RAW_FALLBACK_MAX_LINES: usize = 6;
@@ -159,87 +169,101 @@ fn owns_raw_line(k: usize, prov: &[Option<usize>], hard: &[String]) -> Option<St
         _ => return None,
     };
     if k == 0 || prov.get(k - 1) != Some(&Some(p)) {
-        hard.get(p).map(String::clone)
+        hard.get(p).cloned()
     } else {
         None
     }
 }
 
-/// The user-message panel: a rounded, bordered block titled "User" on
-/// the tool-result panel background (docs/tui_feature_requests_from_human.md
-/// 2026-09-06: user messages are wrapped like tool results — the tool
-/// panel's background, a `Block::bordered().border_type(Rounded)` box,
-/// and the "User" title in place of the old `user` marker, with no
-/// content gutter). The rows are hand-built styled spans, like
-/// [`crate::tool_display::box_rows`] for the tool panel, so the panel
-/// composes into the single scrollable transcript `Paragraph` and a
-/// browse-mode cursor / yank still lands on a real transcript line.
+/// The user-message panel: a rounded, bordered block titled "User".
+/// User messages are wrapped like tool results
+/// (docs/tui_feature_requests_from_human.md 2026-09-06). The
+/// rounded `Accent`-toned border replaces the old `user` marker.
+/// There is no background fill and no content gutter. The rows are
+/// hand-built styled spans, like `box_rows` for the tool panel.
+/// The panel composes into the single scrollable transcript
+/// `Paragraph`. A browse-mode cursor or yank still lands on a real
+/// transcript line.
 ///
-/// `content` are the already-wrapped, styled message lines (clamped to
-/// the panel inner width by the caller). Every cell carries the panel
-/// background so the panel reads as one lighter band; the border and
-/// the "User" title read in the accent tone. The panel spans the full
-/// `width` (the transcript width, like the tool-result panel). An
-/// empty message renders a single empty interior row between the two
-/// border rows.
+/// `content` are the already-wrapped, styled message lines.
+/// The caller clamps them to the panel inner width. The panel
+/// spans the full `width`. An empty message renders a single empty
+/// interior row between the two border rows.
 fn user_box_rows(
     content: &[Line<'static>],
     width: usize,
     palette: &crate::color::Palette,
 ) -> Vec<Line<'static>> {
-    // The tool-result panel background (the same lighter band the tool
-    // panel uses, the 2026-09-14 borderless panel background). The
-    // border and the "User" title read in the accent tone.
-    let bg = crate::tool_display::box_bg(palette, false);
-    let border = Style::default().fg(palette.color(crate::color::Role::Accent)).bg(bg);
-    let pad = Style::default().bg(bg);
-    let left_pad = 1usize; // one column, mirroring the tool panel pad.
+    message_box_rows(
+        content,
+        width,
+        palette,
+        Some("User"),
+        crate::color::Role::Accent,
+    )
+}
+
+/// The panel for the final idle assistant message of a completed
+/// turn. It is the same rounded shape as the user box. It carries no
+/// title. Only the `Report`-toned border marks the panel. The tone
+/// is distinct from the `Accent` user box. See docs/tui-turn-fold.md
+/// "Final message panel".
+fn report_box_rows(
+    content: &[Line<'static>],
+    width: usize,
+    palette: &crate::color::Palette,
+) -> Vec<Line<'static>> {
+    message_box_rows(content, width, palette, None, crate::color::Role::Report)
+}
+
+/// The rounded message panel with no background fill. The border
+/// alone marks the message. An optional title sits in the top
+/// border. The `border_role` tones both border and title.
+fn message_box_rows(
+    content: &[Line<'static>],
+    width: usize,
+    palette: &crate::color::Palette,
+    title: Option<&str>,
+    border_role: crate::color::Role,
+) -> Vec<Line<'static>> {
+    let border = Style::default().fg(palette.color(border_role));
+    // One column of left pad, mirroring the tool panel pad.
+    let left_pad = 1usize;
     let inner = width.saturating_sub(2);
     let mut rows: Vec<Line<'static>> = Vec::new();
-    // Top border: `╭User───╮`. The "User" title sits one column in from
-    // the corner, overwriting the top border's dashes — exactly how a
-    // ratatui `Block::bordered().border_type(Rounded).title("User")`
-    // draws its left title.
-    let title = "User";
-    // `saturating_sub` keeps the fill non-negative on very narrow widths.
-    let top_fill = width.saturating_sub(1 + title.chars().count() + 1);
-    rows.push(Line::from(vec![
-        Span::styled("╭", border),
-        Span::styled(title, border),
-        Span::styled("─".repeat(top_fill), border),
-        Span::styled("╮", border),
-    ]));
-    // Interior rows: `│ content │` with one column of left padding and a
-    // background fill to the panel edge. An empty message yields a
-    // single empty interior row.
+    // Top border. `╭Title───╮` when a title is present. A bare
+    // `╭───╮` otherwise. The title sits one column in from the
+    // corner, overwriting the top border dashes.
+    let title_len = title.map_or(0, |t| t.chars().count());
+    let top_fill = width.saturating_sub(2 + title_len);
+    let mut top = vec![Span::styled("╭", border)];
+    if let Some(t) = title {
+        top.push(Span::styled(t.to_string(), border));
+    }
+    top.push(Span::styled("─".repeat(top_fill), border));
+    top.push(Span::styled("╮", border));
+    rows.push(Line::from(top));
+    // Interior rows: `│ content │` with one column of left pad. An empty
+    // message yields a single empty interior row.
     if content.is_empty() {
         rows.push(Line::from(vec![
             Span::styled("│", border),
-            Span::styled(" ".repeat(inner), pad),
+            Span::raw(" ".repeat(inner)),
             Span::styled("│", border),
         ]));
     } else {
         for line in content {
-            let mut cells = vec![
-                Span::styled("│", border),
-                Span::styled(" ".repeat(left_pad), pad),
-            ];
+            let mut cells = vec![Span::styled("│", border), Span::raw(" ".repeat(left_pad))];
             let mut content_width = 0usize;
             for span in &line.spans {
-                // Keep the span's own foreground / modifiers; only fill
-                // the panel background (mirrors the tool panel's
-                // `box_rows` background fill).
-                let st = if span.style.bg.is_some() {
-                    span.style
-                } else {
-                    span.style.bg(bg)
-                };
+                // Keep the span's own foreground and modifiers.
+                let st = span.style;
                 cells.push(Span::styled(span.content.clone(), st));
                 content_width += span.content.chars().count();
             }
-            // Right padding to the panel edge (the panel is one band).
+            // Right padding to the panel edge.
             let right_pad = inner.saturating_sub(left_pad).saturating_sub(content_width);
-            cells.push(Span::styled(" ".repeat(right_pad), pad));
+            cells.push(Span::raw(" ".repeat(right_pad)));
             cells.push(Span::styled("│", border));
             rows.push(Line::from(cells));
         }
@@ -296,11 +320,12 @@ pub struct RenderState<'a> {
     /// The global tool fold/expand toggle (Ctrl+O): `true` expands
     /// every collapsed block to the full body.
     pub tool_expanded: bool,
-    /// The thinking-block visibility (Ctrl+T): `false` hides every
+    /// The thinking-block visibility (Ctrl+X): `false` hides every
     /// thinking block.
     pub thinking_shown: bool,
-    /// The thinking-block expand state (Ctrl+X): `false` shows the
-    /// collapsed header row only.
+    /// The thinking-block expand state (Ctrl+T): `false` shows the
+    /// collapsed one-line label. Blocks start collapsed
+    /// (docs/tui-turn-fold.md).
     pub thinking_expanded: bool,
     /// Per-block expand fractions for animation. Keys are tool-result
     /// event IDs. A value in `[0.0, 1.0]` interpolates the body cap
@@ -318,10 +343,14 @@ fn event_lines<'a>(
     result_ids: &'a std::collections::HashSet<String>,
     width: usize,
     event_id: u64,
-    ext: Option<&'a crate::ext::ExtHost>,
+    ext: Option<&'a ExtRenderData>,
     state: &'a RenderState<'a>,
     loop_running: bool,
     compaction_last_open: bool,
+    /// Box this event in the final-message panel when it is the
+    /// idle reply of a completed turn (docs/tui-turn-fold.md).
+    #[builder(default = false)]
+    final_report: bool,
 ) -> (Vec<Line<'static>>, Vec<Option<String>>) {
     let gutter = " ".repeat(GUTTER);
     let wrap_w = width.saturating_sub(GUTTER).max(4);
@@ -363,7 +392,7 @@ fn event_lines<'a>(
             // The panel inner content width: the two border columns plus
             // one column of left padding.
             let box_w = width;
-            let box_content_w = box_w.saturating_sub(4).max(4);
+            let box_content_w = user_box_content_w(box_w);
             let (wrapped, prov) =
                 render_message_content(&content, event_id, ext, box_content_w, prose, palette);
             // Raw source lines the yank maps onto: the content split into
@@ -389,32 +418,34 @@ fn event_lines<'a>(
             owns.push(None); // bottom border
         }
         EventKind::AssistantMessage => {
-            // The thinking block first: the model's own reasoning items,
-            // captured into the log by the loop, render above the
-            // message body and the tool calls that follow, so the
-            // transcript reads thinking, then the actions (docs/tui-
-            // thinking-block.md section 4: the reasoning content shows
-            // above the message body).
-            // pi-aligned keymap: `Ctrl+T` collapses or expands
-            // the block (the pi `app.thinking.toggle`). Collapsed it is a
-            // one-line label row; expanded it is the full reasoning text.
-            // `Ctrl+X` hides or shows the block entirely. The color is
-            // the lighter thinking tone (docs/tui-color-tones.md), not a
-            // dimmed gray.
+            // The thinking block first: the model's own reasoning items
+            // (docs/tui-thinking-block.md section 4). Rendered above
+            // the message body and the tool calls that follow.
+            // `Ctrl+T` toggles the block between collapsed and
+            // expanded. `Ctrl+X` hides or shows the block entirely.
+            // The `thinking` tag uses the `ThinkingTag` role. The
+            // block body keeps the `Thinking` role.
+            // docs/tui-turn-fold.md "Final message panel": when
+            // `final_report`, the block renders inside the report panel.
+            // Its rows drop the `LABEL` pad and the content gutter.
+            // They wrap to the panel inner width.
+            let mut think_rows: Vec<Line<'static>> = Vec::new();
             if state.thinking_shown {
                 let reasoning = e.get("reasoning").and_then(|v| v.as_array());
                 if let Some(text) = thinking_text(reasoning) {
                     let thinking_style =
                         palette.style(crate::color::Role::Thinking, Modifier::empty());
+                    let tag_style =
+                        Style::default().fg(palette.thinking_tag(state.thinking_expanded));
+                    let prefix = if final_report { "" } else { LABEL };
                     if state.thinking_expanded {
-                        let header = vec![Span::styled(format!("{LABEL}thinking"), thinking_style)];
-                        out.push(Line::from(header));
-                        owns.push(None); // the thinking label: UI chrome, not shareable source
-                        // The reasoning body aligns with the tool-result
-                        // text. One cell of left pad, then the text wraps
-                        // to the remaining width. This matches the `read`
-                        // and `bash` panel left pad. No content gutter.
-                        let content_w = width.saturating_sub(1);
+                        let header = vec![Span::styled(format!("{prefix}thinking"), tag_style)];
+                        think_rows.push(Line::from(header));
+                        let content_w = if final_report {
+                            user_box_content_w(width)
+                        } else {
+                            assistant_body_content_w(width)
+                        };
                         let wrapped = wrap_thinking(
                             &text,
                             content_w,
@@ -422,17 +453,24 @@ fn event_lines<'a>(
                             thinking_style,
                             state.tool_display.highlight_engine,
                         );
-                        let n = wrapped.len();
-                        out.extend(guttered(&wrapped, " "));
-                        owns.extend(std::iter::repeat_n(None, n));
+                        if final_report {
+                            // Inside the panel there is no content
+                            // gutter. The panel supplies its own pad.
+                            think_rows.extend(wrapped);
+                        } else {
+                            // The reasoning body aligns with the tool
+                            // result text. One cell of left pad, then
+                            // the text wraps to the remaining width.
+                            // This matches the `read`/`bash` panel pad.
+                            think_rows.extend(guttered(&wrapped, " "));
+                        }
                     } else {
-                        // The collapsed row: a one-line pi-style label with
-                        // the expand hint, not the full reasoning text.
-                        out.push(Line::from(Span::styled(
-                            format!("{LABEL}thinking \u{2026} (Ctrl+T to expand)"),
-                            thinking_style,
+                        // The collapsed row: a one-line pi-style label
+                        // with the expand hint, not the reasoning text.
+                        think_rows.push(Line::from(Span::styled(
+                            format!("{prefix}thinking \u{2026} (Ctrl+T to expand)"),
+                            tag_style,
                         )));
-                        owns.push(None);
                     }
                 }
             }
@@ -462,33 +500,67 @@ fn event_lines<'a>(
                 .collect();
             // One cell of left pad aligns the assistant body with the
             // tool-result text (the `read`/`bash` panel left pad). The
-            // body wraps to the remaining width.
-            let content_w = width.saturating_sub(1);
+            // body wraps to the remaining width. The final-message
+            // panel (docs/tui-turn-fold.md "Final message panel") is
+            // narrower: its content wraps to the panel inner width.
+            let content_w = if final_report {
+                user_box_content_w(width)
+            } else {
+                assistant_body_content_w(width)
+            };
             let (wrapped, prov) = if content.is_empty() {
                 (Vec::new(), Vec::new())
             } else {
                 render_message_content(&content, event_id, ext, content_w, prose, palette)
             };
+            // The first body line: the tool-call count header plus the
+            // first wrapped line. The remaining lines are the wrap
+            // continuations. `body_rows` stay unpadded. Each output form
+            // adds its own left pad.
+            let mut first_spans: Vec<Span<'static>> = Vec::new();
             if let Some(first) = wrapped.first() {
+                first_spans.extend(header.iter().cloned());
                 if !header.is_empty() {
-                    header.push(Span::raw("  "));
+                    first_spans.push(Span::raw("  "));
                 }
-                header.extend(first.spans.iter().cloned());
+                first_spans.extend(first.spans.iter().cloned());
             }
-            // The one-cell left pad: a plain space before the body text.
-            let mut body_header = vec![Span::raw(" ")];
-            body_header.extend(header);
-            out.push(Line::from(body_header));
-            owns.push(owns_raw_line(0, &prov, &hard));
-            // An empty content (a model output that carries only tool
-            // calls) has no body line; the header stands alone.
-            // FT-006: an unguarded `wrapped[1..]` panicked on the
-            // first launch draw. The body lines carry the one-cell pad.
-            if !wrapped.is_empty() {
-                out.extend(guttered(&wrapped[1..], " "));
-                for k in 1..prov.len() {
-                    owns.push(owns_raw_line(k, &prov, &hard));
+            let mut body_rows: Vec<Line<'static>> = vec![Line::from(first_spans)];
+            for w in wrapped.iter().skip(1) {
+                body_rows.push(Line::from(w.spans.clone()));
+            }
+            let mut body_raws: Vec<Option<String>> = Vec::new();
+            for k in 0..body_rows.len() {
+                body_raws.push(owns_raw_line(k, &prov, &hard));
+            }
+            let n_think = think_rows.len();
+            if final_report {
+                // The idle reply of a completed turn: the rounded
+                // panel with the `Report` border and no title
+                // (docs/tui-turn-fold.md "Final message panel"). The
+                // thinking block rides inside the panel. The border
+                // rows are UI chrome. The interior rows keep the
+                // per-source-line yank ownership.
+                let mut panel_rows = think_rows;
+                panel_rows.extend(body_rows.iter().cloned());
+                let panel = report_box_rows(&panel_rows, width, palette);
+                out.extend(panel);
+                owns.push(None);
+                owns.extend(std::iter::repeat_n(None, n_think));
+                owns.extend(body_raws);
+                owns.push(None);
+            } else {
+                out.extend(think_rows);
+                owns.extend(std::iter::repeat_n(None, n_think));
+                // The one-cell left pad: a plain space before the body
+                // text. FT-006: the empty-content case is guarded by
+                // the `body_rows` build above.
+                for br in &body_rows {
+                    let mut padded: Vec<Span<'static>> = vec![Span::raw(" ")];
+                    padded.extend(br.spans.iter().cloned());
+                    out.push(Line::from(padded));
                 }
+                owns.extend(body_raws);
             }
         }
         EventKind::ToolCall => {
@@ -550,8 +622,8 @@ fn event_lines<'a>(
         EventKind::ToolResult => {
             let id = e.get_str("id").unwrap_or("?");
             // The call details hold the tool name and the call
-            // arguments (the write diff needs the write `content`
-            // argument; docs/tui-tool-result-truncation.md).
+            // arguments. The write diff needs the write `content`
+            // argument (docs/tui-tool-result-truncation.md).
             let (name, args) = call_details
                 .get(id)
                 .cloned()
@@ -559,63 +631,16 @@ fn event_lines<'a>(
             let value = e.get("value");
             let err = e.get_bool("is_error").unwrap_or(false);
             let status = result_status(value, err);
-            // The result body in its lighter panel (docs/tui-tool-
-            // display-port.md section 2, the box; the 2026-09-14 user
-            // pass dropped the border lines: the panel is the lighter
-            // background only). The body is the tool-specific compact
-            // output (docs/tui-tool-result-truncation.md section 1,
-            // the content layer), folded to the output mode's lines,
-            // with the global Ctrl+O expansion to the full body. The
-            // panel header row carries the tool name (the purple
-            // `tool_name` accent, bold) and the status, so no
-            // separate header line above the panel.
             let value_ref = value.unwrap_or(&serde_json::Value::Null);
-            // The body content budget: the panel inner width minus the
-            // left padding cell. The panel truncates overflow with a
-            // trailing ellipsis, so the content fills the panel
-            // instead of leaving dead columns (the 2026-09-03 user
-            // directive: truncate, never wrap). The borderless panel
-            // (2026-09-14) keeps one cell of left padding, so the
-            // budget is `width - 1` instead of the old `width - 3`.
             let body_w = width.saturating_sub(1);
             // The per-block expand fraction (docs/tui-tool-display-
-            // fancy.md section 6): when the animation system has a
-            // value for this event ID, it interpolates the body cap
-            // between the collapsed and expanded caps. An empty map
-            // means "no animation: use the `tool_expanded` bool".
+            // fancy.md section 6). When the animation system has a
+            // value for this event ID it interpolates the body cap.
+            // An empty map means "use the `tool_expanded` bool".
             let expand_frac = state.expand_fracs.get(id).copied().unwrap_or(-1.0);
-            let mut body = crate::tool_display::body_rows()
-                .tool(&name)
-                .value(value_ref)
-                .call_args(&args)
-                .err(err)
-                .cfg(state.tool_display)
-                .palette(palette)
-                .expanded(state.tool_expanded)
-                .width(body_w)
-                .expand_frac(expand_frac)
-                .call();
-            // The JSON-document body (docs/tui-color-tones.md): a
-            // read result whose content is a complete JSON document,
-            // or an unknown tool whose result is JSON, keeps the
-            // JSON token colors instead of the plain code tone.
-            let body_text = value_ref.get("text").and_then(|v| v.as_str()).unwrap_or("");
-            let known = matches!(name.as_str(), "read" | "write" | "edit" | "bash");
-            if (name == "read" || !known) && highlight::looks_like_json(body_text) {
-                body = crate::tool_display::json_body_rows(
-                    &name,
-                    value_ref,
-                    state.tool_display,
-                    palette,
-                    state.tool_expanded,
-                    body_w,
-                    expand_frac,
-                );
-            }
-            // The panel header names the tool. A `read` result also
-            // carries the file it read as a dim label after the name
-            // (the `file_path` of its call arguments; the kernel knows
-            // the argument shape of its own read tool).
+            // The panel header names the tool.
+            // A `read` result adds a dim label after the name.
+            // The label is the read `file_path` or `path` argument.
             let label = if name == "read" {
                 args.get("file_path")
                     .or_else(|| args.get("path"))
@@ -624,22 +649,77 @@ fn event_lines<'a>(
             } else {
                 ""
             };
-            let rows =
-                crate::tool_display::box_rows(&name, label, &status, &body, width, palette, err);
-            // The shareable raw source of a result is its raw output
-            // text (section 11.3); assign it to the box's first row so
-            // a yank of the box returns the full output, not the
-            // truncated/boxed display.
-            let raw_output = raw_event_text(e);
-            for (i, row) in rows.into_iter().enumerate() {
+            // The turn fold L2/L3 (docs/tui-turn-fold.md). Applies in
+            // the main view and the browse view alike. An unopened
+            // result renders as a one-line header. Opened results
+            // render the full body. The per-result frac is the open
+            // state. The `zA`, click, `zM`, and `zR` keys set it.
+            // The Ctrl+O toggle is ignored by the L2 default.
+            let fold_open = expand_frac >= 0.5;
+            let fold_closed = !fold_open;
+            if fold_closed {
+                // The one-line header. No body, no margin rows.
+                // The raw output stays the yankable source of the row
+                // (section 11.3).
+                let row =
+                    crate::tool_display::header_row(&name, label, &status, width, palette, err);
                 let spans: Vec<Span<'static>> =
                     row.into_iter().map(|(s, t)| Span::styled(t, s)).collect();
                 out.push(Line::from(spans));
-                owns.push(if i == 0 {
-                    Some(raw_output.clone())
-                } else {
-                    None
-                });
+                owns.push(Some(raw_event_text(e)));
+            } else {
+                let expanded_use = state.tool_expanded || fold_open;
+                // The result body in its lighter panel (docs/tui-tool-
+                // display-port.md section 2). The body is the tool-
+                // specific compact output folded to the output mode's
+                // lines. In fold mode the per-result open state takes
+                // the place of the global toggle.
+                let mut body = crate::tool_display::body_rows()
+                    .tool(&name)
+                    .value(value_ref)
+                    .call_args(&args)
+                    .err(err)
+                    .cfg(state.tool_display)
+                    .palette(palette)
+                    .expanded(expanded_use)
+                    .width(body_w)
+                    .expand_frac(expand_frac)
+                    .call();
+                // The JSON-document body (docs/tui-color-tones.md).
+                // A read result with a JSON-document body keeps the
+                // JSON token colors. So does an unknown tool whose
+                // result is JSON. The plain code tone is otherwise
+                // used for the body.
+                let body_text = value_ref.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                let known = matches!(name.as_str(), "read" | "write" | "edit" | "bash");
+                if (name == "read" || !known) && highlight::looks_like_json(body_text) {
+                    body = crate::tool_display::json_body_rows(
+                        &name,
+                        value_ref,
+                        state.tool_display,
+                        palette,
+                        expanded_use,
+                        body_w,
+                        expand_frac,
+                    );
+                }
+                let rows = crate::tool_display::box_rows(
+                    &name, label, &status, &body, width, palette, err,
+                );
+                // The raw output is the shareable source of a result
+                // (section 11.3). The box's first row owns it so a
+                // yank returns the full output, not the display.
+                let raw_output = raw_event_text(e);
+                for (i, row) in rows.into_iter().enumerate() {
+                    let spans: Vec<Span<'static>> =
+                        row.into_iter().map(|(s, t)| Span::styled(t, s)).collect();
+                    out.push(Line::from(spans));
+                    owns.push(if i == 0 {
+                        Some(raw_output.clone())
+                    } else {
+                        None
+                    });
+                }
             }
         }
         EventKind::ApprovalRequest => {
@@ -904,15 +984,18 @@ fn push_line(cur: &mut Vec<Span<'static>>, out: &mut Vec<Line<'static>>) {
 /// measured in characters; CJK and combining characters will drift a
 /// few columns on non-ASCII lines (phase-1 log content is ASCII).
 /// The expanded thinking block text (docs/tui-thinking-block.md
-/// section 4): the raw reasoning text in the thinking tone. Two
-/// exceptions: a run of consecutive `|` table lines draws as the
-/// box-drawing grid (the 2026-09-03 user report: tables inside a
-/// thinking block lost their fixed column widths), and a fenced code
-/// block (` ``` ` / `~~~`) draws through the active highlight engine
-/// (`tree-sitter` by default, the 2026-09-11 request): the fence marker
-/// lines take the dimmed `Fence` tone, the language tag after the
-/// opening delimiter drives the highlight, and the unscoped runs fall
-/// back to the `Code` tone, fg-only, like the tool-result bodies.
+/// section 4). The reasoning body renders as markdown: headings,
+/// lists, blockquotes, and inline code, bold, italic, and links get
+/// their respective palette styles. Plain runs take the `style`
+/// parameter (the thinking tone). Two exceptions remain: a run of
+/// consecutive `|` table lines draws as the box-drawing grid (the
+/// 2026-09-03 user report: tables inside a thinking block lost their
+/// fixed column widths), and a fenced code block draws through the
+/// active highlight engine (the 2026-09-11 request): the fence
+/// marker lines take the dimmed `Fence` tone, the language tag after
+/// the opening delimiter drives the highlight, and the unscoped runs
+/// fall back to the `Code` tone, fg-only, like the tool-result
+/// bodies.
 fn wrap_thinking(
     text: &str,
     wrap_w: usize,
@@ -920,18 +1003,57 @@ fn wrap_thinking(
     style: Style,
     engine: crate::tool_display::HighlightEngine,
 ) -> Vec<Line<'static>> {
+    let (lines, _in_fence, _fence_lang) = wrap_thinking_full(text, wrap_w, palette, style, engine);
+    lines
+}
+
+/// Wrap a whole thinking text from a fresh highlighter.
+///
+/// The settled-transcript path and the live cache's full-rebuild
+/// path use this. It creates a stateful `CodeHl`, feeds every hard
+/// line, and returns the wrapped lines plus the final fence state.
+/// A block comment that spans fence lines stays open across them.
+fn wrap_thinking_full(
+    text: &str,
+    wrap_w: usize,
+    palette: &crate::color::Palette,
+    style: Style,
+    engine: crate::tool_display::HighlightEngine,
+) -> (Vec<Line<'static>>, bool, Option<String>) {
     let hard_lines: Vec<&str> = text.split('\n').collect();
+    let mut hl = crate::tool_display::CodeHl::new(engine);
+    let (out, in_fence, fence_lang) =
+        wrap_thinking_delta(&hard_lines, wrap_w, palette, style, &mut hl, false, None);
+    (out, in_fence, fence_lang)
+}
+
+/// Wrap the complete hard lines of an incremental thinking suffix.
+///
+/// `lines` are the newly-settled complete hard lines. They never
+/// include the in-progress trailing partial. `hl`, `in_fence`, and
+/// `fence_lang` carry state from the already-wrapped prefix. A code
+/// fence or block comment spanning the append boundary stays
+/// coherent. The in-progress partial line is not handled here.
+/// Wrap it with [`wrap_thinking_held`] instead, since re-wrapping a
+/// growing line each frame cannot advance the persistent tree-sitter
+/// parser in place.
+fn wrap_thinking_delta(
+    lines: &[&str],
+    wrap_w: usize,
+    palette: &crate::color::Palette,
+    style: Style,
+    hl: &mut crate::tool_display::CodeHl,
+    in_fence: bool,
+    fence_lang: Option<String>,
+) -> (Vec<Line<'static>>, bool, Option<String>) {
     let mut out: Vec<Line<'static>> = Vec::new();
     let border_style = palette.style(crate::color::Role::Hint, Modifier::DIM);
     let code_style = palette.style(crate::color::Role::Code, Modifier::empty());
-    // One stateful highlighter for the whole thinking text: a block
-    // comment that spans code-fence lines stays open across them.
-    let mut hl = crate::tool_display::CodeHl::new(engine);
-    let mut in_fence = false;
-    let mut fence_lang: Option<String> = None;
+    let mut fence_lang = fence_lang;
+    let mut in_fence = in_fence;
     let mut i = 0usize;
-    while i < hard_lines.len() {
-        let t = hard_lines[i].trim_start();
+    while i < lines.len() {
+        let t = lines[i].trim_start();
         if highlight::is_fence_delim(t) {
             i += 1;
             // The fence marker line: the delimiter and the language
@@ -957,7 +1079,7 @@ fn wrap_thinking(
             continue;
         }
         if in_fence {
-            let line = hard_lines[i];
+            let line = lines[i];
             i += 1;
             // One hard code line through the active engine. The scoped
             // tokens carry the engine's fg colors (no background, the
@@ -985,10 +1107,10 @@ fn wrap_thinking(
             }
             continue;
         }
-        if highlight::is_table_row(hard_lines[i]) {
+        if highlight::is_table_block_start(lines, i) {
             let mut block: Vec<String> = Vec::new();
-            while i < hard_lines.len() && highlight::is_table_row(hard_lines[i]) {
-                block.push(hard_lines[i].to_string());
+            while i < lines.len() && highlight::is_table_row(lines[i]) {
+                block.push(lines[i].to_string());
                 i += 1;
             }
             let grid = highlight::table_grid(&block, wrap_w, palette);
@@ -1006,15 +1128,109 @@ fn wrap_thinking(
             }
             continue;
         }
-        let line = hard_lines[i];
+        let line = lines[i];
         i += 1;
         if line.is_empty() {
             out.push(Line::default());
             continue;
         }
-        out.extend(wrap_styled(vec![(style, line.to_string())], wrap_w));
+        // Prose renders as markdown: the per-line highlighter recovers
+        // headings, lists, blockquotes, and inline code, bold, italic,
+        // and links. Plain runs fall back to the thinking tone. Fence
+        // and table lines are handled by the branches above, so the
+        // fence state here stays `false`.
+        let mut md_fence = false;
+        let segs = with_plain_base(highlight::md_line(line, &mut md_fence, palette), style);
+        out.extend(wrap_flow(segs, wrap_w));
     }
+    (out, in_fence, fence_lang)
+}
+
+/// Wrap the in-progress (partial) last thinking line.
+///
+/// A fresh `CodeHl` is seeded with the carried fence language. This
+/// keeps a line inside an open code fence highlighted. Block-comment
+/// state that spans the boundary is not carried. That is a visual
+/// approximation on the single in-progress line only. An empty
+/// `held` returns an empty vec.
+fn wrap_thinking_held(
+    held: &str,
+    wrap_w: usize,
+    palette: &crate::color::Palette,
+    style: Style,
+    engine: crate::tool_display::HighlightEngine,
+    in_fence: bool,
+    fence_lang: Option<&str>,
+) -> Vec<Line<'static>> {
+    if held.is_empty() {
+        return Vec::new();
+    }
+    let mut hl = crate::tool_display::CodeHl::new(engine);
+    let (out, _, _) = wrap_thinking_delta(
+        std::slice::from_ref(&held),
+        wrap_w,
+        palette,
+        style,
+        &mut hl,
+        in_fence,
+        fence_lang.map(str::to_string),
+    );
     out
+}
+
+/// Re-wrap the in-progress held thinking line and store it on the
+/// cache (docs/tui-perf-streaming-incremental-plan.md). A join
+/// ending in a newline leaves an empty held line, which shows as
+/// one blank row (matching the legacy full wrap).
+fn refresh_held_lines(
+    cache: &mut StreamBlockCache,
+    held: &str,
+    wrap_w: usize,
+    palette: &crate::color::Palette,
+    thinking_style: Style,
+) {
+    cache.think_held = held.to_string();
+    cache.think_held_lines = if held.is_empty() {
+        vec![gutter_line(Line::default(), LIVE_GUTTER)]
+    } else {
+        gutter_lines(
+            wrap_thinking_held(
+                held,
+                wrap_w,
+                palette,
+                thinking_style,
+                cache.engine,
+                cache.think_in_fence,
+                cache.think_fence_lang.as_deref(),
+            ),
+            LIVE_GUTTER,
+        )
+    };
+    cache.think_held_wrapped_for = held.len();
+}
+
+/// Apply the live-stream gutter to a wrapped line. The live block
+/// settles where it lands, so it must not carry the 12-col settled
+/// gutter. Instead each body line owns one leading space. Lines that
+/// already start with the gutter keep it. Everything else gets it
+/// prepended (docs/tui-streaming-simplify.md section 3).
+fn gutter_line(line: Line<'static>, gutter: &str) -> Line<'static> {
+    let has_gutter = line
+        .spans
+        .first()
+        .is_some_and(|s| s.content.starts_with(gutter));
+    if has_gutter {
+        line
+    } else {
+        let mut spans = vec![Span::styled(gutter.to_string(), Style::default())];
+        spans.extend(line.spans);
+        Line::from(spans)
+    }
+}
+
+/// Apply the live-stream gutter to a whole set of wrapped lines.
+fn gutter_lines(lines: Vec<Line<'static>>, gutter: &str) -> Vec<Line<'static>> {
+    lines.into_iter().map(|l| gutter_line(l, gutter)).collect()
 }
 
 fn wrap_styled(segs: Vec<(Style, String)>, width: usize) -> Vec<Line<'static>> {
@@ -1063,6 +1279,67 @@ fn wrap_styled(segs: Vec<(Style, String)>, width: usize) -> Vec<Line<'static>> {
         }
     }
     out
+}
+
+/// Wrap a list of hard lines of styled segments to fit `width` display
+/// cells, preserving segment styling across wrap points.
+///
+/// Each input line is a `Vec<Seg>` (one hard line of the previewer
+/// output). Each output line is at most `width` cells: words wrap at
+/// spaces, and a word longer than the width is hard-broken. A hard
+/// line whose segments are all empty (a blank line) yields one empty
+/// display line, so blank lines stay visible. Re-running this every
+/// frame with the pane's current inner width is what makes the
+/// preview pane reflow when the terminal resizes instead of
+/// clipping (docs/tui-ratatui-ecosystem-audit.md §4.8).
+pub fn wrap_hard_lines(
+    lines: &[Vec<crate::highlight::Seg>],
+    width: usize,
+) -> Vec<Vec<Line<'static>>> {
+    let width = width.max(1);
+    lines
+        .iter()
+        .map(|segs| {
+            if segs.iter().all(|(_, t)| t.is_empty()) {
+                // A blank line: keep exactly one empty display row.
+                return vec![Line::from("")];
+            }
+            wrap_styled(segs.clone(), width)
+        })
+        .collect()
+}
+
+/// The display-row index where hard line `hard` begins in `wrapped`
+/// (the output of [`wrap_hard_lines`]). Used to translate the
+/// hard-line-unit `preview_scroll` offset into a display-row offset
+/// without re-wrapping.
+pub fn hard_line_display_start(wrapped: &[Vec<Line>], hard: usize) -> usize {
+    let mut acc = 0usize;
+    for (i, lines) in wrapped.iter().enumerate() {
+        if i == hard {
+            return acc;
+        }
+        acc += lines.len();
+    }
+    // `hard` past the end: the display row after the last hard line.
+    acc
+}
+
+/// The largest hard-line index whose display start is at or before
+/// `row` (in `wrapped`). Used to back-track the scroll target when
+/// the palette auto-scrolls to a selected option that wraps onto
+/// several display rows.
+pub fn display_row_hard_line(wrapped: &[Vec<Line>], row: usize) -> usize {
+    let mut acc = 0usize;
+    let mut last = 0usize;
+    for (i, lines) in wrapped.iter().enumerate() {
+        if acc > row {
+            break;
+        }
+        last = i;
+        acc += lines.len();
+    }
+    last
 }
 
 /// Like [`wrap_styled`] but treats every segment as one continuous
@@ -1538,14 +1815,14 @@ fn block_line_text(parts: &[crate::render::Part]) -> String {
 /// Render one user/assistant message with the stage 3 span
 /// extraction.
 ///
-/// - A `fence:mermaid` block: the host requests a transform for the
-///   fence body. A finished reply replaces the fence with the
-///   extension's lines, guttered like the transcript. A missing
-///   owner, a pending or timed-out request, or a dead extension
+/// - A `fence:mermaid` block: a finished transform reply replaces the
+///   fence with the extension's lines, guttered like the transcript.
+///   The reply is read from the pre-resolved span map. A missing
+///   entry, a pending or timed-out request, or a dead extension
 ///   shows the raw fence (G5 fallback).
-/// - An `inline:latex` span: the host requests a transform for the
-///   span. A finished reply replaces the span text in place (the
-///   reply lines join into one line). No owner: the raw span text
+/// - An `inline:latex` span: a finished transform reply replaces the
+///   span text in place (the
+///   reply lines join into one line). No entry: the raw span text
 ///   renders, exactly like the built-in path.
 /// - A table block: a run of consecutive `|`-separated lines draws
 ///   as a box-drawing grid, like the `ext == None` path (the
@@ -1555,10 +1832,17 @@ fn block_line_text(parts: &[crate::render::Part]) -> String {
 /// capability-aware prose color); styled runs keep their own
 /// styles. The `ext == None` path renders the content with
 /// [`wrap_markdown_p`] over the same base.
+///
+/// The transform requests are not sent here.
+/// The host is not `Send`.
+/// The main thread sends them up front.
+/// It uses [`resolve_ext_spans`] and hands the finished
+/// replies through [`ExtRenderData`]
+/// (docs/tui-perf-background-build-plan.md, stage 1).
 fn render_message_content(
     content: &str,
     event_id: u64,
-    ext: Option<&crate::ext::ExtHost>,
+    ext: Option<&ExtRenderData>,
     wrap_w: usize,
     base: Style,
     palette: &crate::color::Palette,
@@ -1584,7 +1868,11 @@ fn render_message_content(
                     // table lines, clamped to the pane width,
                     // like wrap_markdown_p.
                     let text = block_line_text(&parts[li]);
-                    if highlight::is_table_row(&text) {
+                    let next_is_sep = parts
+                        .get(li + 1)
+                        .map(|p| highlight::is_table_separator(&block_line_text(p)))
+                        .unwrap_or(false);
+                    if highlight::is_table_row(&text) && next_is_sep {
                         let mut block: Vec<String> = Vec::new();
                         while li < parts.len() {
                             let t = block_line_text(&parts[li]);
@@ -1613,11 +1901,15 @@ fn render_message_content(
                                     base,
                                 ));
                             }
-                            Part::Latex { idx, raw, text } => {
-                                let req =
-                                    host.request_span(event_id, *idx, "inline:latex", text, wrap_w);
-                                let replaced = req
-                                    .and_then(|_| host.span_lines(event_id, *idx))
+                            Part::Latex { idx, raw, .. } => {
+                                // The transform reply is pre-resolved
+                                // on the main thread.
+                                // A missing entry means no finished
+                                // reply yet. The raw span shows then
+                                // (G5 fallback).
+                                let replaced = host
+                                    .span_lines
+                                    .get(&(event_id, *idx))
                                     .map(|ls| {
                                         ls.iter()
                                             .map(|l| l.text.clone())
@@ -1639,12 +1931,14 @@ fn render_message_content(
                     }
                 }
             }
-            MBlock::Mermaid { idx, raw, text } => {
-                let req = host.request_span(event_id, idx, "fence:mermaid", &text, wrap_w);
-                // An empty reply erases the block: treat it as no
-                // reply and show the raw fence.
-                let art = req
-                    .and_then(|_| host.span_lines(event_id, idx))
+            MBlock::Mermaid { idx, raw, .. } => {
+                // The transform reply is pre-resolved on the main
+                // thread. An empty or missing entry erases the
+                // block: show the raw fence (G5 fallback).
+                let art = host
+                    .span_lines
+                    .get(&(event_id, idx))
+                    .cloned()
                     .filter(|ls| !ls.is_empty());
                 match art {
                     Some(lines) => {
@@ -1831,141 +2125,566 @@ fn working_row(app: &App, running: bool, now: &chrono::DateTime<chrono::Utc>) ->
         app.palette()
             .style(crate::color::Role::Status, Modifier::empty()),
     );
+    let mut spans = vec![frame, body];
+    // The in-progress turn's live tally, merged into this row instead
+    // of a separate in-transcript line (docs/tui-turn-fold.md).
+    if let Some(tally) = app.live_fold_tally() {
+        spans.push(Span::styled(
+            format!(" · {tally}"),
+            app.palette()
+                .style(crate::color::Role::Status, Modifier::DIM),
+        ));
+    }
+    Line::from(spans)
+}
+
+/// The transcript-building row, shown while a background build is in
+/// flight (docs/tui-perf-background-build-plan.md, stage 2).
+/// It reuses the working-row spinner shape: the braille frame in the
+/// thinking-border color, then the label in the pi `dim` tone.
+fn rebuilding_row(app: &App, now: &chrono::DateTime<chrono::Utc>) -> Line<'static> {
+    let frame = Span::styled(
+        format!("{} ", spinner_frame(now)),
+        Style::default().fg(app.palette().thinking_border(app.thinking_level())),
+    );
+    let body = Span::styled(
+        " building transcript…",
+        app.palette()
+            .style(crate::color::Role::Status, Modifier::empty()),
+    );
     Line::from(vec![frame, body])
 }
 
-/// The live stream block for an in-progress model response
-/// (docs/tui-streaming-response.md §6.3).
+/// The one-cell left pad of the live stream body
+/// (docs/tui-streaming-simplify.md section 3). The live body
+/// settles where it lands, so it must not carry the old 12-column
+/// settled gutter.
+const LIVE_GUTTER: &str = " ";
+
+/// Split the joined reasoning text into the settled prefix and the
+/// in-progress held line. The settled half ends at the last `\n`
+/// (inclusive). The held half has no trailing `\n`. An empty input
+/// yields two empty halves. Text without any newline is held
+/// entirely.
+fn split_settled_held(full: &str) -> (&str, &str) {
+    match full.rfind('\n') {
+        Some(p) => (&full[..=p], &full[p + 1..]),
+        None => ("", full),
+    }
+}
+
+/// The frame's config fields that invalidate the live stream block
+/// cache (docs/tui-perf-streaming-incremental-plan.md). A change to
+/// any of these forces a full rebuild.
+#[derive(Clone, Copy)]
+struct ConfigSnap {
+    width: usize,
+    palette_level: crate::color::Level,
+    engine: crate::tool_display::HighlightEngine,
+    thinking_expanded: bool,
+}
+
+/// Owned snapshot of the live buffer and config. It is captured
+/// under shared borrows of [`App`] before the mutable cache update
+/// (docs/tui-perf-streaming-incremental-plan.md).
+struct StreamPlan {
+    /// Whether the stream's `done` line has been read.
+    done: bool,
+    /// Partial tool-call arguments, cloned (a handful at most).
+    tool_args: HashMap<String, (String, String)>,
+    /// The sorted reasoning id set plus total value byte length.
+    /// This is the join-skip fingerprint.
+    cur_keys: Vec<String>,
+    cur_len: usize,
+    /// The joined reasoning text. It is joined only when a
+    /// re-wrap is needed. Idle frames keep it `None`.
+    thinking_joined: Option<String>,
+    /// The new response text. Set only when it changed, when the
+    /// cache was invalidated, or on the first build.
+    text_new: Option<String>,
+    /// A width, palette, or engine change. Both sections fully
+    /// rebuild.
+    cfg_invalid_full: bool,
+    /// The `thinking_expanded` toggle flipped. The thinking section
+    /// rebuilds. The text section is unaffected.
+    think_toggle_invalid: bool,
+    cfg: ConfigSnap,
+    /// The owned palette. Wrap calls below run without any `App`
+    /// borrow.
+    palette: crate::color::Palette,
+}
+
+/// One frame's view of the live stream block
+/// (docs/tui-perf-streaming-incremental-plan.md).
+///
+/// The two big sections (settled thinking and response text) share
+/// their wrapped lines with the app's
+/// [`StreamBlockCache`] through `Rc`. A cache hit costs two
+/// refcount bumps and no line copies. The small pieces (header,
+/// thinking label, in-progress held lines, partial tool args,
+/// cursor) are owned and rebuilt each frame.
+///
+/// `len`, `Index`, and `iter` walk the sections in display order:
+/// header, label, visible thinking, held lines, visible text, tool
+/// args. The blinking cursor overlays the last body line. When the
+/// body is empty it is its own trailing row. This matches the
+/// legacy flat-vec render byte for byte.
+pub(crate) struct StreamBlockView {
+    /// The pinned status row ("…" open, "· done" settled).
+    header: Vec<Line<'static>>,
+    /// The "thinking …" label row, when thinking is shown.
+    label: Option<Line<'static>>,
+    /// Settled thinking lines shared with the cache.
+    think: Rc<Vec<Line<'static>>>,
+    /// Offset into `think` where the visible window starts.
+    think_start: usize,
+    /// Wrapped in-progress held thinking lines, fresh each frame
+    /// they change.
+    think_held: Vec<Line<'static>>,
+    /// Response text lines shared with the cache.
+    text: Rc<Vec<Line<'static>>>,
+    /// Offset into `text` where the visible window starts.
+    text_start: usize,
+    /// Partial tool-call argument rows.
+    tool_args: Vec<Line<'static>>,
+    /// The last body line with the cursor span applied, or the
+    /// standalone cursor row when the body is empty. `None` when
+    /// the stream is done.
+    cursor_line: Option<Line<'static>>,
+    /// True when `cursor_line` is its own trailing row instead of an
+    /// overlay on the last body line.
+    cursor_standalone: bool,
+}
+
+impl StreamBlockView {
+    /// The empty view used when there is no live stream buffer.
+    pub(crate) fn empty() -> Self {
+        Self {
+            header: Vec::new(),
+            label: None,
+            think: Rc::new(Vec::new()),
+            think_start: 0,
+            think_held: Vec::new(),
+            text: Rc::new(Vec::new()),
+            text_start: 0,
+            tool_args: Vec::new(),
+            cursor_line: None,
+            cursor_standalone: false,
+        }
+    }
+
+    /// The total visible line count.
+    pub fn len(&self) -> usize {
+        let mut n = self.header.len();
+        if self.label.is_some() {
+            n += 1;
+        }
+        n += self.think.len() - self.think_start;
+        n += self.think_held.len();
+        n += self.text.len() - self.text_start;
+        n += self.tool_args.len();
+        if self.cursor_standalone {
+            n += 1;
+        }
+        n
+    }
+
+    /// The visible line at flat index `i`, or `None` past the end.
+    /// The last body line comes back with the cursor span applied
+    /// while the stream is open.
+    fn line_at(&self, i: usize) -> Option<&Line<'static>> {
+        // The cursor row (overlay or standalone) always occupies
+        // the final visible row.
+        if self.cursor_line.is_some() && self.len() > 0 && i == self.len() - 1 {
+            return self.cursor_line.as_ref();
+        }
+        let mut rem = i;
+        if rem < self.header.len() {
+            return self.header.get(rem);
+        }
+        rem -= self.header.len();
+        if let Some(l) = &self.label {
+            if rem == 0 {
+                return Some(l);
+            }
+            rem -= 1;
+        }
+        let think = &self.think[self.think_start..];
+        if rem < think.len() {
+            return Some(&think[rem]);
+        }
+        rem -= think.len();
+        if rem < self.think_held.len() {
+            return Some(&self.think_held[rem]);
+        }
+        rem -= self.think_held.len();
+        let text = &self.text[self.text_start..];
+        if rem < text.len() {
+            return Some(&text[rem]);
+        }
+        rem -= text.len();
+        self.tool_args.get(rem)
+    }
+
+    /// The visible lines in display order. The last body line
+    /// carries the cursor overlay. A standalone cursor is a
+    /// trailing row.
+    pub fn iter(&self) -> impl Iterator<Item = &Line<'static>> + '_ {
+        (0..self.len()).map(move |i| self.line_at(i).expect("in-bounds view index"))
+    }
+}
+
+impl std::ops::Index<usize> for StreamBlockView {
+    type Output = Line<'static>;
+
+    fn index(&self, i: usize) -> &Line<'static> {
+        self.line_at(i)
+            .expect("StreamBlockView index out of bounds")
+    }
+}
+
+/// The in-progress model response lines, rendered inside the
+/// transcript (docs/tui-streaming-simplify.md section 3). The caller
+/// appends the returned view's lines to the settled transcript. The
+/// live body settles where it lands, and the user can scroll up
+/// through the whole body.
 ///
 /// Shows the header with an ellipsis ("…") while the stream is open.
 /// Once the done line arrives, the header shows "· done".
 ///
-/// The body shows the tail of the accumulated content. The thinking
-/// tail and the response text share one window, the last
-/// `max_body_lines` rows, thinking above text. The block grows with
-/// the content, and its height never shrinks when the response text
-/// starts. The thinking slides out as the text arrives. It never
-/// collapses suddenly. Any partial tool-call arguments render when no
-/// content has arrived yet. A blinking block cursor marks the end of
-/// the live text.
+/// The body shows the full accumulated content. There is no sliding-
+/// window cap when `max_body_lines` is `usize::MAX`. Thinking renders
+/// above text, with partial tool-call arguments when no content has
+/// arrived yet. A blinking block cursor marks the end of the live
+/// text.
 ///
-/// The block sits right after the existing messages, the transcript.
-/// It sits above the model status indicator, the working row. It does
-/// not scroll with the transcript. The app clears it when the
-/// matching log event lands or the loop stops.
+/// The thinking block honors the same global toggles as settled
+/// blocks (docs/tui-streaming-simplify.md section 3). The
+/// `thinking_shown` toggle (Ctrl+X) controls visibility and the
+/// `thinking_expanded` toggle (Ctrl+T) controls collapse/expand.
+/// When collapsed the live thinking shows only the one-line
+/// "thinking …" label.
 ///
-/// The block grows with the arriving content. The body rows are
-/// bounded by `max_body_lines`, which the caller sets to a fraction of
-/// the viewport height. A long response extends the block without
-/// stealing the whole screen. The transcript absorbs the rest.
-fn stream_block_lines(app: &App, width: usize, max_body_lines: usize) -> Vec<Line<'static>> {
-    let buf = match app.stream_buf() {
-        Some(b) => b,
-        None => return Vec::new(),
+/// The wrapped thinking and response-text lines come from the app's
+/// `StreamBlockCache` (docs/tui-perf-streaming-incremental-plan.md).
+/// Only a newly appended thinking suffix is re-wrapped. The response
+/// text re-parses only when it changed. Idle frames skip all wrap
+/// work. The returned view shares the cached lines through `Rc`, so
+/// producing it copies nothing large.
+fn stream_block_lines(app: &mut App, width: usize, max_body_lines: usize) -> StreamBlockView {
+    // Phase 1 (shared borrows only): snapshot the live buffer, the
+    // cache fingerprints, and the config. No shared borrow of `App`
+    // may outlive the mutable cache update below.
+    let plan = {
+        let buf = match app.stream_buf() {
+            Some(b) => b,
+            None => return StreamBlockView::empty(),
+        };
+        let cached = app.stream_block_cache_ref().as_ref();
+
+        // Join-skip fingerprint: the sorted reasoning id set plus the
+        // total value byte length. Within a stream the id set only
+        // grows. The values only grow via `push_str`. A match means
+        // the joined text is byte-identical, so the O(T) join is
+        // skipped.
+        let mut cur_keys: Vec<String> = buf.reasoning.keys().cloned().collect();
+        cur_keys.sort();
+        let cur_len: usize = buf.reasoning.values().map(|s| s.len()).sum();
+        let fp_match = cached.is_some_and(|c| {
+            c.think_reasoning_keys == cur_keys && c.think_reasoning_len == cur_len
+        });
+        // The response text only grows within a stream. clear_stream
+        // drops the cache on settle and session switch. Equal length
+        // therefore means identical content, so the markdown re-parse
+        // is skipped.
+        let text_unchanged = cached.is_some_and(|c| c.text_src.len() == buf.text.len());
+
+        let cfg = ConfigSnap {
+            width,
+            palette_level: app.palette().level(),
+            engine: app.tool_display().highlight_engine,
+            thinking_expanded: app.thinking_expanded(),
+        };
+        let cfg_invalid_full = cached.is_none_or(|c| {
+            c.width != cfg.width || c.palette_level != cfg.palette_level || c.engine != cfg.engine
+        });
+        let think_toggle_invalid =
+            cached.is_none_or(|c| c.thinking_expanded != cfg.thinking_expanded);
+        // A thinking re-wrap is needed when the fingerprint moved,
+        // the expand toggle flipped, or the config invalidated the
+        // cache.
+        let need_think_work = !fp_match || think_toggle_invalid || cfg_invalid_full;
+
+        StreamPlan {
+            done: buf.done,
+            tool_args: buf.tool_args.clone(),
+            cur_keys,
+            cur_len,
+            thinking_joined: if need_think_work {
+                Some(buf.reasoning_text())
+            } else {
+                None
+            },
+            text_new: if text_unchanged {
+                None
+            } else {
+                Some(buf.text.clone())
+            },
+            cfg_invalid_full,
+            think_toggle_invalid,
+            cfg,
+            palette: app.palette().clone(),
+        }
     };
-    let palette = app.palette();
-    let prose = palette.style(crate::color::Role::PlainText, Modifier::empty());
+    // All shared borrows of `App` end here.
+
+    // Phase 2 (mutable): update the cache in place. Idle frames do
+    // nothing here.
+    {
+        let cache_slot = app.stream_block_cache_mut();
+        if cache_slot.is_none() {
+            *cache_slot = Some(StreamBlockCache::new(plan.cfg.engine));
+        }
+        let cache = cache_slot.as_mut().expect("cache initialized above");
+
+        if plan.cfg_invalid_full {
+            // Width, palette, or engine changed: full rebuild of both
+            // sections with a fresh highlighter.
+            *cache = StreamBlockCache::new(plan.cfg.engine);
+        }
+        // Record the config snapshot after the rebuild decision so the
+        // next frame's check reads the current values. Without this
+        // the `new()` sentinels would re-trigger a rebuild every frame.
+        cache.width = plan.cfg.width;
+        cache.palette_level = plan.cfg.palette_level;
+        cache.engine = plan.cfg.engine;
+        cache.thinking_expanded = plan.cfg.thinking_expanded;
+
+        if plan.think_toggle_invalid {
+            // The `thinking_expanded` toggle rebuilds the thinking
+            // section only. The text section is unaffected.
+            cache.think_hl = crate::tool_display::CodeHl::new(plan.cfg.engine);
+            cache.think_src.clear();
+            cache.think_lines = Rc::new(Vec::new());
+            cache.think_in_fence = false;
+            cache.think_fence_lang = None;
+            cache.think_held.clear();
+            cache.think_held_lines.clear();
+            cache.think_held_wrapped_for = 0;
+            cache.think_reasoning_keys.clear();
+            cache.think_reasoning_len = 0;
+        }
+
+        // ── thinking section ─────────────────────────────────
+        if let Some(full) = &plan.thinking_joined {
+            if !plan.cur_keys.is_empty() && !full.is_empty() {
+                let thinking_style = plan
+                    .palette
+                    .style(crate::color::Role::Thinking, Modifier::empty());
+                let wrap_w = plan.cfg.width.saturating_sub(1).max(4);
+                // Split the joined text into the settled prefix and the
+                // in-progress held line. `think_lines` covers every
+                // hard line except the held one, which is rewrapped
+                // whenever it changes.
+                let (_, held) = split_settled_held(full);
+                // Append-only growth keeps the prefix intact. A broken
+                // prefix (an earlier reasoning id grew) forces a full
+                // re-wrap from a fresh highlighter.
+                if full.starts_with(cache.think_src.as_str()) {
+                    let delta = &full[cache.think_src.len()..];
+                    if !delta.is_empty() {
+                        let frags: Vec<&str> = delta.split('\n').collect();
+                        if frags.len() >= 2 {
+                            // Completed hard lines: the old held line
+                            // plus the delta's first fragment, then the
+                            // delta's middle fragments. The final delta
+                            // fragment is the new held line.
+                            let mut to_wrap: Vec<String> = Vec::with_capacity(frags.len() - 1);
+                            to_wrap.push(cache.think_held.clone() + frags[0]);
+                            for f in &frags[1..frags.len() - 1] {
+                                to_wrap.push(f.to_string());
+                            }
+                            let refs: Vec<&str> = to_wrap.iter().map(|s| s.as_str()).collect();
+                            let (new_lines, in_fence, fence_lang) = wrap_thinking_delta(
+                                &refs,
+                                wrap_w,
+                                &plan.palette,
+                                thinking_style,
+                                &mut cache.think_hl,
+                                cache.think_in_fence,
+                                cache.think_fence_lang.clone(),
+                            );
+                            // The append copies the old lines into the
+                            // new `Rc` (O(T)). A persistent deque
+                            // would remove it. That is out of scope
+                            // for this pass.
+                            let mut merged: Vec<Line<'static>> =
+                                cache.think_lines.iter().cloned().collect();
+                            merged.extend(new_lines);
+                            cache.think_lines = Rc::new(gutter_lines(merged, LIVE_GUTTER));
+                            cache.think_in_fence = in_fence;
+                            cache.think_fence_lang = fence_lang;
+                        }
+                    }
+                } else {
+                    // Non-suffix change (an earlier reasoning id
+                    // grew): full re-wrap of the settled prefix from
+                    // a fresh highlighter.
+                    let settled = split_settled_held(full).0;
+                    let hard: Vec<&str> = if settled.is_empty() {
+                        Vec::new()
+                    } else {
+                        // `settled` ends in the held line's boundary
+                        // `\n`. Drop it before splitting, else a
+                        // spurious empty line appears.
+                        settled
+                            .strip_suffix('\n')
+                            .unwrap_or(settled)
+                            .split('\n')
+                            .collect()
+                    };
+                    cache.think_hl = crate::tool_display::CodeHl::new(plan.cfg.engine);
+                    let (lines, in_fence, fence_lang) = wrap_thinking_delta(
+                        &hard,
+                        wrap_w,
+                        &plan.palette,
+                        thinking_style,
+                        &mut cache.think_hl,
+                        false,
+                        None,
+                    );
+                    cache.think_lines = Rc::new(gutter_lines(lines, LIVE_GUTTER));
+                    cache.think_in_fence = in_fence;
+                    cache.think_fence_lang = fence_lang;
+                }
+                cache.think_src = full.to_string();
+                // Re-wrap the held line whenever the join ran. The
+                // fence state or a reset path may have moved even
+                // when the held text is unchanged. Idle frames skip
+                // the whole section, so the cached held lines stay
+                // O(1) with no highlight work.
+                refresh_held_lines(cache, held, wrap_w, &plan.palette, thinking_style);
+                cache.think_reasoning_keys = plan.cur_keys.clone();
+                cache.think_reasoning_len = plan.cur_len;
+            }
+        }
+
+        // ── response-text section ────────────────────────────
+        if let Some(text) = plan.text_new {
+            if text.is_empty() {
+                // Mirror the legacy path. An empty text contributes no
+                // lines.
+                cache.text_src.clear();
+                cache.text_lines = Rc::new(Vec::new());
+            } else {
+                let prose = plan
+                    .palette
+                    .style(crate::color::Role::PlainText, Modifier::empty());
+                let wrap_w = plan.cfg.width.saturating_sub(1).max(4);
+                let lines = wrap_markdown_p(&text, wrap_w, &plan.palette, prose);
+                cache.text_lines = Rc::new(gutter_lines(lines, LIVE_GUTTER));
+                cache.text_src = text;
+            }
+        }
+    }
+    // The mutable cache borrow ends here.
+
+    // Phase 3 (shared): assemble the view. The big sections are
+    // shared by `Rc` clone, so a cache hit copies nothing.
+    let cache = app
+        .stream_block_cache_ref()
+        .as_ref()
+        .expect("cache built above");
+    let cfg = plan.cfg;
+    let palette = &plan.palette;
+    let wrap_w = cfg.width.saturating_sub(1).max(4);
+
     let dim = palette.style(crate::color::Role::Status, Modifier::DIM);
     let label_style = Style::default()
         .fg(palette.color(crate::color::Role::ToolCommand))
         .add_modifier(Modifier::BOLD);
-    // The tool name of a partial call: the purple `tool_name` accent
-    // (the 2026-09-14 user pass), bold, standing alone with no
-    // `tool:` prefix.
     let tool_name_style = Style::default()
         .fg(palette.color(crate::color::Role::ToolName))
         .add_modifier(Modifier::BOLD);
-    let gutter = " ".repeat(GUTTER);
-    let wrap_w = width.saturating_sub(GUTTER).max(4);
+    let thinking_tag_style = Style::default().fg(palette.thinking_tag(cfg.thinking_expanded));
 
-    let mut out: Vec<Line<'static>> = Vec::new();
-
-    // Header row: the status suffix only — the `assistant` type marker
-    // is gone (2026-09-06 request: no message-type markers); the block
-    // body below is the live response.
-    let suffix = if buf.done { " · done" } else { " …" };
-    out.push(Line::from(vec![Span::styled(
+    // Header row: the status suffix only. The `assistant` type
+    // marker is gone (2026-09-06 request: no message-type markers).
+    let suffix = if plan.done { " · done" } else { " …" };
+    let header = vec![Line::from(vec![Span::styled(
         suffix.to_string(),
         label_style,
-    )]));
+    )])];
 
-    let mut body_lines: Vec<Line<'static>> = Vec::new();
+    // The label row, shown when thinking content exists. Collapsed
+    // shows "thinking …" and expanded shows "thinking"
+    // (docs/tui-streaming-simplify.md section 3).
+    let join_nonempty = plan.cur_len + plan.cur_keys.len().saturating_sub(1) > 0;
+    let shows_thinking_label =
+        app.thinking_shown() && !plan.cur_keys.is_empty() && join_nonempty && max_body_lines > 0;
+    let label = shows_thinking_label.then(|| {
+        let t = if cfg.thinking_expanded {
+            "thinking".to_string()
+        } else {
+            "thinking \u{2026}".to_string()
+        };
+        Line::from(vec![
+            Span::styled(LIVE_GUTTER.to_string(), Style::default()),
+            Span::styled(t, thinking_tag_style),
+        ])
+    });
 
-    let has_thinking = app.thinking_shown() && !buf.reasoning.is_empty();
-    let has_text = !buf.text.is_empty();
+    // The shared content window: the last `max_body_lines` rows. One
+    // row is reserved for the pinned thinking label when thinking is
+    // shown. While the content fits, the block grows with it. Once
+    // full, the oldest thinking rows scroll out as the text grows.
+    let settled_total = cache.think_lines.len();
+    let held_total = cache.think_held_lines.len();
+    // The thinking lines show only when the label row shows (which
+    // folds in the global `thinking_shown` toggle) and the block is
+    // expanded. Collapsed or hidden shows no thinking content lines.
+    let think_total = if shows_thinking_label && cfg.thinking_expanded {
+        settled_total + held_total
+    } else {
+        0
+    };
+    let text_total = cache.text_lines.len();
+    let window = max_body_lines.saturating_sub(usize::from(shows_thinking_label));
+    let combined = think_total + text_total;
+    let drop = combined.saturating_sub(window);
+    let think_take = think_total.saturating_sub(drop);
+    let text_drop = drop.saturating_sub(think_total);
+    let text_take = text_total.saturating_sub(text_drop);
 
-    // Thinking renders above the response text (the natural order is
-    // thinking → response). Thinking and text share one content
-    // window: when the response starts, the thinking is not suddenly
-    // collapsed — the block keeps its height and the oldest thinking
-    // lines slide out as the text arrives, so the view never jumps
-    // (no flicker at the thinking → text transition).
-    let thinking_style = palette.style(crate::color::Role::Thinking, Modifier::empty());
-    let mut thinking_tail: Vec<Line<'static>> = Vec::new();
-    let mut shows_thinking_label = false;
-    if has_thinking && max_body_lines > 0 {
-        let mut ids: Vec<&String> = buf.reasoning.keys().collect();
-        ids.sort();
-        let thinking_text = ids
-            .iter()
-            .filter_map(|id| buf.reasoning.get(*id))
-            .map(|s| s.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-        if !thinking_text.is_empty() {
-            shows_thinking_label = true;
-            thinking_tail = wrap_thinking(
-                &thinking_text,
-                wrap_w,
-                palette,
-                thinking_style,
-                app.tool_display().highlight_engine,
-            );
-        }
-    }
-
-    // Text block: the accumulated response text, wrapped with the same
-    // markdown/syntax path used for the settled message.
-    let text_tail: Vec<Line<'static>> = if has_text {
-        wrap_markdown_p(&buf.text, wrap_w, palette, prose)
+    // The window drops from the front. The visible thinking is the
+    // tail of the settled lines followed by the tail of the held
+    // lines. Collapsed shows no thinking lines at all.
+    let held_take = think_take.min(held_total);
+    let settled_take = think_take.saturating_sub(held_total);
+    let think_start = if cfg.thinking_expanded {
+        settled_total - settled_take
+    } else {
+        settled_total
+    };
+    let held_visible: Vec<Line<'static>> = if cfg.thinking_expanded {
+        cache.think_held_lines[held_total - held_take..].to_vec()
     } else {
         Vec::new()
     };
+    let text_start = text_total - text_take;
 
-    // The shared content window: the last `max_body_lines` rows (one
-    // row reserved for the pinned "thinking" label when thinking is
-    // shown). While the content fits, the block grows with it; once
-    // full, the oldest rows (the front of the thinking) scroll out as
-    // the text grows. The block height never shrinks at the
-    // thinking → text transition, so the transcript above it does not
-    // lurch and the view does not flicker.
-    let window = max_body_lines.saturating_sub(usize::from(shows_thinking_label));
-    if window > 0 {
-        let combined = thinking_tail.len() + text_tail.len();
-        let drop = combined.saturating_sub(window);
-        let think_take = thinking_tail.len().saturating_sub(drop);
-        let text_drop = drop.saturating_sub(thinking_tail.len());
-        let text_take = text_tail.len().saturating_sub(text_drop);
-        if shows_thinking_label {
-            body_lines.push(Line::from(vec![Span::styled(
-                "thinking".to_string(),
-                thinking_style,
-            )]));
-        }
-        body_lines.extend(
-            thinking_tail[thinking_tail.len() - think_take..]
-                .iter()
-                .cloned(),
-        );
-        body_lines.extend(text_tail[text_tail.len() - text_take..].iter().cloned());
-    }
-
-    // Partial tool-call arguments: one dim line per call.
-    if body_lines.is_empty() {
-        let mut ids: Vec<&String> = buf.tool_args.keys().collect();
+    // Partial tool-call arguments: one dim line per call. They show
+    // only when no other body content is present.
+    let body_has_content = shows_thinking_label || think_take > 0 || text_take > 0;
+    let mut tool_args: Vec<Line<'static>> = Vec::new();
+    if !body_has_content {
+        let mut ids: Vec<&String> = plan.tool_args.keys().collect();
         ids.sort();
         for id in ids {
-            let Some((name, args)) = buf.tool_args.get(id) else {
+            if tool_args.len() >= max_body_lines {
+                break;
+            }
+            let Some((name, args)) = plan.tool_args.get(id) else {
                 continue;
             };
             let name_disp = if name.is_empty() {
@@ -1973,57 +2692,61 @@ fn stream_block_lines(app: &App, width: usize, max_body_lines: usize) -> Vec<Lin
             } else {
                 name.as_str()
             };
-            let budget = max_body_lines.saturating_sub(body_lines.len());
-            if budget == 0 {
-                break;
-            }
             let shown = trunc(args, wrap_w.saturating_sub(12));
-            body_lines.push(Line::from(vec![
-                Span::styled(format!("{gutter}{name_disp}"), tool_name_style),
+            tool_args.push(Line::from(vec![
+                Span::styled(format!("{LIVE_GUTTER}{name_disp}"), tool_name_style),
                 Span::styled(format!(" {shown}"), dim),
             ]));
         }
     }
 
-    // Apply the gutter to text/thinking body lines that lack it.
-    let mut content: Vec<Line<'static>> = body_lines
-        .into_iter()
-        .map(|l| {
-            // The wrap helpers already prefix the gutter when the wrap
-            // width accounts for it. If the first span does not start
-            // with the gutter, prepend it.
-            let has_gutter = l
-                .spans
-                .first()
-                .map_or(false, |s| s.content.starts_with(&gutter));
-            if has_gutter {
-                l
-            } else {
-                let mut spans = vec![Span::styled(gutter.clone(), Style::default())];
-                spans.extend(l.spans);
-                Line::from(spans)
-            }
-        })
-        .collect();
-
-    // Blinking cursor on the last content line while the stream is open.
-    if !buf.done && content.is_empty() {
-        content.push(Line::from(vec![
-            Span::styled(gutter.clone(), dim),
-            Span::styled("▊", dim),
-        ]));
-    } else if !buf.done && !content.is_empty() {
+    // The blinking cursor overlays the last body line while the
+    // stream is open. When the body is empty it is its own row.
+    let (cursor_line, cursor_standalone) = if plan.done {
+        (None, false)
+    } else {
         let now = chrono::Utc::now();
         let blink = (now.timestamp_millis() / 500) % 2 == 0;
         let cursor = if blink { "▊" } else { " " };
-        let last = content.last_mut().unwrap();
-        last.spans.push(Span::styled(cursor, dim));
+        let last_body: Option<Line<'static>> = if !tool_args.is_empty() {
+            tool_args.last().cloned()
+        } else if text_take > 0 {
+            Some(cache.text_lines[cache.text_lines.len() - 1].clone())
+        } else if held_take > 0 {
+            Some(cache.think_held_lines[held_total - 1].clone())
+        } else if settled_take > 0 {
+            Some(cache.think_lines[settled_total - 1].clone())
+        } else {
+            label.clone()
+        };
+        match last_body {
+            Some(mut l) => {
+                l.spans.push(Span::styled(cursor, dim));
+                (Some(l), false)
+            }
+            None => (
+                Some(Line::from(vec![
+                    Span::styled(LIVE_GUTTER.to_string(), dim),
+                    Span::styled("▊", dim),
+                ])),
+                true,
+            ),
+        }
+    };
+
+    StreamBlockView {
+        header,
+        label,
+        think: Rc::clone(&cache.think_lines),
+        think_start,
+        think_held: held_visible,
+        text: Rc::clone(&cache.text_lines),
+        text_start,
+        tool_args,
+        cursor_line,
+        cursor_standalone,
     }
-
-    out.extend(content);
-    out
 }
-
 /// The status/help row content as terminal lines (one per row).
 ///
 /// The TUI flash wins; then the status extension row (its lines or
@@ -2180,13 +2903,12 @@ fn browse_window_lines(
     cursor_bg: Color,
     match_style: Style,
     active_style: Style,
-    selection: Option<((usize, usize), (usize, usize), bool)>,
+    selection: Option<crate::browse::VisualSelection>,
     sel_bg: Color,
 ) -> Vec<Line<'static>> {
     let (cl, cc) = cursor;
     lines
         .iter()
-        .skip(start)
         .take(h)
         .enumerate()
         .map(|(i, l)| {
@@ -2217,7 +2939,7 @@ fn browse_window_lines(
                 let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
                 vec![Span::styled(text, style)]
             } else {
-                l.spans.iter().cloned().collect()
+                l.spans.to_vec()
             };
             // The visual-selection shading over the base spans: the
             // `Role::Selection` background on the selected chars,
@@ -2264,10 +2986,15 @@ fn browse_window_lines(
 /// edge to the col, the middle rows whole). `None` outside the
 /// selection.
 fn selection_row_range(
-    sel: &((usize, usize), (usize, usize), bool),
+    sel: &crate::browse::VisualSelection,
     abs: usize,
 ) -> Option<(usize, Option<usize>)> {
-    let ((al, ac), (el, ec), linewise) = *sel;
+    use crate::browse::VisualSelection;
+    let VisualSelection {
+        anchor: (al, ac),
+        active: (el, ec),
+        linewise,
+    } = *sel;
     if linewise {
         let (lo, hi) = if al <= el { (al, el) } else { (el, al) };
         return (abs >= lo && abs <= hi).then_some((0, None));
@@ -2447,7 +3174,7 @@ fn draw_position_bar(
 }
 
 /// Render the transcript into wrapped visual lines, separated by blank
-/// lines. The oldest events beyond `TRANSCRIPT_EVENT_CAP` are dropped.
+/// lines. All in-memory events render: the log file is the record.
 /// The result is cached per (events version, width, reply version)
 /// by the caller.
 ///
@@ -2457,6 +3184,7 @@ fn draw_position_bar(
 /// for the event, the extension's styled lines replace the built-in
 /// render. A missing, stale, or timed-out reply falls back to the
 /// built-in render (per-op G5 fallback).
+#[derive(Clone, Debug, PartialEq)]
 pub struct TranscriptBuild {
     /// The rendered transcript lines, oldest first.
     pub lines: Vec<Line<'static>>,
@@ -2472,6 +3200,17 @@ pub struct TranscriptBuild {
     /// Used for mouse-click hit-testing
     /// (docs/tui-tool-display-fancy.md section 6).
     pub block_spans: std::collections::HashMap<String, (usize, usize)>,
+    /// First screen-line index of each event, indexed by the event's
+    /// position in the in-memory log window (docs/tree-ui-design-from-
+    /// human.md view-only scroll). `None` for events the transcript
+    /// does not render (suppressed ext_status, or outside the render
+    /// window).
+    pub event_line_starts: Vec<Option<usize>>,
+    /// The per-line display text, oldest first, parallel to `lines`.
+    /// Cacheable: the browse layout stores this instead of rebuilding
+    /// the string form of every line on each frame
+    /// (docs/tui-conversation-browsing.md section 4.6).
+    pub texts: Vec<String>,
 }
 
 /// The shareable source text of one event (docs/tui-conversation-
@@ -2522,18 +3261,296 @@ pub fn raw_event_text(e: &crate::event::Event) -> String {
     }
 }
 
-/// Build the transcript: the rendered lines plus the line-to-event
-/// map a browse yank needs (docs/tui-conversation-browsing.md
-/// section 11.3).
-pub fn build_transcript(
-    app: &App,
-    width: usize,
+/// The input snapshot of one transcript build
+/// (docs/tui-perf-background-build-plan.md, stage 1).
+///
+/// It carries every input the build reads from the app.
+/// The width is part of the snapshot.
+/// Ext replies are pre-resolved on the main thread.
+///
+/// Every field is `Clone` and `Send`.
+/// The snapshot is a cheap move, not a borrow.
+/// Stage 2 sends it to the background worker.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TranscriptBuildInput {
+    /// Events of the active session, oldest first.
+    /// A tail-window build holds only the newest suffix of the log.
+    pub events: Vec<Event>,
+    /// 1-based log seq of the first in-memory event.
+    /// For a tail-window build this is the full-log base seq shifted
+    /// forward by the events dropped, so log seq math stays exact.
+    pub events_base_seq: usize,
+    /// First in-memory event index this input covers.
+    /// `0` for a full build.
+    /// A tail-window build holds the newest suffix of the log,
+    /// and this field is that suffix's first in-memory index.
+    /// (docs/tui-perf-background-build-plan.md, stage 2.)
+    pub event_offset: usize,
+    /// Tool-call details: call id to (name, arguments).
+    pub call_details: std::collections::HashMap<String, (String, serde_json::Value)>,
+    /// The oldest pending approval, if any.
+    pub pending: Option<crate::app::PendingApproval>,
+    /// The palette the built-in styles lower to.
+    pub palette: crate::color::Palette,
+    /// The tool-result display config.
+    pub tool_display: crate::tool_display::ToolDisplay,
+    /// The global tool fold/expand toggle.
+    pub tool_expanded: bool,
+    /// Thinking-block visibility.
+    pub thinking_shown: bool,
+    /// Thinking-block expand state.
+    pub thinking_expanded: bool,
+    /// Per-block expand fractions for animations.
+    pub expand_fracs: std::collections::HashMap<String, f64>,
+    /// Active-path ranges of the log.
+    /// `None` means no rewind marker.
+    pub rewind_active_ranges: Option<Vec<(usize, usize)>>,
+    /// The active session, if any.
+    pub active: Option<crate::port::SessionId>,
+    /// Whether the active session loop is running.
+    pub loop_running: bool,
+    /// The render width for this build.
+    pub width: usize,
+    /// Ext render state. `None` means no ext host was supplied and
+    /// the plain markdown engine renders the message content.
+    /// `Some` activates the block markdown engine and carries the
+    /// pre-resolved transform replies.
+    pub ext_data: Option<ExtRenderData>,
+    /// Pre-resolved ext reply lines, keyed by event id.
+    /// The key is the in-memory event index.
+    pub ext_lines: std::collections::HashMap<u64, Vec<crate::ext::ExtLine>>,
+    /// The open turns of the turn fold (docs/tui-turn-fold.md).
+    /// A turn in the set renders its full body. A turn outside the
+    /// set is collapsed to its user box and tally. The fold applies
+    /// in the main view and the browse view alike.
+    pub turn_fold: std::collections::HashSet<u64>,
+}
+
+/// The ext-side inputs of a transcript build, decoupled from the
+/// ext host (docs/tui-perf-background-build-plan.md, stage 1).
+///
+/// The host holds an `mpsc` receiver and is not `Send`.
+/// This owned value carries everything the build reads from it.
+/// The main thread pre-resolves the fields before dispatching
+/// the snapshot.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExtRenderData {
+    /// Pre-resolved transform replies for the mermaid and latex
+    /// spans, keyed by (event id, span index). A missing entry
+    /// renders the raw span (G5 fallback).
+    pub span_lines: std::collections::HashMap<(u64, u32), Vec<crate::ext::ExtLine>>,
+}
+
+impl TranscriptBuildInput {
+    /// Snapshot every input the build reads from the app.
+    ///
+    /// The ext lines are pre-resolved against the host.
+    /// The result is usable without the host.
+    pub fn from_app(
+        app: &crate::app::App,
+        width: usize,
+        ext: Option<&crate::ext::ExtHost>,
+    ) -> Self {
+        Self::from_app_tail(app, width, ext, app.events().len())
+    }
+
+    /// Snapshot the newest `tail_events` events only.
+    /// The first-build fast path (docs/tui-perf-background-build-plan.md,
+    /// stage 2) renders the visible tail window on the main thread.
+    /// The result is a partial build until the full build lands.
+    /// Event ids and log seqs stay aligned with the full log.
+    pub fn from_app_tail(
+        app: &crate::app::App,
+        width: usize,
+        ext: Option<&crate::ext::ExtHost>,
+        tail_events: usize,
+    ) -> Self {
+        let all = app.events();
+        let offset = all.len().saturating_sub(tail_events.max(1));
+        let events = &all[offset..];
+        Self {
+            events: events.to_vec(),
+            events_base_seq: app.events_base_seq() + offset,
+            event_offset: offset,
+            call_details: app.call_details(),
+            pending: app.oldest_pending_approval(),
+            palette: app.palette().clone(),
+            tool_display: *app.tool_display(),
+            tool_expanded: app.tool_expanded(),
+            thinking_shown: app.thinking_shown(),
+            thinking_expanded: app.thinking_expanded(),
+            expand_fracs: app.expand_fracs().clone(),
+            rewind_active_ranges: app.rewind_active_ranges(),
+            active: app.active().cloned(),
+            loop_running: app.active().is_some_and(|s| app.loop_running(s)),
+            width,
+            ext_data: ext.as_ref().map(|host| ExtRenderData {
+                span_lines: resolve_ext_spans_at(host, events, width, offset),
+            }),
+            ext_lines: resolve_ext_lines_at(ext, events, offset),
+            turn_fold: app.fold_input(),
+        }
+    }
+}
+
+/// Pre-resolve ext reply lines for a set of events.
+///
+/// The ext host is not `Send`.
+/// It cannot cross to the background worker.
+/// The main thread resolves cached replies up front.
+/// Each read is a synchronous cache lookup.
+/// It returns an owned `Vec<ExtLine>`.
+/// Events without a valid reply add no entry.
+/// The build falls back to the built-in render.
+#[allow(dead_code)]
+pub fn resolve_ext_lines(
     ext: Option<&crate::ext::ExtHost>,
-) -> TranscriptBuild {
-    let details = app.call_details();
-    let pending = app.oldest_pending_approval().is_some();
-    let events = app.events();
-    let start = events.len().saturating_sub(TRANSCRIPT_EVENT_CAP);
+    events: &[Event],
+) -> std::collections::HashMap<u64, Vec<crate::ext::ExtLine>> {
+    resolve_ext_lines_at(ext, events, 0)
+}
+
+/// `resolve_ext_lines` with an in-memory index offset.
+/// A tail-window build passes its suffix start so the keys are the
+/// full in-memory event indices (docs/tui-perf-background-build-plan.md,
+/// stage 2).
+pub fn resolve_ext_lines_at(
+    ext: Option<&crate::ext::ExtHost>,
+    events: &[Event],
+    offset: usize,
+) -> std::collections::HashMap<u64, Vec<crate::ext::ExtLine>> {
+    let mut out: std::collections::HashMap<u64, Vec<crate::ext::ExtLine>> =
+        std::collections::HashMap::new();
+    if let Some(host) = ext {
+        for (i, e) in events.iter().enumerate() {
+            let event_id = (offset + i) as u64;
+            if let Some(owner) = host.owner_for_kind(e.kind()) {
+                if let Some(lines) = host.lookup_lines(owner, event_id) {
+                    out.insert(event_id, lines);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Pre-resolve the transform replies of the message spans
+/// (docs/tui-perf-background-build-plan.md, stage 1).
+///
+/// The host's `request_span` is a request to the extension process.
+/// It must fire on the main thread.
+/// Each span's finished reply is cached in the host.
+/// This helper fires the requests and copies the finished replies
+/// into an owned map the pure build can read.
+/// Spans without a finished reply add no entry.
+/// The build shows the raw span then (G5 fallback).
+#[allow(dead_code)]
+pub fn resolve_ext_spans(
+    host: &crate::ext::ExtHost,
+    events: &[Event],
+    width: usize,
+) -> std::collections::HashMap<(u64, u32), Vec<crate::ext::ExtLine>> {
+    resolve_ext_spans_at(host, events, width, 0)
+}
+
+/// `resolve_ext_spans` with an in-memory index offset.
+/// A tail-window build passes its suffix start so the span keys are
+/// the full in-memory event indices (docs/tui-perf-background-build-plan.md,
+/// stage 2).
+pub fn resolve_ext_spans_at(
+    host: &crate::ext::ExtHost,
+    events: &[Event],
+    width: usize,
+    offset: usize,
+) -> std::collections::HashMap<(u64, u32), Vec<crate::ext::ExtLine>> {
+    use std::collections::HashMap;
+    let mut out: HashMap<(u64, u32), Vec<crate::ext::ExtLine>> = HashMap::new();
+    // The same width the build passes to `event_lines`.
+    let ew = width.max(GUTTER + 8);
+    for (i, e) in events.iter().enumerate() {
+        let event_id = (offset + i) as u64;
+        let (content, wrap_w) = match e.kind() {
+            EventKind::UserMessage => (
+                e.get_str("content")
+                    .unwrap_or("[missing content]")
+                    .to_string(),
+                user_box_content_w(ew),
+            ),
+            EventKind::AssistantMessage => (
+                e.get_str("content").unwrap_or("").to_string(),
+                assistant_body_content_w(ew),
+            ),
+            _ => continue,
+        };
+        for block in message_blocks(&content) {
+            match block {
+                MBlock::Mermaid { idx, text, .. } => {
+                    if host
+                        .request_span(event_id, idx, "fence:mermaid", &text, wrap_w)
+                        .is_some()
+                    {
+                        if let Some(lines) = host.span_lines(event_id, idx) {
+                            out.insert((event_id, idx), lines);
+                        }
+                    }
+                }
+                MBlock::Text { parts, .. } => {
+                    for line_parts in parts {
+                        for part in line_parts {
+                            if let Part::Latex { idx, text, .. } = part {
+                                if host
+                                    .request_span(event_id, idx, "inline:latex", text, wrap_w)
+                                    .is_some()
+                                {
+                                    if let Some(lines) = host.span_lines(event_id, idx) {
+                                        out.insert((event_id, idx), lines);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Build the transcript from an input snapshot.
+///
+/// This is a pure function of the snapshot.
+/// The per-event loop of [`event_lines`] is unchanged.
+/// No app or ext-host state is read.
+/// The build can run on the background worker.
+/// (docs/tui-perf-background-build-plan.md, stage 1.)
+fn fold_summary_line(
+    sl: &crate::fold::SummaryLine,
+    state: &RenderState,
+    width: usize,
+) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = vec![Span::raw(" ".repeat(width.min(GUTTER)))];
+    if !sl.text.is_empty() {
+        let dim = state.palette.style(crate::color::Role::Hint, Modifier::DIM);
+        // The `⎿` leader art marks the collapsed-turn tally
+        // (docs/tui-turn-fold.md "Summary line").
+        spans.push(Span::styled("⎿ ", dim));
+        spans.push(Span::styled(sl.text.clone(), dim));
+    }
+    Line::from(spans)
+}
+
+pub fn build_transcript_input(input: &TranscriptBuildInput) -> TranscriptBuild {
+    let events = &input.events;
+    let details = &input.call_details;
+    let pending = input.pending.is_some();
+    // No render cap: every in-memory event renders so the whole
+    // session history stays reachable (docs/tui-conversation-
+    // browsing.md section 4.6). The log file is the record.
+    let start = 0;
+    // The in-memory index of the first event this input covers.
+    // A tail-window input holds a suffix of the log, and its
+    // event ids and log seqs shift by this offset.
+    let offset = input.event_offset;
     // The tool_result ids of the visible window: a tool_call whose
     // result follows merges into the result box (the call line drops
     // for the tools whose result carries the call info).
@@ -2543,19 +3560,17 @@ pub fn build_transcript(
         .filter_map(|e| e.get_str("id").map(String::from))
         .collect();
     // The render state (docs/tui-tool-display-port.md section 2, the
-    // config part, plus the fold and thinking toggles): the palette,
-    // the tool display config, and the app's toggle states.
+    // config part, plus the fold and thinking toggles).
     let state = RenderState {
-        palette: app.palette(),
-        tool_display: app.tool_display(),
-        tool_expanded: app.tool_expanded(),
-        thinking_shown: app.thinking_shown(),
-        thinking_expanded: app.thinking_expanded(),
-        expand_fracs: app.expand_fracs(),
+        palette: &input.palette,
+        tool_display: &input.tool_display,
+        tool_expanded: input.tool_expanded,
+        thinking_shown: input.thinking_shown,
+        thinking_expanded: input.thinking_expanded,
+        expand_fracs: &input.expand_fracs,
     };
-    // The loop supervision (docs/auto-compact-plan.md section 4.6):
-    // the transcript session's loop process running bit.
-    let running = app.active().is_some_and(|s| app.loop_running(s));
+    // The loop running bit, precomputed on the main thread.
+    let running = input.loop_running;
     // The last open compaction marker: a `compaction_started` with
     // no later `compaction_summary` or `compaction_failed` in the
     // visible window. A restarted loop may add more open markers;
@@ -2580,6 +3595,30 @@ pub fn build_transcript(
     let mut line_raw: Vec<Option<String>> = Vec::new();
     let mut block_spans: std::collections::HashMap<String, (usize, usize)> =
         std::collections::HashMap::new();
+    // First screen-line index of each in-memory event, indexed by its
+    // position in the full log window. `None` for events outside the
+    // build window (the tail-window fast build keeps the head `None`,
+    // docs/tui-perf-background-build-plan.md stage 2) and for events
+    // dropped by the active-path mask (rewind, see below).
+    let mut event_line_starts: Vec<Option<usize>> = vec![None; offset + events.len()];
+    // The active-path ranges of the current log (docs/rewind-fork-
+    // design.md section 3, docs/tree-ui-design-from-human.md). When a
+    // rewind marker exists, off-path events are dropped from the
+    // transcript; only the active path renders. `None` when there is
+    // no marker: the full log is active.
+    let active_ranges = &input.rewind_active_ranges;
+    let base = input.events_base_seq;
+    // The ext-side state for the built-in fallback path. `None` keeps
+    // the plain markdown engine.
+    let ext_data: Option<&ExtRenderData> = input.ext_data.as_ref();
+    // The turn fold is active in every build (docs/tui-turn-fold.md):
+    // the main view and the browse view share the same open-turn set.
+    let fold = crate::fold::FoldState::new(
+        events,
+        input.events_base_seq,
+        running,
+        input.turn_fold.clone(),
+    );
     for (i, e) in events[start..].iter().enumerate() {
         // ext_status is shared UI state: suppressed from the transcript
         // by default. ext_status events add no rows, and add no blank
@@ -2588,11 +3627,46 @@ pub fn build_transcript(
         if e.kind() == EventKind::ExtStatus {
             continue;
         }
+        let w = start + i;
+        // Active-path mask (docs/rewind-fork-design.md section 3,
+        // docs/tree-ui-design-from-human.md): with a rewind marker in
+        // the log, off-path events are dropped from the transcript.
+        // The transcript shows the active path only. Branch visibility
+        // is owned by the `tree` palette and its preview pane. Rewind
+        // markers still render: they mark the fork boundary. The log
+        // seq of this in-memory event is `base + (start + i)` (base is
+        // the 1-based seq of the first in-memory event).
+        let gseq = base + start + i;
+        let off_path = active_ranges
+            .as_ref()
+            .is_some_and(|r| !rushi_common::rewind::seq_in_ranges(gseq, r));
+        // A rewind marker is a structural fork boundary, not
+        // conversation content. It always renders: even when it sits
+        // off the active path, and even when a collapsed turn's span
+        // would fold it away. Every other off-path event is dropped.
+        let is_rewind = e.kind() == EventKind::Rewind;
+        if off_path && !is_rewind {
+            continue;
+        }
+        if !is_rewind && !fold.visible(w) {
+            continue;
+        }
+        let turn_start_summary: Option<crate::fold::SummaryLine> = fold
+            .turn_for_event(w)
+            .filter(|t| w == t.start)
+            .and_then(|t| fold.collapsed_summary(events, t));
         if !all.is_empty() {
             all.push(Line::from(""));
             line_raw.push(None);
         }
-        let event_id = (start + i) as u64;
+        let event_id = (offset + start + i) as u64;
+        // The idle reply of a completed turn renders in the `Report`
+        // panel. `final_msg` names it. The live tail of a running turn
+        // is never boxed.
+        let final_report = e.kind() == EventKind::AssistantMessage
+            && fold
+                .turn_for_event(w)
+                .is_some_and(|t| Some(w) == t.final_msg && !t.in_progress);
         // Record the start of a tool-result block for click hit-testing.
         let tr_start = if e.kind() == EventKind::ToolResult {
             Some(all.len())
@@ -2600,50 +3674,32 @@ pub fn build_transcript(
             None
         };
         let (segs, raws): (Vec<Line<'static>>, Vec<Option<String>>) =
-            if let Some(owner) = ext.and_then(|h| h.owner_for_kind(e.kind())) {
-                match ext.unwrap().lookup_lines(owner, event_id) {
-                    Some(lines) => {
-                        let lines = ext_lines_guttered(&lines, width);
-                        let raws: Vec<Option<String>> = vec![None; lines.len()];
-                        (lines, raws)
-                    }
-                    // No valid reply for this event: the built-in render
-                    // is the fallback.
-                    None => {
-                        let builder = event_lines()
-                            .e(e)
-                            .pending(pending)
-                            .call_details(&details)
-                            .result_ids(&result_ids)
-                            .width(width.max(GUTTER + 8))
-                            .event_id(event_id)
-                            .state(&state)
-                            .loop_running(running)
-                            .compaction_last_open(last_open.get(i).copied().unwrap_or(false));
-                        if let Some(h) = ext {
-                            builder.ext(h).call()
-                        } else {
-                            builder.call()
-                        }
-                    }
-                }
+            if let Some(lines) = input.ext_lines.get(&event_id) {
+                // Pre-resolved ext reply: the extension's styled lines
+                // replace the built-in render.
+                let lines = ext_lines_guttered(lines, input.width);
+                let raws: Vec<Option<String>> = vec![None; lines.len()];
+                (lines, raws)
             } else {
+                // No valid reply for this event: the built-in render
+                // is the fallback (per-op G5 fallback).
                 let builder = event_lines()
                     .e(e)
                     .pending(pending)
-                    .call_details(&details)
+                    .call_details(details)
                     .result_ids(&result_ids)
-                    .width(width.max(GUTTER + 8))
+                    .width(input.width.max(GUTTER + 8))
                     .event_id(event_id)
                     .state(&state)
                     .loop_running(running)
-                    .compaction_last_open(last_open.get(i).copied().unwrap_or(false));
-                if let Some(h) = ext {
-                    builder.ext(h).call()
-                } else {
-                    builder.call()
+                    .compaction_last_open(last_open.get(i).copied().unwrap_or(false))
+                    .final_report(final_report);
+                match ext_data {
+                    Some(data) => builder.ext(data).call(),
+                    None => builder.call(),
                 }
             };
+        event_line_starts[offset + start + i] = Some(all.len());
         all.extend(segs);
         line_raw.extend(raws);
         // Record the end of the tool-result block span.
@@ -2652,12 +3708,55 @@ pub fn build_transcript(
                 block_spans.insert(id.to_string(), (s, all.len()));
             }
         }
+        if let Some(sl) = turn_start_summary {
+            all.push(fold_summary_line(&sl, &state, input.width));
+            line_raw.push(None);
+        }
     }
+    // The display text of each line, for the browse layout. Computed
+    // once per build here, not per frame.
+    let texts: Vec<String> = all.iter().map(|l| l.to_string()).collect();
     TranscriptBuild {
         lines: all,
         line_raw,
         block_spans,
+        event_line_starts,
+        texts,
     }
+}
+
+/// Build the transcript from the app: the rendered lines plus the
+/// line-to-event map a browse yank needs
+/// (docs/tui-conversation-browsing.md section 11.3).
+///
+/// The `&App` form kept for tests and the main-thread fallback.
+/// It snapshots the app on the spot, then runs the pure build.
+/// The background worker calls [`build_transcript_input`] with a
+/// dispatched [`TranscriptBuildInput`] instead.
+pub fn build_transcript(
+    app: &App,
+    width: usize,
+    ext: Option<&crate::ext::ExtHost>,
+) -> TranscriptBuild {
+    let input = TranscriptBuildInput::from_app(app, width, ext);
+    build_transcript_input(&input)
+}
+
+/// Fast tail-window build (docs/tui-perf-background-build-plan.md, stage 2).
+///
+/// Renders only the newest `tail_events` events, so a first build or a
+/// transient re-build stays O(viewport). The `event_line_starts` output
+/// is padded back to the full event length with `None`, so event-index
+/// addressing stays valid. The full background build follows and
+/// replaces this partial result.
+pub fn build_transcript_tail(
+    app: &App,
+    width: usize,
+    ext: Option<&crate::ext::ExtHost>,
+    tail_events: usize,
+) -> TranscriptBuild {
+    let input = TranscriptBuildInput::from_app_tail(app, width, ext, tail_events);
+    build_transcript_input(&input)
 }
 
 /// The transcript lines, oldest first (the legacy signature: the map
@@ -2957,6 +4056,9 @@ pub fn draw(
         .as_ref()
         .map(|s| app.loop_running(s))
         .unwrap_or(false);
+    // The transcript build bit (docs/tui-perf-background-build-plan.md,
+    // stage 2): a rebuild is recorded or in flight on the worker.
+    let rebuilding = app.transcript_rebuilding();
     // The loop-phase bit (docs/tui-model-wait-indicator.md): a
     // running loop names its phase (`[wait]`, `[tools]`); an
     // idle loop or an unknown marker keeps the plain bit.
@@ -3033,24 +4135,15 @@ pub fn draw(
     // The waiting-message block owns one layout cell for its rows
     // (docs/tui_feature_requests_from_human.md 2026-08-31, stage 1).
     let pending_rows = pending_message_lines(app, running, inner.width as usize);
-    // The live stream block (docs/tui-streaming-response.md section
-    // 6.3): pinned right after the existing messages (the transcript)
-    // and above the model status indicator while a model response
-    // streams. Empty while no model call is in flight. The block
-    // grows with the arriving content: the body is bounded to half
-    // the viewport height, so a long response extends the block
-    // without stealing the whole screen (the transcript's Min(2)
-    // absorbs the rest).
-    let stream_max_body = inner.height as usize / 2;
-    let stream_lines = stream_block_lines(app, inner.width as usize, stream_max_body);
+    // The in-progress model response now renders inside the transcript
+    // (docs/tui-streaming-simplify.md section 3) instead of a separate
+    // pinned layout cell between the transcript and the working row.
+    // No dedicated layout cell is allocated for it: the transcript is
+    // the fill cell, so the layout no longer shifts when a response
+    // starts or completes. The stream lines are computed later, once
+    // the transcript text width is known, and appended to the tail of
+    // the transcript so the user can scroll up through the whole body.
     let mut constraints: Vec<Constraint> = vec![Constraint::Min(2)];
-    // The live stream block owns one layout cell per row it renders
-    // (docs/tui-streaming-response.md section 6.3): it sits right
-    // after the existing messages, above the model status indicator.
-    // No cell when no model response is streaming.
-    if !stream_lines.is_empty() {
-        constraints.push(Constraint::Length(stream_lines.len() as u16));
-    }
     if !pending_rows.is_empty() {
         constraints.push(Constraint::Length(pending_rows.len() as u16));
     }
@@ -3061,8 +4154,10 @@ pub fn draw(
     // and text while the loop runs (docs/tui-model-wait-indicator.md
     // section 3). No row when idle: the transcript absorbs it. The
     // input box shifts one row at the loop start/stop transition,
-    // like the `pi` working indicator.
-    if running {
+    // like the `pi` working indicator. The transcript rebuild
+    // indicator (docs/tui-perf-background-build-plan.md, stage 2)
+    // reserves the same row while a build is in flight.
+    if running || rebuilding {
         constraints.push(Constraint::Length(1));
     }
     // The host-reserved row above the input box (docs/ui-extension.md
@@ -3114,48 +4209,117 @@ pub fn draw(
     // borrow: the cache holds the lines, so no app borrow may stay
     // live while the app mutates (the palette owned values above,
     // same pattern).
-    let total = app.transcript_lines(text_w, Some(host)).len();
+    // The in-progress model response renders at the tail of the
+    // transcript (docs/tui-streaming-simplify.md section 3). `usize::MAX`
+    // disables the sliding-window cap so the whole streamed body
+    // (thinking + text + partial tool calls) stays reachable by
+    // scrolling; the stream file and the settled log are unchanged.
+    let stream_lines = if browse_active {
+        StreamBlockView::empty()
+    } else {
+        stream_block_lines(app, text_w, usize::MAX)
+    };
+    let stream_len = stream_lines.len();
+    // The settled lines come from the cached transcript (a `&[Line]`
+    // borrow); the live stream tail is a small owned Vec. We do not
+    // clone the full settled transcript each frame: the visible
+    // window (at most `h` lines) is built on demand below, so a long
+    // session costs O(visible + stream) per frame, not O(all lines).
+    // `total` still spans the settled lines plus the live tail, so the
+    // cursor clamp and the browse layout account for the live lines.
+    let settled_len = app.transcript_lines(text_w, Some(host)).len();
+    let total = settled_len + stream_len;
     // Store block spans and transcript top row for mouse-click hit-testing
-    // (docs/tui-tool-display-fancy.md section 6).
+    // (docs/tui-tool-display-fancy.md section 6). The spans cover only the
+    // settled tool-result blocks; the live stream tail carries no block span.
     let spans = app.transcript_block_spans(text_w, Some(host));
     app.set_block_spans(spans);
     app.set_transcript_top_row(t_area.y);
-    let mut scroll = scroll0;
+    // No fixed scroll cap: the offset is bounded by the transcript.
+    // Clamp to `total - h` so a shrunk tail (a settled stream) or a
+    // long user scroll cannot overflow `scroll + h` below.
+    let mut scroll = scroll0.min(total.saturating_sub(h));
     if browse_active {
-        let grew = app.take_events_grew();
+        // A settled event landing, or a live stream tail change
+        // (growth or a settle shrink), both count as a model-driven
+        // tail change. The browse view pins on either instead of
+        // re-centering (docs/tui-conversation-browsing.md section
+        // 4.6).
+        let grew = app.take_events_grew() || app.note_stream_changed(stream_len);
         app.browse().sync(total, h, &mut scroll, grew);
         app.set_scroll(scroll);
     }
+    // View-only scroll (docs/tree-ui-design-from-human.md): the tree
+    // picker set a one-shot target, the in-memory event index. Resolve
+    // it to a transcript line and pin it at the top of the viewport.
+    // The target is consumed by this frame; the sticky scroll then
+    // holds until the user scrolls.
+    if let Some(ev_idx) = app.take_view_only_target() {
+        if let Some(line) = app
+            .transcript_event_line_starts(text_w, Some(host))
+            .get(ev_idx)
+            .copied()
+            .flatten()
+        {
+            if line < total {
+                scroll = total.saturating_sub(line + h);
+                app.set_scroll(scroll);
+            }
+        }
+    }
     let start = total.saturating_sub(scroll + h);
     app.set_transcript_visible_start(start);
+    // Build the visible window only: at most `h` lines, each read from
+    // the settled cache slice or the stream tail. This is the draw
+    // path's whole cost for a long transcript (no full-vector copy).
+    let end = (start + h).min(total);
+    let view_lines: Vec<Line<'static>> = {
+        let settled = app.transcript_lines(text_w, Some(host));
+        let mut v = Vec::with_capacity(end.saturating_sub(start));
+        for g in start..end {
+            let l: &Line<'static> = if g < settled_len {
+                &settled[g]
+            } else {
+                &stream_lines[g - settled_len]
+            };
+            v.push(l.clone());
+        }
+        v
+    };
     // The cursor col clamps to the visible cursor line length
-    // (section 4.1): a transient lines read, released before the
-    // mutation.
+    // (section 4.1): read from the visible window.
     if browse_active {
         let (cl, _) = app.browse_ref().line_col();
-        if cl >= start && cl < start + h {
-            let len = {
-                let ls = app.transcript_lines(text_w, Some(host));
-                ls[cl]
-                    .spans
-                    .iter()
-                    .map(|s| s.content.chars().count())
-                    .sum::<usize>()
-            };
+        if cl >= start && cl < end {
+            let len = view_lines[cl - start]
+                .spans
+                .iter()
+                .map(|s| s.content.chars().count())
+                .sum::<usize>();
             app.browse().clamp_col(len);
         }
     }
     // The press-path layout: the line texts and the width the
     // browse motions and the search read, plus the raw source texts
     // the browse yank prefers over the rendered lines (section 11.3).
+    // The raw map extends the settled lines with one `None` per live
+    // stream line (the live body is not yet a settled, shareable
+    // event; yanks over it fall back to the rendered text).
     if browse_active {
-        let texts: Vec<String> = app
-            .transcript_lines(text_w, Some(host))
-            .iter()
-            .map(ToString::to_string)
-            .collect();
-        let line_raw = app.transcript_raw(text_w, Some(host));
-        app.set_browse_layout(total, h, text_w, texts, line_raw);
+        // The settled display texts come from the transcript cache
+        // (built once per build, not per frame); the live tail is
+        // stringified here (a small Vec). The combined texts keep the
+        // browse search, motions, and yank over the full transcript.
+        let settled_texts: Vec<String> = app.transcript_texts(text_w, Some(host)).clone();
+        let stream_texts: Vec<String> = stream_lines.iter().map(|l| l.to_string()).collect();
+        let mut texts = settled_texts;
+        texts.extend(stream_texts);
+        let mut line_raw: Vec<Option<String>> = app.transcript_raw(text_w, Some(host));
+        line_raw.extend(std::iter::repeat_n(None, stream_len));
+        app.set_browse_layout(total, h, texts, line_raw);
+        let starts = app.transcript_event_line_starts(text_w, Some(host));
+        app.set_event_line_starts(starts);
+        app.apply_fold_cursor_target();
     }
     // The owned browse draw inputs: the cursor, the match-line
     // cache, the highlight styles. The cache clone is one pass per
@@ -3186,8 +4350,10 @@ pub fn draw(
         None
     };
     let sel_bg = pl.color(crate::color::Role::Selection);
-    let lines = app.transcript_lines(text_w, Some(host));
-    let window = &lines[start..];
+    // The visible window, at most `h` lines, built above from the
+    // settled cache slice and the stream tail. `start` is the global
+    // index of the first window row.
+    let window = view_lines;
     if window.is_empty() {
         let placeholder = match app.active() {
             // The placeholder in the pi `dim` tone (not a hard-coded gray).
@@ -3205,7 +4371,7 @@ pub fn draw(
     } else {
         let mut draw_lines = if browse_active {
             browse_window_lines(
-                lines,
+                &window,
                 start,
                 h,
                 gutter_w,
@@ -3275,26 +4441,11 @@ pub fn draw(
     }
 
     let mut row = 1usize;
-    // Live stream block (docs/tui-streaming-response.md section 6.3):
-    // the in-progress model response, rendered right after the
-    // existing messages, above the model status indicator (working
-    // row). It does not scroll with the transcript; the settle event
-    // moves the text into the transcript and clears the block.
-    if !stream_lines.is_empty() {
-        for (i, l) in stream_lines.iter().enumerate() {
-            if i as u16 >= rows[row].height {
-                break;
-            }
-            let sub = ratatui::layout::Rect {
-                x: rows[row].x,
-                y: rows[row].y + i as u16,
-                width: rows[row].width,
-                height: 1,
-            };
-            f.render_widget(Paragraph::new(l.clone()), sub);
-        }
-        row += 1;
-    }
+    // The in-progress stream content now renders inside the transcript
+    // (docs/tui-streaming-simplify.md section 3): no dedicated layout
+    // cell for it here. The `row` counter starts at 1 and tracks the
+    // first post-transcript cell (pending rows, banner, working row,
+    // host rows, input, status).
 
     // waiting messages: the steering list of the active session
     // (docs/tui_feature_requests_from_human.md 2026-08-31, stage 1).
@@ -3347,6 +4498,13 @@ pub fn draw(
     if running {
         let now = chrono::Utc::now();
         f.render_widget(Paragraph::new(working_row(app, running, &now)), rows[row]);
+        row += 1;
+    } else if rebuilding {
+        // The transcript build indicator: the working-row spinner
+        // shape with the build label
+        // (docs/tui-perf-background-build-plan.md, stage 2).
+        let now = chrono::Utc::now();
+        f.render_widget(Paragraph::new(rebuilding_row(app, &now)), rows[row]);
         row += 1;
     }
 
@@ -3573,7 +4731,10 @@ pub fn draw(
                     settled: false,
                 })
             });
-        let previewer = crate::picker::preview::FilePreviewer::new(50);
+        // The windowed preview model (docs/tui-preview-pane-plan.md):
+        // no line cap. The pane highlights the visible window of the
+        // settled background load, through the shared window LRU.
+        let previewer = crate::picker::preview::FilePreviewer::new(app.preview_cache().clone());
         let show_preview = previewer.enabled()
             && app
                 .picker_ref()
@@ -3881,6 +5042,61 @@ mod cursor_span_tests {
             "the pipe line stays literal: {joined:?}"
         );
     }
+
+    /// Markdown markup in the thinking block is rendered, not shown raw.
+    /// The 2026-09-12 user request: markdown in thinking is not lost.
+    #[test]
+    fn thinking_block_renders_markdown() {
+        let palette = crate::color::Palette::builtin(crate::color::Level::Rgb);
+        let style = palette.style(crate::color::Role::Thinking, Modifier::empty());
+        let heading_style = palette.style(crate::color::Role::Heading, Modifier::BOLD);
+        let inline_code = palette.style(crate::color::Role::InlineCode, Modifier::empty());
+        let text = "# Plan\nRun **cargo build** and check `main.rs`";
+        let lines = wrap_thinking(
+            text,
+            60,
+            &palette,
+            style,
+            crate::tool_display::HighlightEngine::TreeSitter,
+        );
+        let joined: String = lines
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        // The heading marker `#` is dropped; the text "Plan" is kept.
+        assert!(joined.contains("Plan"), "heading text survives: {joined:?}");
+        assert!(
+            !joined.contains("# Plan"),
+            "the `#` marker is dropped: {joined:?}"
+        );
+        // Inline code renders without backticks.
+        assert!(joined.contains("main.rs"), "inline code text: {joined:?}");
+        assert!(
+            !joined.contains("`main.rs`"),
+            "backticks are stripped: {joined:?}"
+        );
+        // The heading line carries the Heading style, not the thinking tone.
+        let heading_line = lines
+            .iter()
+            .find(|l| l.to_string().contains("Plan"))
+            .expect("heading line present");
+        assert!(
+            heading_line.iter().any(|s| s.style == heading_style),
+            "heading uses the Heading style: {joined:?}"
+        );
+        // Inline-code span keeps the InlineCode role.
+        let code_line = lines
+            .iter()
+            .find(|l| l.to_string().contains("main.rs"))
+            .expect("inline code line present");
+        assert!(
+            code_line
+                .iter()
+                .any(|s| s.content == "main.rs" && s.style == inline_code),
+            "inline code carries the InlineCode style: {code_line:?}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -3924,8 +5140,15 @@ mod tool_call_line_tests {
             .loop_running(false)
             .compaction_last_open(false)
             .call();
-        let joined: String = lines.iter().map(|l| l.to_string()).collect::<Vec<_>>().join("\n");
-        assert!(joined.contains("goal_complete"), "bare tool name: {joined:?}");
+        let joined: String = lines
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            joined.contains("goal_complete"),
+            "bare tool name: {joined:?}"
+        );
         assert!(!joined.contains("tool:"), "no tool: prefix: {joined:?}");
         assert!(
             !joined.contains('"'),
@@ -3934,8 +5157,8 @@ mod tool_call_line_tests {
     }
 }
 
+#[cfg(test)]
 // ── issue #4: user-message box, no markers, no indent ────────────────
-
 #[cfg(test)]
 mod user_box_tests {
     use super::user_box_rows;
@@ -3943,14 +5166,17 @@ mod user_box_tests {
     use ratatui::text::{Line, Span};
 
     fn joined(lines: &[Line<'static>]) -> String {
-        lines.iter().map(|l| l.to_string()).collect::<Vec<_>>().join("\n")
+        lines
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
-    /// The user panel: a rounded bordered box titled "User" on the
-    /// tool-result panel background — no `user` marker, no content
-    /// gutter (docs/tui_feature_requests_from_human.md 2026-09-06).
+    /// The user panel: rounded border, "User" title, no background
+    /// fill. No `user` marker, no content gutter.
     #[test]
-    fn user_box_has_title_and_background() {
+    fn user_box_has_title_no_background() {
         let palette = Palette::builtin(Level::Rgb);
         let content = vec![
             Line::from(Span::raw("Hello, world")),
@@ -3970,17 +5196,42 @@ mod user_box_tests {
         let j = joined(&lines);
         assert!(!j.contains("user "), "no user marker: {j:?}");
         assert!(!j.contains("\n            "), "no gutter indent: {j:?}");
-        // Every cell of every row carries the tool-result background,
-        // so the panel reads as one lighter band.
-        let bg = crate::tool_display::box_bg(&palette, false);
+        // No background fill: every span of every row is transparent.
         for line in &lines {
             for span in &line.spans {
-                assert_eq!(
-                    span.style.bg,
-                    Some(bg),
-                    "every cell on the panel background: {j:?}"
-                );
+                assert!(span.style.bg.is_none(), "no panel background fill: {j:?}");
             }
+        }
+    }
+
+    /// The report panel: the final idle assistant message.
+    /// A rounded `Report`-toned box with no title and no background.
+    #[test]
+    fn report_box_has_report_border_no_title() {
+        use super::report_box_rows;
+        let palette = Palette::builtin(Level::Rgb);
+        let content = vec![Line::from(Span::raw("All done."))];
+        let lines = report_box_rows(&content, 40, &palette);
+        assert_eq!(lines.len(), 3, "got: {}", joined(&lines));
+        let top = lines[0].to_string();
+        assert!(top.starts_with('╭'), "rounded top-left: {top:?}");
+        assert!(top.ends_with('╮'), "rounded top-right: {top:?}");
+        // No title: the top border is corner, dashes, corner only.
+        assert_eq!(lines[0].spans.len(), 3, "no title span: {top:?}");
+        assert!(!top.contains("Assistant"), "no title: {top:?}");
+        let border_fg = palette.color(crate::color::Role::Report);
+        // No background fill anywhere in the panel.
+        for line in &lines {
+            for span in &line.spans {
+                assert!(span.style.bg.is_none(), "no background fill");
+            }
+        }
+        // The border rows are fully in the Report tone.
+        for span in &lines[0].spans {
+            assert_eq!(span.style.fg, Some(border_fg), "top: {top:?}");
+        }
+        for span in &lines[lines.len() - 1].spans {
+            assert_eq!(span.style.fg, Some(border_fg), "bottom border");
         }
     }
 
@@ -4001,9 +5252,8 @@ mod user_box_tests {
         use std::collections::{HashMap, HashSet};
 
         let palette = Palette::builtin(Level::Rgb);
-        let tool_display = crate::tool_display::ToolDisplay::preset(
-            crate::tool_display::Preset::OpenCode,
-        );
+        let tool_display =
+            crate::tool_display::ToolDisplay::preset(crate::tool_display::Preset::OpenCode);
         let fracs: HashMap<String, f64> = HashMap::new();
         let state = RenderState {
             palette: &palette,
@@ -4030,7 +5280,11 @@ mod user_box_tests {
             .loop_running(false)
             .compaction_last_open(false)
             .call();
-        let joined = lines.iter().map(|l| l.to_string()).collect::<Vec<_>>().join("\n");
+        let joined = lines
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(
             !joined.contains("assistant"),
             "no assistant marker: {joined:?}"
@@ -4059,9 +5313,8 @@ mod user_box_tests {
         use std::collections::{HashMap, HashSet};
 
         let palette = Palette::builtin(Level::Rgb);
-        let tool_display = crate::tool_display::ToolDisplay::preset(
-            crate::tool_display::Preset::OpenCode,
-        );
+        let tool_display =
+            crate::tool_display::ToolDisplay::preset(crate::tool_display::Preset::OpenCode);
         let fracs: HashMap<String, f64> = HashMap::new();
         let state = RenderState {
             palette: &palette,
@@ -4088,8 +5341,15 @@ mod user_box_tests {
             .loop_running(false)
             .compaction_last_open(false)
             .call();
-        let joined = lines.iter().map(|l| l.to_string()).collect::<Vec<_>>().join("\n");
-        assert!(joined.contains("thinking"), "the thinking label: {joined:?}");
+        let joined = lines
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            joined.contains("thinking"),
+            "the thinking label: {joined:?}"
+        );
         // Each reasoning line carries exactly one cell of left pad, not
         // the old 12-space gutter and not the bare left edge.
         for text in ["step one", "step two"] {
@@ -4102,11 +5362,1262 @@ mod user_box_tests {
                 l.starts_with(' ') && !l.starts_with("  "),
                 "one-cell left pad: {l:?}"
             );
-            assert!(
-                !l.starts_with("            "),
-                "no 12-space gutter: {l:?}"
-            );
+            assert!(!l.starts_with("            "), "no 12-space gutter: {l:?}");
             assert!(l.trim_start().starts_with(text), "{l:?}");
         }
+    }
+}
+
+#[cfg(test)]
+// ── §4.1 table rendering fixes ──────────────────────────────────────────
+#[cfg(test)]
+mod table_fix_tests {
+    use crate::color::{Level, Palette};
+    use crate::highlight::{is_table_block_start, is_table_row, table_grid};
+
+    /// A lone `|`-prefixed line with no following separator must NOT
+    /// be treated as the start of a table block.
+    #[test]
+    fn lone_pipe_line_is_not_a_table_block() {
+        let lines: Vec<&str> = vec!["Some prose", "|x| y => x", "more prose"];
+        assert!(
+            !is_table_block_start(&lines, 1),
+            "lone pipe line must not start a table block"
+        );
+        // It IS a table row (two pipes), but not a block start.
+        assert!(is_table_row("|x| y => x"));
+    }
+
+    /// A proper GFM table (header + separator) IS detected.
+    #[test]
+    fn gfm_table_is_detected() {
+        let lines: Vec<&str> = vec!["| Name | Value |", "|------|-------|", "| a    | 1     |"];
+        assert!(
+            is_table_block_start(&lines, 0),
+            "header + separator must be detected"
+        );
+    }
+
+    /// A single `|`-prefixed line with no separator is not a block.
+    #[test]
+    fn single_pipe_row_without_separator_is_not_a_block() {
+        let lines: Vec<&str> = vec!["|a| b|", "some prose"];
+        assert!(!is_table_block_start(&lines, 0));
+    }
+
+    /// Wide cells are wrapped onto multiple visual lines, not
+    /// truncated with a trailing `…`.
+    #[test]
+    fn wide_cell_wraps_not_truncates() {
+        let palette = Palette::builtin(Level::Rgb);
+        let rows = vec![
+            "| A | B                          |".to_string(),
+            "|---|--------------------------|".to_string(),
+            "| x | a very long value that exceeds the column width comfortably and should wrap to a second visual line inside the box |".to_string(),
+        ].into_iter().collect::<Vec<_>>();
+        let grid = table_grid(&rows, 30, &palette);
+        let joined: String = grid
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|(_, t)| t.as_str())
+                    .collect::<Vec<_>>()
+                    .concat()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        // Every word of the original cell content must be present
+        // (no truncation).
+        for word in [
+            "very",
+            "long",
+            "value",
+            "that",
+            "exceeds",
+            "column",
+            "width",
+            "comfortably",
+            "wrap",
+            "visual",
+            "line",
+            "inside",
+            "the",
+            "box",
+        ] {
+            assert!(
+                joined.contains(word),
+                "word `{word}` must appear in output:\n{joined}"
+            );
+        }
+        // No ellipsis character from truncation.
+        assert!(
+            !joined.contains('…'),
+            "no truncation ellipsis expected:\n{joined}"
+        );
+        // The cell must span more than one visual line (it wrapped).
+        let data_line_count = grid
+            .iter()
+            .filter(|row| {
+                row.iter()
+                    .any(|(_, t)| t.contains("very") || t.contains("box"))
+            })
+            .count();
+        assert!(
+            data_line_count >= 2,
+            "the long cell should wrap to ≥2 visual lines, got {data_line_count}:\n{joined}"
+        );
+    }
+}
+
+#[cfg(test)]
+// ── §4.8 preview-pane wrapping helpers ─────────────────────────────
+#[cfg(test)]
+mod wrap_hard_lines_tests {
+    use crate::highlight::Seg;
+    use crate::render::{display_row_hard_line, hard_line_display_start, wrap_hard_lines};
+    use ratatui::style::Style;
+
+    fn segs(texts: &[&str]) -> Vec<Seg> {
+        let s = Style::default();
+        texts.iter().map(|t| (s, t.to_string())).collect()
+    }
+
+    /// Join one hard line's display lines with a marker so wrap
+    /// points are visible.
+    fn joined(display_lines: &[ratatui::text::Line]) -> String {
+        display_lines
+            .iter()
+            .map(|line| {
+                line.iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<Vec<_>>()
+                    .concat()
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    /// Short lines pass through unchanged: one display row each.
+    #[test]
+    fn short_lines_pass_through() {
+        let lines = vec![
+            segs(&["fn main() {"]),
+            segs(&["    println!(\"hi\");"]),
+            segs(&["}"]),
+        ];
+        let wrapped = wrap_hard_lines(&lines, 80);
+        assert_eq!(wrapped.len(), 3);
+        assert_eq!(wrapped[0].len(), 1);
+        assert_eq!(wrapped[1].len(), 1);
+        assert_eq!(wrapped[2].len(), 1);
+        let j = joined(&wrapped[1]);
+        assert!(j.contains("println!"), "indent must be preserved: {j}");
+    }
+
+    /// A word longer than the width hard-breaks at the boundary.
+    #[test]
+    fn overlong_word_hard_breaks() {
+        let lines = vec![segs(&["abcdef"])];
+        let wrapped = wrap_hard_lines(&lines, 4);
+        let j = joined(&wrapped[0]);
+        assert_eq!(j, "abcd | ef", "expected 4-char hard break, got: {j}");
+    }
+
+    /// A word longer than a narrow width hard-breaks repeatedly.
+    #[test]
+    fn overlong_word_repeated_breaks() {
+        let lines = vec![segs(&["abcdefgh"])];
+        let wrapped = wrap_hard_lines(&lines, 3);
+        let j = joined(&wrapped[0]);
+        assert_eq!(j, "abc | def | gh", "expected repeated breaks, got: {j}");
+    }
+
+    /// Words wrap at spaces; a trailing space moves to the next line
+    /// but is not visible.
+    #[test]
+    fn words_wrap_at_spaces() {
+        let lines = vec![segs(&["hello world"])];
+        let wrapped = wrap_hard_lines(&lines, 6);
+        let j = joined(&wrapped[0]);
+        assert!(
+            j.contains("hello") && j.contains("world"),
+            "both words must survive: {j}"
+        );
+        assert_eq!(wrapped[0].len(), 2, "expected two display rows: {j}");
+    }
+
+    /// A blank hard line stays a single empty display row.
+    #[test]
+    fn blank_line_stays_visible() {
+        let lines = vec![segs(&[""]), segs(&["x"])];
+        let wrapped = wrap_hard_lines(&lines, 80);
+        assert_eq!(wrapped.len(), 2);
+        assert_eq!(wrapped[0].len(), 1);
+        assert!(joined(&wrapped[0]).is_empty());
+    }
+
+    /// Width 0 is floored to 1, so no infinite loop or panic.
+    #[test]
+    fn width_zero_is_floored() {
+        let lines = vec![segs(&["ab"])];
+        let wrapped = wrap_hard_lines(&lines, 0);
+        assert!(!wrapped.is_empty());
+    }
+
+    /// `hard_line_display_start` maps a hard-line index to the
+    /// display-row index where that hard line's first row begins.
+    #[test]
+    fn hard_line_display_start_maps_cumulative() {
+        // width 4: "abcd" fits in one row; "w1 w2 w3" wraps to
+        // three rows ("w1 ", "w2 ", "w3"); "z" is one row.
+        let lines = vec![segs(&["abcd"]), segs(&["w1 w2 w3"]), segs(&["z"])];
+        let wrapped = wrap_hard_lines(&lines, 4);
+        assert_eq!(wrapped[0].len(), 1);
+        assert_eq!(wrapped[1].len(), 3);
+        assert_eq!(wrapped[2].len(), 1);
+        assert_eq!(hard_line_display_start(&wrapped, 0), 0);
+        assert_eq!(hard_line_display_start(&wrapped, 1), 1);
+        assert_eq!(hard_line_display_start(&wrapped, 2), 4);
+        // Past the end: the total display-row count.
+        assert_eq!(hard_line_display_start(&wrapped, 99), 5);
+    }
+
+    /// `display_row_hard_line` maps a display row back to the largest
+    /// hard line that starts at or before it.
+    #[test]
+    fn display_row_hard_line_back_tracks() {
+        let lines = vec![segs(&["abcd"]), segs(&["w1 w2 w3"]), segs(&["z"])];
+        let wrapped = wrap_hard_lines(&lines, 4);
+        // display rows: 0 -> hard 0; 1..3 -> hard 1; 4 -> hard 2
+        assert_eq!(display_row_hard_line(&wrapped, 0), 0);
+        assert_eq!(display_row_hard_line(&wrapped, 1), 1);
+        assert_eq!(display_row_hard_line(&wrapped, 3), 1);
+        assert_eq!(display_row_hard_line(&wrapped, 4), 2);
+        // Past the end clamps to the last hard line.
+        assert_eq!(display_row_hard_line(&wrapped, 99), 2);
+    }
+}
+
+// ── stage 1: snapshot plus pure build ───────────────────────────────
+
+/// Tests for the transcript snapshot of
+/// docs/tui-perf-background-build-plan.md stage 1. The pure build
+/// must equal the direct `&App` build.
+#[cfg(test)]
+mod transcript_snapshot_tests {
+    use ratatui::style::Style;
+
+    use crate::app::App;
+    use crate::event::Event;
+    use crate::ext::ExtLine;
+    use crate::port::SessionId;
+    use crate::render::{
+        build_transcript, build_transcript_input, resolve_ext_lines, TranscriptBuild,
+        TranscriptBuildInput,
+    };
+
+    fn ev(json: &str) -> Event {
+        Event::parse_line(json).expect("test event parses")
+    }
+
+    /// A session that exercises the main render paths.
+    /// It covers a user message, an assistant reply,
+    /// a tool call with result, and an open approval.
+    fn rich_events() -> Vec<Event> {
+        vec![
+            ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u1","content":"Hello, world"}"#),
+            ev(
+                r#"{"v":1,"type":"assistant_message","ts":"t","id":"a1","content":"Here is the output.","tool_calls":[],"stop_reason":"stop","usage":{"input_tokens":10,"output_tokens":5},"reasoning":[{"content":[{"type":"reasoning_text","text":"Step one: think about it."}]}]}"#,
+            ),
+            ev(
+                r#"{"v":1,"type":"tool_call","ts":"t","id":"c1","name":"bash","arguments":{"command":"make"}}"#,
+            ),
+            ev(
+                r#"{"v":1,"type":"tool_result","ts":"t","id":"c1","value":{"text":"Compiling tui v0.1.0\nFinished in 3.2s\n","exit_code":0,"stdout":"Compiling tui v0.1.0\nFinished in 3.2s\n","stderr":"","timed_out":false,"truncated":false},"is_error":false}"#,
+            ),
+            ev(
+                r#"{"v":1,"type":"approval_request","ts":"t","id":"appr-1","call_id":"c2","prompt":"Allow the command?"}"#,
+            ),
+        ]
+    }
+
+    fn app_with_rich_session() -> App {
+        let mut app = App::new();
+        let events = rich_events();
+        let log_lines = events.len() as u64;
+        app.set_active(SessionId::new("s1"), events, log_lines);
+        app
+    }
+
+    /// Stage 1 test gate: the snapshot build equals the direct
+    /// `&App` build. The insta snapshot is the golden reference
+    /// for the rendered transcript.
+    #[test]
+    fn snapshot_build_equals_direct_build() {
+        let app = app_with_rich_session();
+        let width = 100;
+        let direct = build_transcript(&app, width, None);
+        let input = TranscriptBuildInput::from_app(&app, width, None);
+        let pure = build_transcript_input(&input);
+        assert_eq!(
+            pure, direct,
+            "the snapshot build must equal the direct &App build"
+        );
+        let joined: Vec<&str> = pure.texts.iter().map(String::as_str).collect();
+        insta::assert_snapshot!(joined.join("\n"));
+    }
+
+    /// `from_app` captures every field the build reads.
+    #[test]
+    fn from_app_captures_app_state() {
+        let mut app = app_with_rich_session();
+        app.toggle_block_expand("c1");
+        let width = 80;
+        let input = TranscriptBuildInput::from_app(&app, width, None);
+        assert_eq!(input.events.as_slice(), app.events());
+        assert_eq!(input.events_base_seq, app.events_base_seq());
+        assert_eq!(input.call_details, app.call_details());
+        assert!(
+            input.pending.is_some(),
+            "the open approval request must be captured as pending"
+        );
+        assert_eq!(input.palette, app.palette().clone());
+        assert_eq!(input.tool_display, *app.tool_display());
+        assert!(!input.tool_expanded);
+        assert_eq!(input.thinking_shown, app.thinking_shown());
+        assert!(
+            !input.thinking_expanded,
+            "thinking blocks start collapsed (docs/tui-turn-fold.md)"
+        );
+        assert_eq!(input.expand_fracs, app.expand_fracs().clone());
+        assert_eq!(input.rewind_active_ranges, app.rewind_active_ranges());
+        assert_eq!(input.active, app.active().cloned());
+        assert!(
+            !input.loop_running,
+            "no loop is attached, so the running bit is false"
+        );
+        assert_eq!(input.width, width);
+        assert!(
+            input.ext_lines.is_empty(),
+            "no ext host means no pre-resolved lines"
+        );
+    }
+
+    /// The running-loop bit is captured and reaches the build.
+    /// With the bit set, the snapshot build still equals the
+    /// direct build on the same app.
+    #[test]
+    fn running_loop_bit_flows_through_snapshot() {
+        let mut app = app_with_rich_session();
+        let sid = app
+            .active()
+            .cloned()
+            .expect("the helper sets an active session");
+        app.attach_external_loop(sid);
+        let direct = build_transcript(&app, 100, None);
+        let input = TranscriptBuildInput::from_app(&app, 100, None);
+        assert!(input.loop_running, "the running bit must be captured");
+        assert_eq!(
+            build_transcript_input(&input),
+            direct,
+            "the snapshot build must equal the direct &App build"
+        );
+    }
+
+    /// Without an ext host the pre-resolution yields an empty map.
+    #[test]
+    fn resolve_ext_lines_without_host_is_empty() {
+        let events = rich_events();
+        let got = resolve_ext_lines(None, &events);
+        assert!(got.is_empty());
+    }
+
+    /// A pre-resolved ext line replaces the built-in render of the
+    /// event it is keyed by.
+    /// A missing key keeps the built-in render.
+    #[test]
+    fn pure_build_uses_pre_resolved_ext_lines() {
+        let app = app_with_rich_session();
+        let mut input = TranscriptBuildInput::from_app(&app, 80, None);
+        input
+            .ext_lines
+            .insert(0, vec![ExtLine::styled("EXT RENDERED", Style::default())]);
+        let build = build_transcript_input(&input);
+        let joined = build.texts.join("\n");
+        assert!(
+            joined.contains("EXT RENDERED"),
+            "the ext line must replace the built-in render: {joined:?}"
+        );
+        // Drop the entry: the built-in render of event 0 comes back.
+        let bare = TranscriptBuildInput::from_app(&app, 80, None);
+        let bare_build = build_transcript_input(&bare);
+        assert!(
+            !bare_build.texts.join("\n").contains("EXT RENDERED"),
+            "without the ext entry the built-in render must render"
+        );
+    }
+
+    /// Stage 2 sends the snapshot and the finished build across a
+    /// thread boundary. Both must be `Send`.
+    #[test]
+    fn snapshot_and_build_are_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<TranscriptBuildInput>();
+        assert_send::<TranscriptBuild>();
+    }
+}
+
+#[cfg(test)]
+mod stream_cache_tests {
+    //! The stream block cache tests
+    //! (docs/tui-perf-streaming-incremental-plan.md).
+
+    use std::rc::Rc;
+    use std::time::Instant;
+
+    use ratatui::style::Modifier;
+    use ratatui::text::Line;
+
+    use crate::app::{App, StreamBlockCache, StreamBuf};
+    use crate::color::{Level, Palette, Role};
+    use crate::tool_display::HighlightEngine;
+
+    use super::{gutter_lines, stream_block_lines, wrap_thinking_full, LIVE_GUTTER};
+
+    /// The frame width the frame uses.
+    const W: usize = 80;
+    /// The wrap width: `W.saturating_sub(1).max(4)`.
+    const WRAP_W: usize = 79;
+
+    /// A fresh app with a fixed palette and the given highlight engine.
+    fn make_app(engine: HighlightEngine) -> App {
+        let mut app = App::new();
+        app.set_palette(Palette::builtin(Level::Rgb));
+        let mut td = *app.tool_display();
+        td.highlight_engine = engine;
+        app.set_tool_display(td);
+        app
+    }
+
+    /// Build a live stream buffer from reasoning pairs and response text.
+    fn stream_buf(text: &str, reasoning: &[(&str, &str)], done: bool) -> StreamBuf {
+        let mut buf = StreamBuf {
+            text: text.to_string(),
+            done,
+            ..Default::default()
+        };
+        for (k, v) in reasoning {
+            buf.reasoning.insert((*k).to_string(), (*v).to_string());
+        }
+        buf
+    }
+
+    /// The live stream cache, once a frame has built it.
+    fn cache_of(app: &App) -> &StreamBlockCache {
+        app.stream_block_cache_ref().as_ref().expect("cache built")
+    }
+
+    /// The O(T) reasoning join count on this thread.
+    fn join_calls() -> u32 {
+        crate::app::REASONING_JOIN_CALLS.with(|c| c.get())
+    }
+
+    /// The whole-document markdown parse count on this thread.
+    fn parse_calls() -> u32 {
+        crate::markdown::markdown_parse_calls()
+    }
+
+    /// The rendered text of a set of lines, for byte-identity checks.
+    fn lines_text<'a>(lines: impl IntoIterator<Item = &'a Line<'static>>) -> Vec<String> {
+        lines.into_iter().map(|l| l.to_string()).collect()
+    }
+
+    /// A thinking corpus of about `n_kb` kilobytes: prose lines plus
+    /// a fenced rust block each, so fences cross chunk boundaries.
+    fn thinking_corpus(n_kb: usize) -> String {
+        let want = n_kb * 1024;
+        let mut s: String = (0..(n_kb * 12))
+            .map(|i| {
+                format!(
+                    "Step {i}: weigh the design against the cost. ```rust\nfn step_{i}() {{ let v: u32 = {i}; v }}\n```\n"
+                )
+            })
+            .collect();
+        s.truncate(want);
+        s
+    }
+
+    /// 1. Feeding 10 KB of thinking in ten 1 KB chunks must match a
+    ///    fresh full rebuild of each prefix.
+    #[test]
+    fn incremental_thinking_matches_full_rebuild() {
+        let mut app = make_app(HighlightEngine::Builtin);
+        let palette = app.palette().clone();
+        let style = palette.style(Role::Thinking, Modifier::empty());
+        let corpus = thinking_corpus(10);
+        let total = corpus.len();
+        assert!(total >= 10 * 1024, "corpus is only {total} bytes");
+        let step = total / 10;
+        for i in 1..=10 {
+            let prefix = &corpus[..step * i];
+            app.set_stream_buf(stream_buf("", &[("r1", prefix)], false));
+            let _ = stream_block_lines(&mut app, W, usize::MAX);
+            let cache = cache_of(&app);
+            let actual = lines_text(
+                cache
+                    .think_lines
+                    .iter()
+                    .chain(cache.think_held_lines.iter()),
+            );
+            let (full, _, _) =
+                wrap_thinking_full(prefix, WRAP_W, &palette, style, HighlightEngine::Builtin);
+            let expected = lines_text(gutter_lines(full, LIVE_GUTTER).iter());
+            assert_eq!(actual, expected, "chunk {i}/10 must equal the full rebuild");
+        }
+    }
+
+    /// 2. A code fence open in chunk 1 and closed in chunk 2 keeps the
+    ///    fence state coherent, and the line after it is prose.
+    #[test]
+    fn thinking_code_fence_spans_delta_boundary() {
+        let mut app = make_app(HighlightEngine::Builtin);
+        let palette = app.palette().clone();
+        let style = palette.style(Role::Thinking, Modifier::empty());
+
+        // Chunk 1: open a fence, one code line inside, no close.
+        let c1 = "```rust\nlet a: u32 = 1;\n";
+        app.set_stream_buf(stream_buf("", &[("r1", c1)], false));
+        let _ = stream_block_lines(&mut app, W, usize::MAX);
+        {
+            let cache = cache_of(&app);
+            assert!(cache.think_in_fence, "the fence is open after chunk 1");
+            assert_eq!(cache.think_fence_lang.as_deref(), Some("rust"));
+        }
+
+        // Chunk 2: close the fence. The line after it is prose.
+        let c2 = format!("{c1}```\nand that is why it works\n");
+        app.set_stream_buf(stream_buf("", &[("r1", &c2)], false));
+        let _ = stream_block_lines(&mut app, W, usize::MAX);
+        let cache = cache_of(&app);
+        assert!(!cache.think_in_fence, "the fence is closed after chunk 2");
+        assert_eq!(cache.think_fence_lang, None);
+        let (full, _, _) =
+            wrap_thinking_full(&c2, WRAP_W, &palette, style, HighlightEngine::Builtin);
+        let expected = lines_text(gutter_lines(full, LIVE_GUTTER).iter());
+        let actual = lines_text(
+            cache
+                .think_lines
+                .iter()
+                .chain(cache.think_held_lines.iter()),
+        );
+        assert_eq!(
+            actual, expected,
+            "the post-fence line is prose, matching the full rebuild"
+        );
+    }
+
+    /// 3. A width change invalidates the cache, a fresh build of both
+    ///    the thinking and text sections.
+    #[test]
+    fn width_change_invalidates_cache() {
+        let mut app = make_app(HighlightEngine::Builtin);
+        let reasoning = "w ".repeat(200);
+        let text = "x ".repeat(150);
+        app.set_stream_buf(stream_buf(&text, &[("r1", &reasoning)], false));
+        let _ = stream_block_lines(&mut app, 80, usize::MAX);
+        let before = cache_of(&app).think_lines.clone();
+        let before_text = cache_of(&app).text_lines.clone();
+
+        let _ = stream_block_lines(&mut app, 120, usize::MAX);
+        let cache = cache_of(&app);
+        let after = cache.think_lines.clone();
+        let after_text = cache.text_lines.clone();
+        assert!(
+            !Rc::ptr_eq(&before, &after),
+            "a width change must rebuild the thinking lines"
+        );
+        assert!(
+            !Rc::ptr_eq(&before_text, &after_text),
+            "a width change must rebuild the text lines"
+        );
+        assert_eq!(
+            cache.width, 120,
+            "the config snapshot records the new width"
+        );
+    }
+
+    /// 4. An unchanged response text returns the cached lines with no
+    ///    markdown re-parse. A changed one re-parses.
+    #[test]
+    fn text_unchanged_returns_cache() {
+        let mut app = make_app(HighlightEngine::Builtin);
+        let text = "Hello **world**\n\n- alpha\n- beta\n";
+        app.set_stream_buf(stream_buf(text, &[], false));
+
+        let p0 = parse_calls();
+        let _ = stream_block_lines(&mut app, W, usize::MAX);
+        let p1 = parse_calls();
+        assert!(p1 > p0, "a new text body must parse the markdown");
+
+        // Idle frame: same text, no re-parse, lines shared.
+        let rc0 = cache_of(&app).text_lines.clone();
+        let _ = stream_block_lines(&mut app, W, usize::MAX);
+        let rc1 = cache_of(&app).text_lines.clone();
+        let p2 = parse_calls();
+        assert_eq!(p2, p1, "an idle frame must not re-parse the markdown");
+        assert!(
+            Rc::ptr_eq(&rc0, &rc1),
+            "idle frame reuses the cached text lines"
+        );
+
+        // Growth: a new parse runs.
+        let text2 = format!("{text}more body\n");
+        app.set_stream_buf(stream_buf(&text2, &[], false));
+        let _ = stream_block_lines(&mut app, W, usize::MAX);
+        let p3 = parse_calls();
+        assert!(p3 > p2, "a changed text body must re-parse the markdown");
+    }
+
+    /// 5. Growing the earliest reasoning id changes the join at a
+    ///    non-suffix position, so a full rebuild runs and matches a
+    ///    fresh full rebuild.
+    #[test]
+    fn reasoning_reorder_triggers_full_rebuild() {
+        let mut app = make_app(HighlightEngine::Builtin);
+        let palette = app.palette().clone();
+        let style = palette.style(Role::Thinking, Modifier::empty());
+
+        // Grow the last id in sort order (b), a suffix append.
+        app.set_stream_buf(stream_buf("", &[("a", "alpha"), ("b", "beta")], false));
+        let _ = stream_block_lines(&mut app, W, usize::MAX);
+        app.set_stream_buf(stream_buf(
+            "",
+            &[("a", "alpha"), ("b", "beta\ngamma")],
+            false,
+        ));
+        let _ = stream_block_lines(&mut app, W, usize::MAX);
+        assert_eq!(cache_of(&app).think_src, "alpha\nbeta\ngamma");
+
+        // Grow the earlier id (a) by appending. The value only grows,
+        // so the fingerprint moves and the join runs. But the joined
+        // text now changes at a non-suffix position, so the prefix
+        // check fails and a full rebuild runs.
+        app.set_stream_buf(stream_buf(
+            "",
+            &[("a", "alpha\nalpha2"), ("b", "beta\ngamma")],
+            false,
+        ));
+        let _ = stream_block_lines(&mut app, W, usize::MAX);
+        let joined = "alpha\nalpha2\nbeta\ngamma";
+        assert_eq!(cache_of(&app).think_src, joined);
+        let (full, _, _) =
+            wrap_thinking_full(joined, WRAP_W, &palette, style, HighlightEngine::Builtin);
+        let expected = lines_text(gutter_lines(full, LIVE_GUTTER).iter());
+        let cache = cache_of(&app);
+        let actual = lines_text(
+            cache
+                .think_lines
+                .iter()
+                .chain(cache.think_held_lines.iter()),
+        );
+        assert_eq!(
+            actual, expected,
+            "the reorder rebuild matches a fresh full rebuild"
+        );
+    }
+
+    /// 6. `clear_stream` drops the live cache and the stream buffer.
+    #[test]
+    fn clear_stream_drops_cache() {
+        let mut app = make_app(HighlightEngine::Builtin);
+        app.set_stream_buf(stream_buf("hi", &[("r1", "think")], false));
+        let _ = stream_block_lines(&mut app, W, usize::MAX);
+        assert!(
+            app.stream_block_cache_ref().is_some(),
+            "the cache is built in a frame"
+        );
+        app.clear_stream();
+        assert!(
+            app.stream_block_cache_ref().is_none(),
+            "clear_stream drops the cache"
+        );
+        assert!(app.stream_buf().is_none(), "clear_stream clears the buffer");
+    }
+
+    /// 7. An unchanged reasoning map skips the O(T) join on idle
+    ///    frames.
+    #[test]
+    fn join_skip_on_unchanged_reasoning() {
+        let mut app = make_app(HighlightEngine::Builtin);
+        app.set_stream_buf(stream_buf("", &[("r1", "some reasoning")], false));
+
+        let j0 = join_calls();
+        let _ = stream_block_lines(&mut app, W, usize::MAX);
+        let j1 = join_calls();
+        assert_eq!(j1, j0 + 1, "a fresh cache joins the reasoning once");
+
+        let _ = stream_block_lines(&mut app, W, usize::MAX);
+        let j2 = join_calls();
+        assert_eq!(j2, j1, "an idle frame skips the O(T) join");
+    }
+
+    /// 8. A changed reasoning map re-joins, and the incremental path
+    ///    picks up the new suffix.
+    #[test]
+    fn join_triggers_on_reasoning_change() {
+        let mut app = make_app(HighlightEngine::Builtin);
+        let palette = app.palette().clone();
+        let style = palette.style(Role::Thinking, Modifier::empty());
+
+        app.set_stream_buf(stream_buf("", &[("r1", "first part")], false));
+        let _ = stream_block_lines(&mut app, W, usize::MAX);
+        let j1 = join_calls();
+
+        // Grow the single reasoning value, a new suffix.
+        app.set_stream_buf(stream_buf("", &[("r1", "first part\nsecond part")], false));
+        let _ = stream_block_lines(&mut app, W, usize::MAX);
+        let j2 = join_calls();
+        assert!(j2 > j1, "a changed reasoning map re-joins");
+
+        let cache = cache_of(&app);
+        assert_eq!(cache.think_src, "first part\nsecond part");
+        let (full, _, _) = wrap_thinking_full(
+            "first part\nsecond part",
+            WRAP_W,
+            &palette,
+            style,
+            HighlightEngine::Builtin,
+        );
+        let expected = lines_text(gutter_lines(full, LIVE_GUTTER).iter());
+        let actual = lines_text(
+            cache
+                .think_lines
+                .iter()
+                .chain(cache.think_held_lines.iter()),
+        );
+        assert_eq!(
+            actual, expected,
+            "the new suffix is wrapped and matches the rebuild"
+        );
+    }
+
+    /// 9. Perf gate. 200 KB of thinking fed in 60 frames of about 3
+    ///    KB each. Every frame stays under 100 ms and the average under
+    ///    10 ms. The Builtin engine isolates the cache mechanism. The
+    ///    tree-sitter highlighter internal re-parse is out of scope.
+    #[test]
+    fn streaming_thinking_per_frame_stays_under_budget() {
+        let mut app = make_app(HighlightEngine::Builtin);
+        let total = 200 * 1024;
+        let frames = 60;
+        let per = total / frames;
+        let corpus = thinking_corpus(200);
+        assert_eq!(corpus.len(), total, "the corpus must be 200 KB");
+
+        let ms: Vec<u128> = (0..frames)
+            .map(|i| {
+                let upto = ((i + 1) * per).min(corpus.len());
+                app.set_stream_buf(stream_buf("", &[("r1", &corpus[..upto])], false));
+                let t0 = Instant::now();
+                let _ = stream_block_lines(&mut app, W, usize::MAX);
+                t0.elapsed().as_millis()
+            })
+            .collect();
+        let avg = ms.iter().sum::<u128>() / frames as u128;
+        let max = *ms.iter().max().unwrap();
+        assert!(max < 100, "a frame hit {max} ms, the budget is 100 ms");
+        assert!(avg < 10, "the average frame {avg} ms must stay under 10 ms");
+    }
+
+    /// 10. Perf gate. A warm cache with no new delta is an idle frame.
+    ///     It skips the join, the highlight, and the markdown re-parse,
+    ///     and stays under 2 ms.
+    #[test]
+    fn idle_frame_is_cached() {
+        let mut app = make_app(HighlightEngine::Builtin);
+        let corpus = thinking_corpus(200);
+        app.set_stream_buf(stream_buf("", &[("r1", &corpus)], false));
+        let _ = stream_block_lines(&mut app, W, usize::MAX);
+
+        let t0 = Instant::now();
+        let _ = stream_block_lines(&mut app, W, usize::MAX);
+        let idle_ms = t0.elapsed().as_millis();
+        assert!(
+            idle_ms < 2,
+            "an idle frame took {idle_ms} ms, the budget is 2 ms"
+        );
+    }
+}
+
+#[cfg(test)]
+mod stream_cache_independent_tests {
+    //! Independent verification of the live-stream-block incremental
+    //! cache (docs/tui-perf-streaming-incremental-plan.md).
+    //!
+    //! These tests are written **independently** of the sibling
+    //! `stream_cache_tests` module, which implements the plan's own
+    //! test plan. They:
+    //!
+    //!   * drive the mechanism through the public `App` API
+    //!     (`set_stream_buf`, `press`, `clear_stream`) rather than
+    //!     poking cache fields,
+    //!   * check the plan's **invariant** (the cached lines must stay
+    //!     byte-identical to a from-scratch full rebuild of the same
+    //!     source prefix) at *irregular* chunk boundaries the plan's
+    //!     tests do not exercise, and
+    //!   * add an **A/B performance test** that runs the pre-plan
+    //!     full-rebuild mechanism and the post-plan incremental
+    //!     mechanism over the same streaming workload and asserts the
+    //!     incremental one is faster.
+    //!
+    //! The plan's "Before" cost model is: every draw ran
+    //! `wrap_thinking` (a fresh `CodeHl`, O(total thinking chars))
+    //! plus `render_markdown_lines` (a fresh parser, O(total response
+    //! chars)). The "After" model is: a cache hit reuses the wrapped
+    //! lines, a delta re-wraps only the appended suffix, and the
+    //! persistent `CodeHl` keeps code-fence state coherent.
+
+    use std::rc::Rc;
+    use std::time::Instant;
+
+    use ratatui::style::Modifier;
+    use ratatui::text::Line;
+
+    use crate::app::{App, Key, StreamBlockCache, StreamBuf};
+    use crate::color::{Level, Palette, Role};
+    use crate::tool_display::HighlightEngine;
+
+    use super::{
+        gutter_lines, stream_block_lines, wrap_markdown_p, wrap_thinking_full, LIVE_GUTTER,
+    };
+
+    // A fresh app with a fixed palette and the Builtin engine (the
+    // engine the plan's perf gates run, isolating the cache mechanism
+    // from tree-sitter's own full-buffer re-parse).
+    fn make_app() -> App {
+        let mut app = App::new();
+        app.set_palette(Palette::builtin(Level::Rgb));
+        let mut td = *app.tool_display();
+        td.highlight_engine = HighlightEngine::Builtin;
+        app.set_tool_display(td);
+        app
+    }
+
+    /// Build a live-stream buffer from a response-text string and a
+    /// list of (id, value) reasoning pairs.
+    fn buf(text: &str, reasoning: &[(&str, &str)]) -> StreamBuf {
+        let mut b = StreamBuf {
+            text: text.to_string(),
+            ..Default::default()
+        };
+        for (k, v) in reasoning {
+            b.reasoning.insert((*k).to_string(), (*v).to_string());
+        }
+        b
+    }
+
+    fn cache_of(app: &App) -> &StreamBlockCache {
+        app.stream_block_cache_ref().as_ref().expect("cache built")
+    }
+
+    /// The O(T) reasoning-join count on this thread.
+    fn join_calls() -> u32 {
+        crate::app::REASONING_JOIN_CALLS.with(|c| c.get())
+    }
+
+    /// The whole-document markdown parse count on this thread.
+    fn parse_calls() -> u32 {
+        crate::markdown::markdown_parse_calls()
+    }
+
+    /// The rendered text of a line iterable, for byte-identity checks.
+    fn lines_text<'a>(lines: impl IntoIterator<Item = &'a Line<'static>>) -> Vec<String> {
+        lines.into_iter().map(|l| l.to_string()).collect()
+    }
+
+    /// The legacy (pre-plan) full-rebuild baseline for a thinking
+    /// prefix: a fresh highlighter over the whole prefix, gutter
+    /// applied. This is exactly what the old `stream_block_lines`
+    /// paid on every frame.
+    fn legacy_full_think(app: &App, prefix: &str) -> Vec<String> {
+        let palette = app.palette().clone();
+        let style = palette.style(Role::Thinking, Modifier::empty());
+        let (lines, _, _) =
+            wrap_thinking_full(prefix, 79, &palette, style, HighlightEngine::Builtin);
+        lines_text(gutter_lines(lines, LIVE_GUTTER).iter())
+    }
+
+    /// The incremental cache's thinking output: settled lines plus the
+    /// in-progress held lines.
+    fn cache_think(app: &App) -> Vec<String> {
+        let c = cache_of(app);
+        lines_text(c.think_lines.iter().chain(c.think_held_lines.iter()))
+    }
+
+    /// A thinking corpus with code fences and prose, ~`n_kb` KB. The
+    /// fence delimiters sit on their own hard lines so fence state
+    /// actually opens and closes.
+    fn fence_corpus(n_kb: usize) -> String {
+        let want = n_kb * 1024;
+        let mut s: String = (0..(n_kb * 12))
+            .map(|i| {
+                format!(
+                    "Step {i}: weigh the design. ```rust\nfn step_{i}() {{ let v: u32 = {i}; v }}\n```\n"
+                )
+            })
+            .collect();
+        s.truncate(want);
+        s
+    }
+
+    // ── correctness: the invariant holds at odd boundaries ─────
+
+    /// Feeding the same thinking prefix in *irregular* chunks (splitting
+    /// fence lines, landing on newline boundaries, multi-line suffixes)
+    /// keeps the cached thinking byte-identical to a fresh full rebuild
+    /// of that prefix at every step.
+    #[test]
+    fn irregular_chunks_stay_byte_identical() {
+        let mut app = make_app();
+        let corpus = fence_corpus(8);
+        let total = corpus.len();
+        let bounds: Vec<usize> = [0.0f64, 0.01, 0.13, 0.29, 0.5, 0.61, 0.87, 1.0]
+            .iter()
+            .map(|f| (*f * total as f64) as usize)
+            .collect();
+        for &bound in bounds.iter().skip(1) {
+            app.set_stream_buf(buf("", &[("r1", &corpus[..bound])]));
+            let _ = stream_block_lines(&mut app, 80, usize::MAX);
+            assert_eq!(
+                cache_think(&app),
+                legacy_full_think(&app, &corpus[..bound]),
+                "prefix {bound} of {total} must equal the full rebuild"
+            );
+        }
+    }
+
+    /// A code fence that opens in chunk 1 and closes in chunk 2 stays
+    /// coherent: after the close the following line is
+    /// prose-highlighted, byte-identical to a full rebuild.
+    #[test]
+    fn fence_state_spans_delta_boundary() {
+        let mut app = make_app();
+        let c1 = "```rust\nlet x = 1;\n";
+        app.set_stream_buf(buf("", &[("r1", c1)]));
+        let _ = stream_block_lines(&mut app, 80, usize::MAX);
+        let c1cache = cache_of(&app);
+        assert!(c1cache.think_in_fence, "the fence is open after c1");
+        assert_eq!(c1cache.think_fence_lang.as_deref(), Some("rust"));
+
+        let c2 = format!("{c1}{}\nafter the fence", "```");
+        app.set_stream_buf(buf("", &[("r1", &c2)]));
+        let _ = stream_block_lines(&mut app, 80, usize::MAX);
+        let c2cache = cache_of(&app);
+        assert!(!c2cache.think_in_fence, "the fence is closed after c2");
+        assert_eq!(
+            cache_think(&app),
+            legacy_full_think(&app, &c2),
+            "the post-fence line is prose, matching the full rebuild"
+        );
+    }
+
+    /// A delta that only grows the in-progress held line must not
+    /// merge the settled lines (no `Rc` re-allocation); a delta that
+    /// completes a hard line must merge into a new `Rc`. This is the
+    /// build deviation "the held line is rewrapped, not cached".
+    #[test]
+    fn held_line_grows_without_merging_settled_lines() {
+        let mut app = make_app();
+        let s1 = "alpha\nbeta\n";
+        app.set_stream_buf(buf("", &[("r1", s1)]));
+        let _ = stream_block_lines(&mut app, 80, usize::MAX);
+        let settled_a = cache_of(&app).think_lines.clone();
+
+        // Grow the held line only (no new newline in the suffix).
+        let s2 = "alpha\nbeta\ngamma";
+        app.set_stream_buf(buf("", &[("r1", s2)]));
+        let _ = stream_block_lines(&mut app, 80, usize::MAX);
+        let settled_b = cache_of(&app).think_lines.clone();
+        assert!(
+            Rc::ptr_eq(&settled_a, &settled_b),
+            "held-line-only growth must not re-allocate the settled lines"
+        );
+        assert_eq!(
+            cache_think(&app),
+            legacy_full_think(&app, s2),
+            "settled plus rewrapped held must match a full rebuild of the prefix"
+        );
+
+        // Now complete the line: a newline lands, so a merge runs.
+        let s3 = "alpha\nbeta\ngamma\ndelta";
+        app.set_stream_buf(buf("", &[("r1", s3)]));
+        let _ = stream_block_lines(&mut app, 80, usize::MAX);
+        let settled_c = cache_of(&app).think_lines.clone();
+        assert!(
+            !Rc::ptr_eq(&settled_b, &settled_c),
+            "completing a hard line must merge into a new settled Rc"
+        );
+        assert_eq!(
+            cache_think(&app),
+            legacy_full_think(&app, s3),
+            "after the merge, settled plus held must match a full rebuild"
+        );
+    }
+
+    /// Growing the *earliest* reasoning id changes the join at a
+    /// non-suffix position, forcing a full rebuild that still matches
+    /// a fresh full rebuild.
+    #[test]
+    fn reasoning_reorder_triggers_full_rebuild() {
+        let mut app = make_app();
+        app.set_stream_buf(buf("", &[("a", "alpha"), ("b", "beta")]));
+        let _ = stream_block_lines(&mut app, 80, usize::MAX);
+        let j1 = join_calls();
+
+        // Grow the earlier id "a": the join now changes at a
+        // non-suffix position.
+        app.set_stream_buf(buf("", &[("a", "alpha\nalpha2"), ("b", "beta")]));
+        let _ = stream_block_lines(&mut app, 80, usize::MAX);
+        let joined = "alpha\nalpha2\nbeta";
+        assert_eq!(cache_of(&app).think_src, joined);
+        assert!(join_calls() > j1, "the reordered join must re-join");
+        assert_eq!(
+            cache_think(&app),
+            legacy_full_think(&app, joined),
+            "the reorder rebuild must match a fresh full rebuild"
+        );
+    }
+
+    /// A config change (width or palette level) forces a full rebuild
+    /// of both sections.
+    #[test]
+    fn config_change_invalidates_cache() {
+        let mut app = make_app();
+        let think = "w ".repeat(200);
+        let text = "x ".repeat(150);
+        app.set_stream_buf(buf(&text, &[("r1", &think)]));
+        let _ = stream_block_lines(&mut app, 80, usize::MAX);
+        let t_before = cache_of(&app).think_lines.clone();
+        let x_before = cache_of(&app).text_lines.clone();
+
+        // Width change -> full rebuild of both sections.
+        let _ = stream_block_lines(&mut app, 120, usize::MAX);
+        assert!(
+            !Rc::ptr_eq(&t_before, &cache_of(&app).think_lines),
+            "a width change must rebuild the thinking section"
+        );
+        assert!(
+            !Rc::ptr_eq(&x_before, &cache_of(&app).text_lines),
+            "a width change must rebuild the text section"
+        );
+        assert_eq!(cache_of(&app).width, 120);
+
+        // Palette level change -> full rebuild again.
+        let t_pal = cache_of(&app).think_lines.clone();
+        app.set_palette(Palette::builtin(Level::C256));
+        let _ = stream_block_lines(&mut app, 120, usize::MAX);
+        assert!(
+            !Rc::ptr_eq(&t_pal, &cache_of(&app).think_lines),
+            "a palette level change must rebuild the thinking section"
+        );
+        assert_eq!(cache_of(&app).palette_level, Level::C256);
+    }
+
+    /// Toggling `thinking_expanded` (Ctrl+T) rebuilds the thinking
+    /// section only; the text section is unaffected. Toggling
+    /// `thinking_shown` (Ctrl+X) rebuilds nothing.
+    #[test]
+    fn thinking_toggles_rebuild_only_their_section() {
+        let mut app = make_app();
+        let think = "alpha\nbeta\n";
+        let text = "# Answer\n\n- a\n- b\n";
+        app.set_stream_buf(buf(text, &[("r1", think)]));
+        let _ = stream_block_lines(&mut app, 80, usize::MAX);
+        let think_a = cache_of(&app).think_lines.clone();
+        let text_a = cache_of(&app).text_lines.clone();
+
+        // Ctrl+T: thinking_expanded flips. Thinking section rebuilds,
+        // text section keeps its Rc.
+        let _ = app.press(Key::CtrlT);
+        let _ = stream_block_lines(&mut app, 80, usize::MAX);
+        let think_b = cache_of(&app).think_lines.clone();
+        let text_b = cache_of(&app).text_lines.clone();
+        assert!(
+            !Rc::ptr_eq(&think_a, &think_b),
+            "the thinking-expanded toggle must rebuild the thinking section"
+        );
+        assert!(
+            Rc::ptr_eq(&text_a, &text_b),
+            "the thinking-expanded toggle must leave the text section alone"
+        );
+        assert!(cache_of(&app).thinking_expanded);
+
+        // Ctrl+X: thinking_shown flips. No section rebuilds.
+        let _ = app.press(Key::CtrlX);
+        let _ = stream_block_lines(&mut app, 80, usize::MAX);
+        let think_c = cache_of(&app).think_lines.clone();
+        let text_c = cache_of(&app).text_lines.clone();
+        assert!(
+            Rc::ptr_eq(&think_b, &think_c),
+            "the thinking-shown toggle must not rebuild the thinking section"
+        );
+        assert!(
+            Rc::ptr_eq(&text_b, &text_c),
+            "the thinking-shown toggle must not rebuild the text section"
+        );
+    }
+
+    /// `clear_stream` drops the live cache (and the buffer), so memory
+    /// returns to baseline.
+    #[test]
+    fn clear_stream_drops_cache() {
+        let mut app = make_app();
+        app.set_stream_buf(buf("hi", &[("r1", "think")]));
+        let _ = stream_block_lines(&mut app, 80, usize::MAX);
+        assert!(app.stream_block_cache_ref().is_some());
+        app.clear_stream();
+        assert!(
+            app.stream_block_cache_ref().is_none(),
+            "clear_stream must drop the cache"
+        );
+        assert!(app.stream_buf().is_none());
+    }
+
+    /// A warm idle frame (no reasoning or text delta) does no join, no
+    /// markdown re-parse, and reuses the cached lines.
+    #[test]
+    fn idle_frame_does_no_work() {
+        let mut app = make_app();
+        let think = "step one\nstep two\n";
+        let text = "Answer\n\n- a\n- b\n";
+        app.set_stream_buf(buf(text, &[("r1", think)]));
+        let _ = stream_block_lines(&mut app, 80, usize::MAX);
+        let t_warm = cache_of(&app).think_lines.clone();
+        let x_warm = cache_of(&app).text_lines.clone();
+        let j_warm = join_calls();
+        let p_warm = parse_calls();
+
+        for _ in 0..2 {
+            let _ = stream_block_lines(&mut app, 80, usize::MAX);
+        }
+        assert_eq!(join_calls(), j_warm, "idle frames must skip the O(T) join");
+        assert_eq!(
+            parse_calls(),
+            p_warm,
+            "idle frames must skip the markdown re-parse"
+        );
+        assert!(
+            Rc::ptr_eq(&t_warm, &cache_of(&app).think_lines),
+            "idle frames must reuse the cached thinking lines"
+        );
+        assert!(
+            Rc::ptr_eq(&x_warm, &cache_of(&app).text_lines),
+            "idle frames must reuse the cached text lines"
+        );
+    }
+
+    // ── performance: the incremental path beats full rebuild ─────
+
+    /// A/B gate. The pre-plan path re-ran a full O(T) thinking rebuild
+    /// and a full O(W) markdown parse on every frame. The post-plan
+    /// incremental cache re-wraps only the appended suffix and skips
+    /// the markdown parse when the text is unchanged. Over a 60-frame
+    /// stream of ~800 KB of thinking, the incremental path must win.
+    #[test]
+    fn streaming_frames_incremental_beats_full_rebuild() {
+        let corpus = fence_corpus(800);
+        let text = "## Answer\n\n".to_string() + "x ".repeat(20_000).as_str();
+        let frames = 60;
+        let per = corpus.len() / frames;
+
+        let app0 = make_app();
+        let palette = app0.palette().clone();
+        let style = palette.style(Role::Thinking, Modifier::empty());
+        let prose = palette.style(Role::PlainText, Modifier::empty());
+
+        // OLD mechanism: full thinking rebuild plus full markdown
+        // parse on every frame.
+        let mut old_ms: Vec<u128> = Vec::with_capacity(frames);
+        for i in 1..=frames {
+            let think_prefix = corpus[..i * per].to_string();
+            let text_prefix = text[..i * text.len() / frames].to_string();
+            let t0 = Instant::now();
+            let _ =
+                wrap_thinking_full(&think_prefix, 79, &palette, style, HighlightEngine::Builtin);
+            let _ = wrap_markdown_p(&text_prefix, 79, &palette, prose);
+            old_ms.push(t0.elapsed().as_millis());
+        }
+        let old_total = old_ms.iter().sum::<u128>();
+
+        // NEW mechanism: the incremental cache.
+        let mut app = make_app();
+        let mut new_ms: Vec<u128> = Vec::with_capacity(frames);
+        for i in 1..=frames {
+            let think_prefix = corpus[..i * per].to_string();
+            let text_prefix = text[..i * text.len() / frames].to_string();
+            app.set_stream_buf(buf(&text_prefix, &[("r1", &think_prefix)]));
+            let t0 = Instant::now();
+            let _ = stream_block_lines(&mut app, 80, usize::MAX);
+            new_ms.push(t0.elapsed().as_millis());
+        }
+        let new_total = new_ms.iter().sum::<u128>();
+
+        let old_avg = old_total / frames as u128;
+        let new_avg = new_total / frames as u128;
+        eprintln!(
+            "indep_streaming old_total={} ms old_avg={} ms \
+             new_total={} ms new_avg={} ms ratio={:.2}",
+            old_total,
+            old_avg,
+            new_total,
+            new_avg,
+            old_total as f64 / new_total.max(1) as f64
+        );
+        assert!(
+            old_total >= 2 * new_total,
+            "the incremental path must be at least 2x faster in total \
+             (old {old_total} ms vs new {new_total} ms)"
+        );
+        assert!(
+            new_avg < 50,
+            "an incremental frame hit {new_avg} ms, the budget is 50 ms"
+        );
+    }
+
+    /// A/B gate. A warm idle frame in the new mechanism reuses the
+    /// cache and does no wrap or parse work. The pre-plan idle frame
+    /// re-ran the full thinking rebuild and the full markdown parse.
+    /// The new idle frame must be far cheaper.
+    #[test]
+    fn idle_frame_incremental_beats_full_rebuild() {
+        let think = fence_corpus(500);
+        let text = "## Answer\n\n".to_string() + "x ".repeat(60_000).as_str();
+
+        let mut app = make_app();
+        app.set_stream_buf(buf(&text, &[("r1", &think)]));
+        let _ = stream_block_lines(&mut app, 80, usize::MAX);
+
+        let palette = app.palette().clone();
+        let style = palette.style(Role::Thinking, Modifier::empty());
+        let prose = palette.style(Role::PlainText, Modifier::empty());
+
+        // OLD idle frame: full thinking rebuild plus full markdown
+        // parse.
+        let t_old = Instant::now();
+        let _ = wrap_thinking_full(&think, 79, &palette, style, HighlightEngine::Builtin);
+        let _ = wrap_markdown_p(&text, 79, &palette, prose);
+        let old_ms = t_old.elapsed().as_millis();
+
+        // NEW idle frame: a cache hit.
+        let t_new = Instant::now();
+        let _ = stream_block_lines(&mut app, 80, usize::MAX);
+        let new_ms = t_new.elapsed().as_millis();
+
+        eprintln!("indep_idle old={} ms new={} ms", old_ms, new_ms);
+        assert!(
+            old_ms > 0 && new_ms <= old_ms / 10,
+            "the idle frame must be at least 10x cheaper than a full \
+             rebuild (old {old_ms} ms, new {new_ms} ms)"
+        );
     }
 }

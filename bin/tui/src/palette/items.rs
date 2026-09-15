@@ -49,15 +49,8 @@ pub struct PaletteItem {
 /// (docs/tui-thinking-block.md section 4). The palette
 /// `thinking-level` item offers these as options; `Ctrl+L` walks the
 /// same order.
-pub const THINKING_LEVEL_ORDER: &[&str] = &[
-    "none",
-    "minimal",
-    "low",
-    "medium",
-    "high",
-    "xhigh",
-    "max",
-];
+pub const THINKING_LEVEL_ORDER: &[&str] =
+    &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 /// The built-in palette commands (docs/tui-command-palette.md section 6).
 ///
@@ -117,6 +110,15 @@ pub fn builtins(current_effort: &str) -> Vec<PaletteItem> {
             kind: CmdKind::Goto,
             hint: String::new(),
             help: "Open the session buffer list. Type to filter.".into(),
+            options: Vec::new(),
+            ext: None,
+        },
+        PaletteItem {
+            id: "tree".into(),
+            label: "tree".into(),
+            kind: CmdKind::Goto,
+            hint: String::new(),
+            help: "Open the session log tree. Type to filter events. Enter picks one and offers 4 options (docs/tree-ui-design-from-human.md).".into(),
             options: Vec::new(),
             ext: None,
         },

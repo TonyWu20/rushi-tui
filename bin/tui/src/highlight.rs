@@ -330,7 +330,10 @@ pub fn json_line_p(line: &str, palette: &Palette) -> Vec<Seg> {
             if !plain.is_empty() {
                 out.push((Style::default(), std::mem::take(&mut plain)));
             }
-            out.push((style(Role::SyntaxNumber, Modifier::empty()), "true".to_string()));
+            out.push((
+                style(Role::SyntaxNumber, Modifier::empty()),
+                "true".to_string(),
+            ));
             i += 4;
             continue;
         }
@@ -349,7 +352,10 @@ pub fn json_line_p(line: &str, palette: &Palette) -> Vec<Seg> {
             if !plain.is_empty() {
                 out.push((Style::default(), std::mem::take(&mut plain)));
             }
-            out.push((style(Role::SyntaxNumber, Modifier::empty()), "null".to_string()));
+            out.push((
+                style(Role::SyntaxNumber, Modifier::empty()),
+                "null".to_string(),
+            ));
             i += 4;
             continue;
         }
@@ -357,7 +363,10 @@ pub fn json_line_p(line: &str, palette: &Palette) -> Vec<Seg> {
             if !plain.is_empty() {
                 out.push((Style::default(), std::mem::take(&mut plain)));
             }
-            out.push((style(Role::SyntaxPunctuation, Modifier::empty()), c.to_string()));
+            out.push((
+                style(Role::SyntaxPunctuation, Modifier::empty()),
+                c.to_string(),
+            ));
         } else {
             plain.push(c);
         }
@@ -435,12 +444,38 @@ pub struct CodeHighlighter {
     md_fence: bool,
 }
 
+/// The carried state of a line highlighter (docs/tui-preview-pane-plan.md,
+/// layer 3): the fence / block-comment bits that make per-line
+/// highlighting stateful. Windowed previews resume a highlighter from
+/// a saved [`HlState`] instead of rescanning the file from the top.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HlState {
+    pub in_block_comment: bool,
+    pub md_fence: bool,
+}
+
 impl CodeHighlighter {
     pub fn new() -> Self {
         Self {
             in_block_comment: false,
             md_fence: false,
         }
+    }
+
+    /// The carried state, for a windowed preview to resume later
+    /// (docs/tui-preview-pane-plan.md, layer 3).
+    pub fn state(&self) -> HlState {
+        HlState {
+            in_block_comment: self.in_block_comment,
+            md_fence: self.md_fence,
+        }
+    }
+
+    /// A highlighter resumed from a saved [`HlState`].
+    pub fn with_state(mut self, s: HlState) -> Self {
+        self.in_block_comment = s.in_block_comment;
+        self.md_fence = s.md_fence;
+        self
     }
 
     /// Highlight one hard line. `lang` is from
@@ -475,8 +510,7 @@ impl CodeHighlighter {
         let kws = keywords_for(lang);
         let lc_prefixes = line_comment_prefixes(lang);
         let block_comment = has_block_comment(lang);
-        let lc_chars: Vec<Vec<char>> =
-            lc_prefixes.iter().map(|p| p.chars().collect()).collect();
+        let lc_chars: Vec<Vec<char>> = lc_prefixes.iter().map(|p| p.chars().collect()).collect();
 
         // Resume a block comment opened on a previous line.
         if self.in_block_comment {
@@ -484,17 +518,11 @@ impl CodeHighlighter {
                 Some(pos) => {
                     self.in_block_comment = false;
                     let end = pos + 2;
-                    out.push((
-                        style(Role::SyntaxComment, Modifier::DIM),
-                        seg(&cs, 0, end),
-                    ));
+                    out.push((style(Role::SyntaxComment, Modifier::DIM), seg(&cs, 0, end)));
                     i = end;
                 }
                 None => {
-                    return vec![(
-                        style(Role::SyntaxComment, Modifier::DIM),
-                        line.to_string(),
-                    )];
+                    return vec![(style(Role::SyntaxComment, Modifier::DIM), line.to_string())];
                 }
             }
         }
@@ -524,10 +552,7 @@ impl CodeHighlighter {
                     j += 1;
                 }
                 flush_plain(&mut out, &mut plain);
-                out.push((
-                    style(Role::SyntaxString, Modifier::empty()),
-                    seg(&cs, i, j),
-                ));
+                out.push((style(Role::SyntaxString, Modifier::empty()), seg(&cs, i, j)));
                 i = j;
                 continue;
             }
@@ -535,10 +560,7 @@ impl CodeHighlighter {
             // Line comment: everything to end of line.
             if lc_chars.iter().any(|p| cs[i..].starts_with(p.as_slice())) {
                 flush_plain(&mut out, &mut plain);
-                out.push((
-                    style(Role::SyntaxComment, Modifier::DIM),
-                    seg(&cs, i, n),
-                ));
+                out.push((style(Role::SyntaxComment, Modifier::DIM), seg(&cs, i, n)));
                 return out;
             }
 
@@ -548,17 +570,11 @@ impl CodeHighlighter {
                 match find_char_seq(&cs, i + 2, "*/") {
                     Some(pos) => {
                         let end = pos + 2;
-                        out.push((
-                            style(Role::SyntaxComment, Modifier::DIM),
-                            seg(&cs, i, end),
-                        ));
+                        out.push((style(Role::SyntaxComment, Modifier::DIM), seg(&cs, i, end)));
                         i = end;
                     }
                     None => {
-                        out.push((
-                            style(Role::SyntaxComment, Modifier::DIM),
-                            seg(&cs, i, n),
-                        ));
+                        out.push((style(Role::SyntaxComment, Modifier::DIM), seg(&cs, i, n)));
                         self.in_block_comment = true;
                         return out;
                     }
@@ -572,17 +588,26 @@ impl CodeHighlighter {
                 while j < n
                     && (cs[j].is_ascii_digit()
                         || matches!(
-                            cs[j], '.' | 'x' | 'X' | 'o' | 'O' | 'b' | 'B' | 'e' | 'E' | 'a'
-                                | 'f' | 'A' | 'F' | '_'
+                            cs[j],
+                            '.' | 'x'
+                                | 'X'
+                                | 'o'
+                                | 'O'
+                                | 'b'
+                                | 'B'
+                                | 'e'
+                                | 'E'
+                                | 'a'
+                                | 'f'
+                                | 'A'
+                                | 'F'
+                                | '_'
                         ))
                 {
                     j += 1;
                 }
                 flush_plain(&mut out, &mut plain);
-                out.push((
-                    style(Role::SyntaxNumber, Modifier::empty()),
-                    seg(&cs, i, j),
-                ));
+                out.push((style(Role::SyntaxNumber, Modifier::empty()), seg(&cs, i, j)));
                 i = j;
                 continue;
             }
@@ -596,10 +621,7 @@ impl CodeHighlighter {
                 let word: String = cs[i..j].iter().collect();
                 if kws.contains(&word.as_str()) {
                     flush_plain(&mut out, &mut plain);
-                    out.push((
-                        style(Role::SyntaxKeyword, Modifier::empty()),
-                        word,
-                    ));
+                    out.push((style(Role::SyntaxKeyword, Modifier::empty()), word));
                     i = j;
                     continue;
                 }
@@ -640,8 +662,8 @@ impl Default for CodeHighlighter {
 /// Line-comment prefixes per language (consumed to end of line).
 fn line_comment_prefixes(lang: &str) -> &'static [&'static str] {
     match lang {
-        "c" | "cpp" | "rust" | "go" | "java" | "javascript" | "typescript"
-        | "swift" | "kotlin" | "scala" | "zig" => &["//"],
+        "c" | "cpp" | "rust" | "go" | "java" | "javascript" | "typescript" | "swift" | "kotlin"
+        | "scala" | "zig" => &["//"],
         "python" | "ruby" | "shell" | "make" | "dockerfile" | "config" | "r" => &["#"],
         "sql" | "lua" | "haskell" | "perl" => &["--"],
         "nim" => &["#", ";"],
@@ -654,8 +676,17 @@ fn line_comment_prefixes(lang: &str) -> &'static [&'static str] {
 fn has_block_comment(lang: &str) -> bool {
     matches!(
         lang,
-        "c" | "cpp" | "rust" | "go" | "java" | "javascript" | "typescript"
-            | "swift" | "kotlin" | "scala" | "css" | "zig"
+        "c" | "cpp"
+            | "rust"
+            | "go"
+            | "java"
+            | "javascript"
+            | "typescript"
+            | "swift"
+            | "kotlin"
+            | "scala"
+            | "css"
+            | "zig"
     )
 }
 
@@ -664,96 +695,274 @@ fn has_block_comment(lang: &str) -> bool {
 /// languages); the empty list means no keyword coloring.
 fn keywords_for(lang: &str) -> &'static [&'static str] {
     const C_FAMILY: &[&str] = &[
-        "auto", "break", "case", "catch", "const", "continue", "default",
-        "delete", "do", "else", "enum", "extern", "false", "final",
-        "finally", "for", "goto", "if", "implements", "import", "in",
-        "interface", "new", "null", "override", "package", "private",
-        "protected", "public", "return", "static", "struct", "super",
-        "switch", "this", "throw", "true", "try", "typedef", "union",
-        "unsigned", "using", "virtual", "while",
+        "auto",
+        "break",
+        "case",
+        "catch",
+        "const",
+        "continue",
+        "default",
+        "delete",
+        "do",
+        "else",
+        "enum",
+        "extern",
+        "false",
+        "final",
+        "finally",
+        "for",
+        "goto",
+        "if",
+        "implements",
+        "import",
+        "in",
+        "interface",
+        "new",
+        "null",
+        "override",
+        "package",
+        "private",
+        "protected",
+        "public",
+        "return",
+        "static",
+        "struct",
+        "super",
+        "switch",
+        "this",
+        "throw",
+        "true",
+        "try",
+        "typedef",
+        "union",
+        "unsigned",
+        "using",
+        "virtual",
+        "while",
     ];
     match lang {
         "rust" => &[
-            "async", "await", "break", "const", "continue", "dyn", "else",
-            "enum", "false", "fn", "for", "if", "impl", "let", "loop",
-            "match", "mod", "move", "mut", "pub", "ref", "return", "self",
-            "static", "struct", "super", "trait", "true", "type", "use",
-            "where", "while",
+            "async", "await", "break", "const", "continue", "dyn", "else", "enum", "false", "fn",
+            "for", "if", "impl", "let", "loop", "match", "mod", "move", "mut", "pub", "ref",
+            "return", "self", "static", "struct", "super", "trait", "true", "type", "use", "where",
+            "while",
         ],
         "python" => &[
-            "False", "True", "None", "and", "as", "assert", "async",
-            "await", "break", "class", "continue", "def", "del", "elif",
-            "else", "except", "finally", "for", "from", "global", "if",
-            "import", "in", "is", "lambda", "nonlocal", "not", "or",
-            "pass", "raise", "return", "while", "with", "yield",
+            "False", "True", "None", "and", "as", "assert", "async", "await", "break", "class",
+            "continue", "def", "del", "elif", "else", "except", "finally", "for", "from", "global",
+            "if", "import", "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise",
+            "return", "while", "with", "yield",
         ],
         "go" => &[
-            "break", "case", "chan", "const", "continue", "defer", "else",
-            "fallthrough", "func", "go", "goto", "if", "import",
-            "interface", "map", "package", "range", "return", "select",
-            "struct", "switch", "type", "var", "true", "false", "nil",
+            "break",
+            "case",
+            "chan",
+            "const",
+            "continue",
+            "defer",
+            "else",
+            "fallthrough",
+            "func",
+            "go",
+            "goto",
+            "if",
+            "import",
+            "interface",
+            "map",
+            "package",
+            "range",
+            "return",
+            "select",
+            "struct",
+            "switch",
+            "type",
+            "var",
+            "true",
+            "false",
+            "nil",
             "iota",
         ],
         "javascript" | "typescript" => &[
-            "async", "await", "break", "case", "catch", "class", "const",
-            "continue", "debugger", "default", "delete", "do", "else",
-            "export", "extends", "false", "finally", "for", "function",
-            "if", "import", "in", "instanceof", "interface", "let", "new",
-            "null", "of", "package", "private", "protected", "public",
-            "readonly", "return", "static", "super", "switch", "this",
-            "throw", "true", "try", "type", "typeof", "var", "void",
-            "while", "with", "yield",
+            "async",
+            "await",
+            "break",
+            "case",
+            "catch",
+            "class",
+            "const",
+            "continue",
+            "debugger",
+            "default",
+            "delete",
+            "do",
+            "else",
+            "export",
+            "extends",
+            "false",
+            "finally",
+            "for",
+            "function",
+            "if",
+            "import",
+            "in",
+            "instanceof",
+            "interface",
+            "let",
+            "new",
+            "null",
+            "of",
+            "package",
+            "private",
+            "protected",
+            "public",
+            "readonly",
+            "return",
+            "static",
+            "super",
+            "switch",
+            "this",
+            "throw",
+            "true",
+            "try",
+            "type",
+            "typeof",
+            "var",
+            "void",
+            "while",
+            "with",
+            "yield",
         ],
         "shell" | "make" | "dockerfile" => &[
-            "if", "then", "else", "elif", "fi", "for", "while", "do",
-            "done", "case", "esac", "function", "return", "exit", "local",
-            "export", "declare", "set", "unset", "true", "false",
-            "FROM", "RUN", "CMD", "ENTRYPOINT", "COPY", "ADD", "WORKDIR",
-            "EXPOSE", "ENV", "ARG", "VOLUME", "USER", "ONBUILD", "all",
-            "include", "override", "ifdef", "ifndef", "ifeq", "ifneq",
-            "endif", "define", "endef",
+            "if",
+            "then",
+            "else",
+            "elif",
+            "fi",
+            "for",
+            "while",
+            "do",
+            "done",
+            "case",
+            "esac",
+            "function",
+            "return",
+            "exit",
+            "local",
+            "export",
+            "declare",
+            "set",
+            "unset",
+            "true",
+            "false",
+            "FROM",
+            "RUN",
+            "CMD",
+            "ENTRYPOINT",
+            "COPY",
+            "ADD",
+            "WORKDIR",
+            "EXPOSE",
+            "ENV",
+            "ARG",
+            "VOLUME",
+            "USER",
+            "ONBUILD",
+            "all",
+            "include",
+            "override",
+            "ifdef",
+            "ifndef",
+            "ifeq",
+            "ifneq",
+            "endif",
+            "define",
+            "endef",
         ],
         "sql" => &[
-            "SELECT", "FROM", "WHERE", "INSERT", "UPDATE", "DELETE",
-            "CREATE", "DROP", "ALTER", "TABLE", "JOIN", "LEFT", "RIGHT",
-            "INNER", "OUTER", "ON", "AS", "AND", "OR", "NOT", "NULL",
-            "IN", "IS", "BY", "ORDER", "GROUP", "HAVING", "LIMIT",
-            "UNION", "VALUES", "SET", "INTO",
-            "select", "from", "where", "insert", "update", "delete",
-            "create", "drop", "alter", "table", "join", "left", "right",
-            "inner", "outer", "on", "as", "and", "or", "not", "null",
-            "in", "is", "by", "order", "group", "having", "limit",
-            "union", "values", "set", "into",
+            "SELECT", "FROM", "WHERE", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "ALTER",
+            "TABLE", "JOIN", "LEFT", "RIGHT", "INNER", "OUTER", "ON", "AS", "AND", "OR", "NOT",
+            "NULL", "IN", "IS", "BY", "ORDER", "GROUP", "HAVING", "LIMIT", "UNION", "VALUES",
+            "SET", "INTO", "select", "from", "where", "insert", "update", "delete", "create",
+            "drop", "alter", "table", "join", "left", "right", "inner", "outer", "on", "as", "and",
+            "or", "not", "null", "in", "is", "by", "order", "group", "having", "limit", "union",
+            "values", "set", "into",
         ],
         "ruby" => &[
-            "def", "end", "class", "module", "return", "if", "elsif",
-            "else", "unless", "while", "until", "do", "for", "case",
-            "when", "then", "begin", "rescue", "ensure", "raise", "yield",
-            "require", "require_relative", "include", "attr_accessor",
-            "true", "false", "nil", "self", "super", "new", "puts",
-            "print", "puts",
+            "def",
+            "end",
+            "class",
+            "module",
+            "return",
+            "if",
+            "elsif",
+            "else",
+            "unless",
+            "while",
+            "until",
+            "do",
+            "for",
+            "case",
+            "when",
+            "then",
+            "begin",
+            "rescue",
+            "ensure",
+            "raise",
+            "yield",
+            "require",
+            "require_relative",
+            "include",
+            "attr_accessor",
+            "true",
+            "false",
+            "nil",
+            "self",
+            "super",
+            "new",
+            "puts",
+            "print",
+            "puts",
         ],
         "lua" => &[
-            "and", "break", "do", "else", "elseif", "end", "false", "for",
-            "function", "goto", "if", "in", "local", "nil", "not", "or",
-            "repeat", "return", "then", "true", "until", "while",
+            "and", "break", "do", "else", "elseif", "end", "false", "for", "function", "goto",
+            "if", "in", "local", "nil", "not", "or", "repeat", "return", "then", "true", "until",
+            "while",
         ],
         "r" => &[
-            "function", "if", "else", "for", "while", "repeat", "break",
-            "next", "return", "NULL", "TRUE", "FALSE", "library", "require",
-            "in",
+            "function", "if", "else", "for", "while", "repeat", "break", "next", "return", "NULL",
+            "TRUE", "FALSE", "library", "require", "in",
         ],
         "perl" => &[
-            "if", "elsif", "else", "unless", "while", "until", "for",
-            "foreach", "do", "done", "my", "our", "local", "use", "no",
-            "require", "print", "printf", "sub", "return", "die", "warn",
-            "undef", "defined", "and", "or", "not", "BEGIN", "END",
+            "if", "elsif", "else", "unless", "while", "until", "for", "foreach", "do", "done",
+            "my", "our", "local", "use", "no", "require", "print", "printf", "sub", "return",
+            "die", "warn", "undef", "defined", "and", "or", "not", "BEGIN", "END",
         ],
         "elixir" => &[
-            "def", "defmodule", "defp", "defmacro", "do", "end", "if",
-            "else", "case", "when", "fn", "fn", "use", "import", "require",
-            "alias", "with", "try", "rescue", "catch", "raise", "throw",
-            "true", "false", "nil",
+            "def",
+            "defmodule",
+            "defp",
+            "defmacro",
+            "do",
+            "end",
+            "if",
+            "else",
+            "case",
+            "when",
+            "fn",
+            "fn",
+            "use",
+            "import",
+            "require",
+            "alias",
+            "with",
+            "try",
+            "rescue",
+            "catch",
+            "raise",
+            "throw",
+            "true",
+            "false",
+            "nil",
         ],
         "html" | "xml" | "css" | "config" => &[],
         _ => C_FAMILY,
@@ -764,11 +973,40 @@ fn keywords_for(lang: &str) -> &'static [&'static str] {
 /// picker preview pane and the tool-result renderer. `lang` is from
 /// [`language_from_path`]; `None` keeps every line plain. Returns
 /// one `Vec<Seg>` per hard line, ready for the word-wraper.
+#[allow(dead_code)] // retained as a whole-file utility; the picker now uses the windowed path.
 pub fn highlight_text_lines(text: &str, lang: Option<&str>, palette: &Palette) -> Vec<Vec<Seg>> {
     let mut hl = CodeHighlighter::new();
-    text.lines()
-        .map(|l| hl.line(l, lang, palette))
-        .collect()
+    text.lines().map(|l| hl.line(l, lang, palette)).collect()
+}
+
+/// Highlight only the hard lines `lines[start..start + count]`,
+/// resuming a stateful highlighter from `*state` (docs/tui-preview-
+/// pane-plan.md, layer 3). Per-frame cost is O(window), not O(file).
+///
+/// `*state` holds the highlighter state at line index `start`. The
+/// caller established it from a cached checkpoint, or starts fresh at
+/// index 0. The highlighter is fed `start..end` in order. The state
+/// after line `end - 1` is written back into `*state`. That lets the
+/// next window resume from it. `end` is clamped to `lines.len()`. A
+/// window past the file end yields fewer (or zero) lines.
+pub fn highlight_lines_windowed(
+    lines: &[String],
+    start: usize,
+    count: usize,
+    lang: Option<&str>,
+    palette: &Palette,
+    state: &mut HlState,
+) -> Vec<Vec<Seg>> {
+    let end = (start + count).min(lines.len());
+    if start >= end {
+        return Vec::new();
+    }
+    let mut hl = CodeHighlighter::new().with_state(*state);
+    let out = (start..end)
+        .map(|i| hl.line(&lines[i], lang, palette))
+        .collect();
+    *state = hl.state();
+    out
 }
 
 // ── the grid table (docs/tui-markdown-render.md section 1) ────
@@ -805,14 +1043,35 @@ pub fn is_table_separator(line: &str) -> bool {
         .all(|c| c.is_empty() || c.chars().all(|c| c == '-'))
 }
 
+/// True when the run of `|`-prefixed lines starting at `lines[i]`
+/// opens a GFM table: the first line is a table row **and** the next
+/// line is the `|---|` separator. Without the separator, a
+/// `|`-prefixed line (e.g. a closure like `|x| y => x` in code or
+/// prose) is **not** a table and must render as plain text.
+///
+/// This is the `|`-disambiguation fix (docs/tui-ratatui-ecosystem-
+/// audit.md §4.1, bug 1).
+pub fn is_table_block_start(lines: &[&str], i: usize) -> bool {
+    if !is_table_row(lines[i]) {
+        return false;
+    }
+    lines
+        .get(i + 1)
+        .map(|l| is_table_separator(l))
+        .unwrap_or(false)
+}
+
 /// The grid table of one table block: the rows are the `|`-separated
 /// lines in order; a separator row after the header row drops from
 /// the grid, and the header row styles bold. The box-drawing grid
 /// fits `width` columns: the column width takes the content width
-/// capped at the even share, the overflow elides with a trailing
-/// ellipsis (the narrow-pane rule of docs/tui-markdown-render.md
-/// section 3). Each returned inner `Vec` is one grid row of styled
-/// segments, in cell order.
+/// capped at the even share. Overflow **wraps** — a cell wider than
+/// its column breaks onto as many visual lines as needed, and the
+/// row height grows to the tallest cell, so no cell content is lost
+/// (the old code elided overflow with a trailing `…`, losing data).
+/// Each returned inner `Vec` is one visual grid row of styled
+/// segments, in cell order; a data row that wraps emits one inner
+/// `Vec` per wrapped line, padded to the row height.
 pub fn table_grid(rows: &[String], width: usize, palette: &Palette) -> Vec<Vec<(Style, String)>> {
     let has_sep = rows.get(1).map(|r| is_table_separator(r)).unwrap_or(false);
     let mut cells_rows: Vec<Vec<String>> = Vec::new();
@@ -833,68 +1092,175 @@ pub fn table_grid(rows: &[String], width: usize, palette: &Palette) -> Vec<Vec<(
     if ncols == 0 {
         return Vec::new();
     }
-    // The column widths: the content cap, then the narrow share.
-    // The grid owns `ncols` verticals, the two outer borders, and
-    // `ncols` padding cells: the content columns split the rest.
+    // The column widths: compute the natural content width per column
+    // (the longest cell in that column). When the total natural width
+    // fits in the available space, the grid uses it as-is so no cell
+    // wraps unnecessarily. When it overflows, `allocate_col_widths`
+    // shrinks only the widest columns so the narrow ones keep their
+    // natural width.
     let avail = width
         .saturating_sub(2)
         .saturating_sub(ncols)
         .saturating_sub(2 * ncols);
-    let share = (avail / ncols).max(1);
-    let widths: Vec<usize> = (0..ncols)
+    let content_widths: Vec<usize> = (0..ncols)
         .map(|c| {
-            let content = cells_rows
+            cells_rows
                 .iter()
                 .map(|row| row.get(c).map(|s| s.chars().count()).unwrap_or(0))
                 .max()
-                .unwrap_or(0);
-            content.min(share)
+                .unwrap_or(0)
         })
         .collect();
+    let widths = allocate_col_widths(&content_widths, avail);
 
     let border = palette.style(Role::Hint, Modifier::DIM);
     let plain = palette.style(Role::PlainText, Modifier::empty());
     let header_style = palette.style(Role::PlainText, Modifier::BOLD);
 
-    let clamp = |s: &str, w: usize| -> String {
-        let chars: Vec<char> = s.chars().collect();
-        if chars.len() <= w {
-            return s.to_string();
-        }
-        if w == 0 {
-            return String::new();
-        }
-        let mut out: String = chars[..w - 1].iter().collect();
-        out.push('…');
-        out
-    };
-
     let mut out: Vec<Vec<(Style, String)>> = Vec::new();
     out.push(grid_border('┌', '┐', '┬', '─', &widths, &border));
     for (ri, row) in cells_rows.iter().enumerate() {
         let is_header = header_index == Some(ri);
-        let mut cells_out: Vec<(Style, String)> = Vec::new();
-        cells_out.push((border, "│".to_string()));
-        for (c, &w) in widths.iter().enumerate().take(ncols) {
-            let cell = row.get(c).cloned().unwrap_or_default();
-            // Pad to the column width: every row's verticals must land
-            // on the same columns as the border rows (a shorter cell
-            // renders at the column's full width, left-aligned).
-            let text = format!(" {:<w$} ", clamp(&cell, w));
-            let st = if is_header { &header_style } else { &plain };
-            cells_out.push((*st, text));
-            if c + 1 < ncols {
-                cells_out.push((border, "│".to_string()));
+        let st = if is_header { header_style } else { plain };
+        // Wrap each cell to its column width. A data row then spans
+        // as many visual lines as its tallest wrapped cell; shorter
+        // cells pad with blanks so every row's verticals land on the
+        // same columns as the border rows. No content is elided.
+        let wrapped: Vec<Vec<String>> = (0..ncols)
+            .map(|c| {
+                let cell = row.get(c).cloned().unwrap_or_default();
+                wrap_cell_text(&cell, widths[c])
+            })
+            .collect();
+        let row_h = wrapped.iter().map(|lines| lines.len()).max().unwrap_or(1);
+        for line_i in 0..row_h {
+            let mut cells_out: Vec<(Style, String)> = Vec::new();
+            cells_out.push((border, "│".to_string()));
+            for (c, &w) in widths.iter().enumerate().take(ncols) {
+                let piece = wrapped[c].get(line_i).cloned().unwrap_or_default();
+                // Left-align in the column; missing wrapped lines pad
+                // with blanks.
+                let text = format!(" {:<w$} ", piece, w = w);
+                cells_out.push((st, text));
+                if c + 1 < ncols {
+                    cells_out.push((border, "│".to_string()));
+                }
             }
+            cells_out.push((border, "│".to_string()));
+            out.push(cells_out);
         }
-        cells_out.push((border, "│".to_string()));
-        out.push(cells_out);
         if ri + 1 < cells_rows.len() {
             out.push(grid_border('├', '┤', '┼', '─', &widths, &border));
         }
     }
     out.push(grid_border('└', '┘', '┴', '─', &widths, &border));
     out
+}
+
+/// Decide the rendered width of each table column.
+///
+/// `natural` is the longest cell in each column (the content width the
+/// user would want to see without wrapping). `avail` is the number of
+/// columns the grid may claim for content (the caller has already
+/// removed the two outer borders, the inter-column verticals, and the
+/// per-cell padding).
+///
+/// When the natural widths already fit within `avail`, they are used as
+/// is — a wide table is not squeezed into an even share of the pane.
+/// Each column still gets a floor of 1 so empty cells stay visible.
+///
+/// When the natural widths exceed `avail` (the table genuinely cannot
+/// fit), the deficit is removed from the widest columns first: narrow
+/// columns keep their natural width and only the wide columns shrink,
+/// so short headers like `Name` never wrap. Each column keeps a floor
+/// of 1.
+fn allocate_col_widths(natural: &[usize], avail: usize) -> Vec<usize> {
+    let n = natural.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    // Floor every column at 1 first so empty cells stay visible.
+    let mut w = natural.iter().map(|&x| x.max(1)).collect::<Vec<_>>();
+    let total: usize = w.iter().sum();
+    if total <= avail {
+        return w;
+    }
+    // Remove the excess from the widest columns, tier by tier, so the
+    // narrowest columns keep their natural width. Each tier (columns
+    // sharing the same current max width) absorbs an even share; a
+    // tier never drops below 1 in a single step.
+    let mut rem = total - avail;
+    loop {
+        if rem == 0 {
+            break;
+        }
+        let mx = w.iter().copied().max().unwrap_or(1);
+        if mx <= 1 {
+            break; // every column is at the floor; nothing left to take
+        }
+        let top: usize = w.iter().filter(|&&x| x == mx).count();
+        let cap = mx - 1;
+        // Even split of the remaining deficit across the top tier,
+        // rounded up so progress is guaranteed, bounded by the tier cap.
+        let take = rem.div_ceil(top).min(cap).max(1);
+        for x in &mut w {
+            if *x == mx {
+                *x -= take;
+                rem = rem.saturating_sub(take);
+            }
+        }
+    }
+    w
+}
+
+/// Word-wrap one table cell to at most `width` columns: words break
+/// on runs of whitespace, and a single word longer than the column
+/// hard-breaks into `width`-sized chunks so no content is lost
+/// (docs/tui-ratatui-ecosystem-audit.md section 4.1, bug 2: the old
+/// code elided overflow with a trailing `…`). Empty input yields
+/// one empty line so callers can index it like any other wrapped
+/// cell.
+fn wrap_cell_text(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let words: Vec<&str> = text.split_whitespace().collect();
+    if words.is_empty() {
+        return vec![String::new()];
+    }
+    let mut lines: Vec<String> = Vec::new();
+    let mut cur: Vec<&str> = Vec::new();
+    let mut cur_w = 0usize;
+    for word in words {
+        let w = word.chars().count();
+        if w > width {
+            // A word wider than the column: flush the current line,
+            // then hard-break the word into width-sized chunks.
+            if !cur.is_empty() {
+                lines.push(cur.join(" "));
+                cur.clear();
+                cur_w = 0;
+            }
+            let chars: Vec<char> = word.chars().collect();
+            for chunk in chars.chunks(width) {
+                lines.push(chunk.iter().collect());
+            }
+            continue;
+        }
+        if !cur.is_empty() && cur_w + 1 + w > width {
+            lines.push(cur.join(" "));
+            cur.clear();
+            cur_w = 0;
+        }
+        if cur.is_empty() {
+            cur_w = w;
+        } else {
+            cur_w += 1 + w;
+        }
+        cur.push(word);
+    }
+    if !cur.is_empty() {
+        lines.push(cur.join(" "));
+    }
+    lines
 }
 
 /// One grid border row: the left corner, one `─` run per column
@@ -911,10 +1277,7 @@ fn grid_border(
     let mut out: Vec<(Style, String)> = Vec::new();
     out.push((*style, left.to_string()));
     for (i, w) in widths.iter().enumerate() {
-        out.push((
-            *style,
-            std::iter::repeat_n(run, w + 2).collect::<String>(),
-        ));
+        out.push((*style, std::iter::repeat_n(run, w + 2).collect::<String>()));
         if i + 1 < widths.len() {
             out.push((*style, join.to_string()));
         }
@@ -923,3 +1286,169 @@ fn grid_border(
     out
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn allocate_fits_natural_widths() {
+        // Natural widths fit: total 12 <= 20 avail
+        let w = allocate_col_widths(&[5, 7], 20);
+        assert_eq!(w, vec![5, 7]);
+    }
+
+    #[test]
+    fn allocate_shrinks_wider_column_first() {
+        // Total 80 > avail 60 → shrink wide col, keep narrow col.
+        // natural = [5, 75], avail = 60 → col0 stays 5, col1 gets 55.
+        let w = allocate_col_widths(&[5, 75], 60);
+        assert_eq!(w[0], 5, "narrow column keeps its natural width");
+        assert_eq!(w.iter().sum::<usize>(), 60, "total equals avail");
+        assert!(w[1] < 75, "wide column was shrunk");
+    }
+
+    #[test]
+    fn allocate_minimum_one_per_column() {
+        // Very small avail: every column gets at least 1.
+        let w = allocate_col_widths(&[3, 4, 5], 3);
+        assert_eq!(w.len(), 3);
+        for &v in &w {
+            assert!(v >= 1, "column width must be >= 1");
+        }
+    }
+
+    #[test]
+    fn allocate_zero_content_gets_one() {
+        let w = allocate_col_widths(&[0, 10], 30);
+        assert_eq!(w[0], 1, "empty column still gets width 1");
+    }
+
+    #[test]
+    fn wrap_cell_text_short_text_no_wrap() {
+        let lines = wrap_cell_text("hello", 20);
+        assert_eq!(lines, vec!["hello".to_string()]);
+    }
+
+    #[test]
+    fn wrap_cell_text_wraps_at_word_boundary() {
+        // "one two three" at width 6:
+        // "one" (3), "one two" (7 > 6) → wrap after "one"
+        // "two" (3), "two three" (9 > 6) → wrap after "two"
+        // "three" (5)
+        let lines = wrap_cell_text("one two three", 6);
+        assert_eq!(
+            lines,
+            vec!["one".to_string(), "two".to_string(), "three".to_string()]
+        );
+    }
+
+    #[test]
+    fn wrap_cell_text_hard_breaks_long_word() {
+        // A single 10-char word in a width-4 column: chunks of 4.
+        let lines = wrap_cell_text("abcdefghij", 4);
+        assert_eq!(
+            lines,
+            vec!["abcd".to_string(), "efgh".to_string(), "ij".to_string()]
+        );
+    }
+
+    #[test]
+    fn wrap_cell_text_counts_spaces() {
+        // "aa bb cc" at width 8:
+        // "aa" (2), "aa bb" (5), "aa bb cc" (8) — exactly fits.
+        let lines = wrap_cell_text("aa bb cc", 8);
+        assert_eq!(lines, vec!["aa bb cc".to_string()]);
+
+        // width 7: "aa bb" (5) fits, "aa bb cc" would be 8 > 7 → wrap
+        let lines = wrap_cell_text("aa bb cc", 7);
+        assert_eq!(lines, vec!["aa bb".to_string(), "cc".to_string()]);
+    }
+
+    #[test]
+    fn wrap_cell_text_empty() {
+        assert_eq!(wrap_cell_text("", 10), vec![String::new()]);
+    }
+
+    // Windowed highlight state carry (preview pane plan, layer 3).
+
+    fn text(lines: &[&str]) -> Vec<String> {
+        lines.iter().map(|l| l.to_string()).collect()
+    }
+
+    /// State carry: a comment opened in an early window must keep
+    /// coloring lines of a later window.
+    #[test]
+    fn windowed_block_comment_state_matches_whole_file() {
+        let palette = Palette::builtin(crate::color::Level::Rgb);
+        let lines = text(&[
+            "/* open",
+            "mid",
+            "close */",
+            "let x = 1;",
+            "/* open2",
+            "mid2",
+            "close2 */",
+        ]);
+        let whole = highlight_text_lines(&lines.join("\n"), Some("rust"), &palette);
+        // Window A: lines 0..2, capturing the state at line 2.
+        let mut state = HlState::default();
+        let a = highlight_lines_windowed(&lines, 0, 2, Some("rust"), &palette, &mut state);
+        assert_eq!(a, &whole[0..2], "window A matches the whole-file slice");
+        assert!(state.in_block_comment, "state at line 2 is in the comment");
+        // Window B: lines 2..5, resumed from that state.
+        let b = highlight_lines_windowed(&lines, 2, 3, Some("rust"), &palette, &mut state);
+        assert_eq!(
+            b,
+            &whole[2..5],
+            "resumed window B matches the whole-file slice"
+        );
+    }
+
+    /// A window past the last checkpoint rescans the gap. The
+    /// result still matches the whole-file highlight.
+    #[test]
+    fn windowed_nonadjacent_window_rescans_from_checkpoint() {
+        let palette = Palette::builtin(crate::color::Level::Rgb);
+        let lines = text(&["/* open", "a", "b", "c", "d", "close */", "let y = 2;"]);
+        let whole = highlight_text_lines(&lines.join("\n"), Some("rust"), &palette);
+        let mut state = HlState::default();
+        let _ = highlight_lines_windowed(&lines, 0, 1, Some("rust"), &palette, &mut state);
+        let w = highlight_lines_windowed(&lines, 4, 2, Some("rust"), &palette, &mut state);
+        assert_eq!(
+            w,
+            &whole[4..6],
+            "rescanned window matches the whole-file slice"
+        );
+    }
+
+    /// A window past the file end yields zero lines. The state
+    /// stays untouched.
+    #[test]
+    fn windowed_past_end_is_empty() {
+        let palette = Palette::builtin(crate::color::Level::Rgb);
+        let lines = text(&["a", "b"]);
+        let mut state = HlState::default();
+        let out = highlight_lines_windowed(&lines, 5, 10, None, &palette, &mut state);
+        assert!(out.is_empty());
+        assert_eq!(state, HlState::default());
+    }
+
+    /// Fence state carries across a window boundary. A fence opened
+    /// in window A still colors the lines of window B.
+    #[test]
+    fn windowed_markdown_fence_state_carry() {
+        let palette = Palette::builtin(crate::color::Level::Rgb);
+        let lines = text(&["```", "code1", "```", "prose", "```", "code2"]);
+        let whole = highlight_text_lines(&lines.join("\n"), Some("markdown"), &palette);
+        let mut state = HlState::default();
+        let a = highlight_lines_windowed(&lines, 0, 2, Some("markdown"), &palette, &mut state);
+        assert_eq!(a, &whole[0..2]);
+        assert!(state.md_fence, "state at line 2 is inside the fence");
+        let b = highlight_lines_windowed(&lines, 2, 2, Some("markdown"), &palette, &mut state);
+        assert_eq!(
+            b,
+            &whole[2..4],
+            "fence-carrying window matches the whole file"
+        );
+    }
+}

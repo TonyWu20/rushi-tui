@@ -46,16 +46,23 @@ Example:
 
 ```
 
-On selection, shows hint of 3 options:
+On selection, shows hint of 4 options:
 
-- No summary
+- View-only
+- Rewind without summary
 - Summarize the branch
 - Summarize with custom prompt
 
 Target behaviors:
 
-- `No summary`: Close the palette floating window, directly go to the picked event. TUI updates the rendering, only
-  show history up to the picked event.
+- `View-only`: Close the palette floating window. No rewind, no fork, no `rewind`
+  marker. The full active path is kept; the TUI only scrolls the main viewport
+  to the picked event so it is visible. This is navigation of the existing log,
+  not a change to the conversation.
+- `Rewind without summary`: Close the palette floating window, directly go to the picked event. TUI updates the rendering, only
+  show history up to the picked event. Off-path events are dropped from
+  the main transcript. The rewind marker stays as the fork-boundary line.
+  Branch visibility is owned by the `tree` palette and its preview.
 - `Summarize the branch`: Close the palette floating window, the TUI sends command to `rushi` kernel to compact the context up
   to the selected event.
 - `Summarize with custom prompt`: Close the palette floating window, user write
@@ -95,27 +102,37 @@ All open points below were decided by discussion with the author.
   level adds three more spaces. The top of the active branch stays left
   aligned.
 - Selection swaps the floating window content. The event list clears. The
-  same window shows the three outcome options. Up/down moves the choice.
+  same window shows the four options. Up/down moves the choice.
   Enter confirms. Esc returns to the event list.
 - `mode` follows the target type. A `user_message` target uses `before`
   (the message waits in the input box, unsent). Every other target uses
   `on`.
 
-### Action flows (all three outcomes)
+### Action flows (the three fork outcomes)
+
+`View-only` is the fourth option but does not fork: it appends no `rewind`
+marker and spawns no `bin/compact`; it only scrolls the viewport. The three
+outcomes below all fork.
 
 - All three outcomes fork. Each pick appends a `rewind` marker at the
   picked event. `reason` is `tui_pick`. The two summarize outcomes
   also run `bin/compact`.
-- The loop must be idle for all three actions. Browsing and searching stay
-  allowed mid-step. When the loop is busy, the hint line shows "loop
-  busy, wait for the step".
+- The loop must be idle for the three fork actions. Browsing and searching stay
+  allowed mid-step, and `View-only` is allowed mid-step too because it
+  changes no state. When the loop is busy and a fork is requested, the
+  hint line shows "loop busy, wait for the step".
 - Order: append the `rewind` marker first, then run the compact. If the
   compact fails, the fork still stands. The user can retry the compact or
   continue un-compact.
 
-- `No summary`: close the palette, go to the picked event. The TUI re-renders
-  the active path. Masked events stay visible but dimmed, per the kernel
-  marker rendering.
+- `View-only`: close the palette floating window. No `rewind` marker, no fork,
+  no compact, and no `mode` change. The full active path stays intact and the
+  main viewport scrolls to the picked event so it is visible. This is
+  navigation of the existing log; nothing is dimmed or masked.
+- `Rewind without summary`: close the palette, go to the picked event. The TUI re-renders
+  the active path. Off-path events are dropped from the main transcript. The
+  rewind marker stays as the fork-boundary line. Branch visibility is owned
+  by the `tree` palette and its preview pane.
 - `Summarize the branch`: append the rewind marker, spawn
   `bin/compact --up-to <picked_seq>` as a child process. The status line
   shows a compacting indicator while it runs. On the `compaction_summary`
@@ -135,8 +152,50 @@ All open points below were decided by discussion with the author.
   JSON of the picked event for debugging. Search typing never triggers
   the toggle.
 
+### Rewind transcript masking (hide, not dim)
+
+- With a rewind marker in the log, the main transcript shows the active
+  path only. Abandoned-branch events are dropped from it entirely. They
+  are not rendered dimmed. Branch visibility is owned by the `tree`
+  palette and its preview pane.
+- The `rewind` marker event is the exception. It stays rendered as the
+  fork-boundary line. It shows even when its seq is off the active path
+  and even when it sits in a collapsed turn's span.
+- The marker line is kept only if it helps find the marker in the
+  fuzzy palette. The transcript line and the palette row share the
+  exact wording "rewound to seq N (mode)". What the user sees is what
+  they search. The row also shows the marker's own log seq as its
+  `#N` hint.
+- This is a user decision from the discussion. The dimming approach was
+  rejected. The user said the dim does not work. Option A, full
+  removal, is what the user wanted all along.
+- Deferred follow-up: improve the tree palette and preview UI for branch
+  visibility and filtering. That work is a separate task.
+
 ### Confirmed behaviors
 
 - On a `before`-mode user-message pick, the TUI loads that message text
   into the input box, unsent. This matches the kernel design doc
   (`rewind-fork-design.md` section 1).
+
+### Implementation status (TUI side)
+
+- **View-only** — wired end to end. `tree` Goto item → `TreeList` stage
+  (fuzzy-ranked event rows, one line each, type-tagged, truncated with
+  `...`) → Enter → `TreeOptions` stage with the four options. Committing
+  `View-only` closes the palette and sets a one-shot scroll target; the
+  next draw pins the picked event's first line at the top of the
+  viewport. No marker appended, no state change; allowed mid-step.
+- **Rewind without summary** — wired end to end. Committing it appends a
+  `rewind` marker (`reason` `tui_pick`) via the port. The active-path
+  mask (kernel `active_ranges`) drops abandoned-branch events from the
+  transcript. The rewind marker stays as the fork-boundary line. A
+  `user_message` target uses `before` mode and restores the message to the
+  input box unsent. Every other target uses `on`. A busy loop blocks the
+  commit with the "loop busy, wait for the step" hint.
+- **Summarize the branch / with custom prompt** — shown in the option
+  list as "pending kernel"; committing flashes that the kernel
+  `bin/compact --up-to [--prompt]` flags are pending. No-op until the
+  kernel side lands.
+- Tree indentation (`└─`, 3 spaces per level, post-fork) is not yet
+  rendered; rows are flat until it is implemented.

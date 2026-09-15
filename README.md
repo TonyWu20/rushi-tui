@@ -15,6 +15,11 @@ agent harness. This is the dedicated TUI repo from the split described in
   `tui-capture.py`, `tui-stream-drt-inputs.sh`.
 - `docs/` — the TUI / ui-extension / goal-UX docs.
 
+## Contributing
+
+`CONTRIBUTING.md` — step-by-step from a fresh clone to an open PR, written
+for first-time contributors and their coding agents.
+
 ## Building (bootstrap: local path dep, no remote yet)
 `rushi-common` is a sibling **path dep** on the kernel checkout
 (`../rust-unix-harness/crates/rushi`), so build from a checkout where the

@@ -15,15 +15,17 @@ mod editor;
 mod event;
 mod ext;
 mod float;
+mod fold;
 mod highlight;
-mod markdown;
 mod image_render;
+mod markdown;
 mod palette;
 mod picker;
 mod port;
 mod port_file;
 mod render;
 mod tool_display;
+mod transcript_worker;
 mod vim_editor;
 
 #[cfg(test)]
@@ -132,9 +134,7 @@ fn key_input(k: &cevent::KeyEvent) -> Option<Key> {
             _ => None,
         };
     }
-    if k.modifiers.contains(cevent::KeyModifiers::ALT)
-        && k.code == cevent::KeyCode::Up
-    {
+    if k.modifiers.contains(cevent::KeyModifiers::ALT) && k.code == cevent::KeyCode::Up {
         return Some(Key::AltUp);
     }
     match k.code {
@@ -179,7 +179,11 @@ fn tui_log(msg: &str) {
         let _ = std::fs::create_dir_all(parent);
     }
     use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
         let ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis())
@@ -232,8 +236,8 @@ fn resolve_active_model_name(cfg: &TuiConfig) -> String {
 /// table wins over the global `[model]` table. A missing key
 /// defaults to `medium`. `off` normalizes to `none`.
 fn resolve_reasoning_effort(text: &str, active: &str) -> String {
-    let v: toml::Value = toml::from_str(text)
-        .unwrap_or_else(|_| toml::Value::Table(toml::map::Map::new()));
+    let v: toml::Value =
+        toml::from_str(text).unwrap_or_else(|_| toml::Value::Table(toml::map::Map::new()));
     let model_root = v
         .get("model")
         .cloned()
@@ -356,6 +360,48 @@ fn main() {
     let backend = CrosstermBackend::new(std::io::stdout());
     let mut term = Terminal::new(backend).expect("cannot create the terminal");
     let mut app = App::new();
+    // Stage 2 of the perf plan runs the transcript build on a
+    // background worker. Docs: docs/tui-perf-background-build-plan.md.
+    // The first draw of a session shows a fast tail-window build.
+    // The full build then lands in the background.
+    app.attach_transcript_worker();
+    // Attach the background preview reader (docs/tui-preview-pane-
+    // plan.md, layer 2); dispatches and settles happen on it.
+    app.attach_preview_loader();
+    // Optional transcript-rebuild trace (docs/tui-perf-background-build-audit.md).
+    // `TUI_TRANSCRIPT_TRACE=1` writes to /tmp/tui-transcript-trace-<pid>.log;
+    // a path value writes there instead.
+    if let Ok(val) = std::env::var("TUI_TRANSCRIPT_TRACE") {
+        let path = if val == "1" || val.is_empty() {
+            std::env::temp_dir().join(format!("tui-transcript-trace-{}.log", std::process::id()))
+        } else {
+            std::path::PathBuf::from(&val)
+        };
+        match std::fs::File::create(&path) {
+            Ok(f) => {
+                app.set_transcript_trace(f);
+                eprintln!("transcript trace -> {}", path.display());
+            }
+            Err(e) => eprintln!("TUI_TRANSCRIPT_TRACE: cannot open {}: {e}", path.display()),
+        }
+    }
+    // Optional preview-load trace (docs/tui-preview-pane-plan.md,
+    // layer 2). `TUI_PREVIEW_TRACE=1` writes to
+    // /tmp/tui-preview-trace-<pid>.log; a path value writes there.
+    if let Ok(val) = std::env::var("TUI_PREVIEW_TRACE") {
+        let path = if val == "1" || val.is_empty() {
+            std::env::temp_dir().join(format!("tui-preview-trace-{}.log", std::process::id()))
+        } else {
+            std::path::PathBuf::from(&val)
+        };
+        match std::fs::File::create(&path) {
+            Ok(f) => {
+                app.set_preview_trace(f);
+                eprintln!("preview trace -> {}", path.display());
+            }
+            Err(e) => eprintln!("TUI_PREVIEW_TRACE: cannot open {}: {e}", path.display()),
+        }
+    }
     // The [tui] color override forces the capability level. Absent,
     // the environment detection stands (color.rs module docs). The
     // [tui] color scheme (docs/tui-color-scheme.md section 3) maps
@@ -408,14 +454,20 @@ fn main() {
                 Vec::new()
             }
         };
-        app.set_active(id.clone(), events.clone());
+        let log_lines = rt.block_on(port.log_line_count(&id)).unwrap_or(0);
+        app.set_active(id.clone(), events.clone(), log_lines);
         app.set_watch_rx(port.watch(&id, TailCursor::end()));
         app.set_sessions(rt.block_on(port.list_sessions()).unwrap_or_default());
         // Reattach a live loop from an earlier TUI (FT-003). The
         // persistent probe marks the session running, so the status
         // bit shows the real state, not this process's memory.
         resync_external_loop(&rt, &port, &mut app, &id);
-        let init_width = term.size().map(|s| s.width as usize).unwrap_or(80).saturating_sub(16).max(40);
+        let init_width = term
+            .size()
+            .map(|s| s.width as usize)
+            .unwrap_or(80)
+            .saturating_sub(16)
+            .max(40);
         host.send_history(&events, init_width);
     } else {
         // No session argument: ask for a new session name instead of
@@ -482,7 +534,11 @@ fn main() {
                         .collect::<String>();
                     trace(&rt, &port, app.active(), "malformed_line", &raw);
                 }
-                host.forward_event((evs.len() - 1) as u64, &ev, last_width.saturating_sub(16).max(40));
+                host.forward_event(
+                    (evs.len() - 1) as u64,
+                    &ev,
+                    last_width.saturating_sub(16).max(40),
+                );
                 // Register the spawn time for fade-in tracking
                 // (docs/tui-tool-display-fancy.md section 7).
                 if ev.kind() == EventKind::ToolResult {
@@ -553,7 +609,12 @@ fn main() {
                     let items = host.command_items();
                     app.set_ext_commands(items);
                 }
-                ext::ExtItem::InvokeReply { ext: name, req, ok, message } => {
+                ext::ExtItem::InvokeReply {
+                    ext: name,
+                    req,
+                    ok,
+                    message,
+                } => {
                     if ok {
                         app.flash(format!("ext {name} (req {req}): {message}"));
                     } else {
@@ -646,22 +707,35 @@ fn main() {
                         let transcript_line = (m.row as usize)
                             .saturating_sub(top_row)
                             .saturating_add(visible_start);
-                        let expand_mode = app.tool_display().expand_mode;
-                        match expand_mode {
-                            crate::tool_display::ExpandMode::Click => {
-                                if let Some(id) = app.block_at_transcript_line(transcript_line).map(|s| s.to_string()) {
-                                    app.toggle_block_expand(&id);
+                        if app.browse_ref().active() {
+                            // Browse mode: click moves the cursor and
+                            // toggles the L3 result fold under it
+                            // (docs/tui-turn-fold.md key table).
+                            app.browse_click(transcript_line, m.column as usize);
+                        } else {
+                            let expand_mode = app.tool_display().expand_mode;
+                            match expand_mode {
+                                crate::tool_display::ExpandMode::Click => {
+                                    if let Some(id) = app
+                                        .block_at_transcript_line(transcript_line)
+                                        .map(|s| s.to_string())
+                                    {
+                                        app.toggle_block_expand(&id);
+                                    }
                                 }
-                            }
-                            crate::tool_display::ExpandMode::Focus => {
-                                // In focus mode a click sets focus to the
-                                // nearest block. The draw loop will
-                                // animate it open.
-                                if let Some(id) = app.block_at_transcript_line(transcript_line).map(|s| s.to_string()) {
-                                    app.set_focus_block(&id);
+                                crate::tool_display::ExpandMode::Focus => {
+                                    // In focus mode a click sets focus to the
+                                    // nearest block. The draw loop will
+                                    // animate it open.
+                                    if let Some(id) = app
+                                        .block_at_transcript_line(transcript_line)
+                                        .map(|s| s.to_string())
+                                    {
+                                        app.set_focus_block(&id);
+                                    }
                                 }
+                                crate::tool_display::ExpandMode::Global => {}
                             }
-                            crate::tool_display::ExpandMode::Global => {}
                         }
                     }
                     _ => {}
@@ -955,7 +1029,8 @@ fn main() {
                                     Vec::new()
                                 }
                             };
-                            app.set_active(id.clone(), events.clone());
+                            let log_lines = rt.block_on(port.log_line_count(&id)).unwrap_or(0);
+                            app.set_active(id.clone(), events.clone(), log_lines);
                             app.set_watch_rx(port.watch(&id, TailCursor::end()));
                             // Event ids restart per session: clear the
                             // reply caches and resend this session's
@@ -983,7 +1058,8 @@ fn main() {
                             Vec::new()
                         }
                     };
-                    app.set_active(sid.clone(), events.clone());
+                    let log_lines = rt.block_on(port.log_line_count(&sid)).unwrap_or(0);
+                    app.set_active(sid.clone(), events.clone(), log_lines);
                     app.set_watch_rx(port.watch(&sid, TailCursor::end()));
                     if let Ok(list) = rt.block_on(port.list_sessions()) {
                         app.set_sessions(list);
@@ -1026,7 +1102,8 @@ fn main() {
                             Vec::new()
                         }
                     };
-                    app.set_active(new_sid.clone(), events.clone());
+                    let log_lines = rt.block_on(port.log_line_count(&new_sid)).unwrap_or(0);
+                    app.set_active(new_sid.clone(), events.clone(), log_lines);
                     app.set_watch_rx(port.watch(&new_sid, TailCursor::end()));
                     if let Ok(list) = rt.block_on(port.list_sessions()) {
                         app.set_sessions(list);
@@ -1042,7 +1119,8 @@ fn main() {
                             // A live loop owns the target session: a
                             // second start would double-append to its
                             // log. Stay on the old session.
-                            app.set_active(old_sid.clone(), old_events);
+                            let log_lines = rt.block_on(port.log_line_count(&old_sid)).unwrap_or(0);
+                            app.set_active(old_sid.clone(), old_events, log_lines);
                             app.set_watch_rx(port.watch(&old_sid, TailCursor::end()));
                             trace(
                                 &rt,
@@ -1062,7 +1140,9 @@ fn main() {
                                 app.flash(format!("handoff to {name} — loop started"));
                             }
                             Err(e) => {
-                                app.set_active(old_sid.clone(), old_events);
+                                let log_lines =
+                                    rt.block_on(port.log_line_count(&old_sid)).unwrap_or(0);
+                                app.set_active(old_sid.clone(), old_events, log_lines);
                                 app.set_watch_rx(port.watch(&old_sid, TailCursor::end()));
                                 app.flash(format!("handoff to {name} failed: {e}"));
                             }
@@ -1104,9 +1184,7 @@ fn main() {
                         Ok(v) => {
                             let lvl = effort_level(&v);
                             app.set_thinking_level(lvl);
-                            app.flash(format!(
-                                "thinking level → {v} (level {lvl})"
-                            ));
+                            app.flash(format!("thinking level → {v} (level {lvl})"));
                         }
                         Err(e) => app.flash(e),
                     }
@@ -1133,7 +1211,8 @@ fn main() {
                             Vec::new()
                         }
                     };
-                    app.set_active(sid.clone(), events.clone());
+                    let log_lines = rt.block_on(port.log_line_count(&sid)).unwrap_or(0);
+                    app.set_active(sid.clone(), events.clone(), log_lines);
                     app.set_watch_rx(port.watch(&sid, TailCursor::end()));
                     host.clear_replies();
                     host.send_history(&events, last_width.saturating_sub(16).max(40));
@@ -1147,14 +1226,10 @@ fn main() {
                     let req = host.request_invoke(&ext, &id, value.as_deref());
                     match req {
                         Some(req_id) => {
-                            app.flash(format!(
-                                "ext {ext}: {id} — pending (req {req_id})"
-                            ));
+                            app.flash(format!("ext {ext}: {id} — pending (req {req_id})"));
                         }
                         None => {
-                            app.flash(format!(
-                                "ext {ext}: {id} — extension not available"
-                            ));
+                            app.flash(format!("ext {ext}: {id} — extension not available"));
                         }
                     }
                 }
@@ -1166,9 +1241,7 @@ fn main() {
                         for id in &retracted_ids {
                             let ev = event::produce::user_message_retract(id);
                             if let Err(e) = rt.block_on(port.append_event(&sid, &ev)) {
-                                app.flash(format!(
-                                    "failed to retract message {id}: {e}"
-                                ));
+                                app.flash(format!("failed to retract message {id}: {e}"));
                             }
                         }
                     }
@@ -1227,6 +1300,42 @@ fn main() {
                     let _ = term.clear();
                     app.flash("resumed");
                     continue 'ui;
+                }
+                // Tree View-only (docs/tree-ui-design-from-human.md): the
+                // app already set the one-shot scroll target and closed the
+                // palette. The next draw scrolls the viewport. No port work.
+                Action::TreeViewOnly => {}
+                // Tree rewind without summary: append the rewind marker
+                // (reason tui_pick) and mask the abandoned branch. A
+                // before-mode user-message pick restores the text to the
+                // input box, unsent (docs/rewind-fork-design.md section 1).
+                Action::RewindNoSummary {
+                    target_seq,
+                    mode,
+                    restore_text,
+                } => {
+                    let Some(sid) = app.active().cloned() else {
+                        continue;
+                    };
+                    let ev = event::produce::rewind(target_seq, &mode, Some("tui_pick"));
+                    match rt.block_on(port.append_event(&sid, &ev)) {
+                        Ok(()) => {
+                            if let Some(text) = restore_text {
+                                app.set_draft(text);
+                            }
+                            app.flash(format!("rewound to seq {target_seq}"));
+                        }
+                        Err(e) => {
+                            trace(
+                                &rt,
+                                &port,
+                                Some(&sid),
+                                "port",
+                                &format!("rewind marker append failed: {e}"),
+                            );
+                            app.flash(e.to_string());
+                        }
+                    }
                 }
             }
         }
@@ -1312,6 +1421,17 @@ fn main() {
                 app.set_focus_block(&id);
             }
         }
+
+        // 4.9 Background transcript build, stage 2 of the perf plan.
+        // Docs: docs/tui-perf-background-build-plan.md.
+        // Dispatch a recorded rebuild when none is in flight.
+        // Then poll so finished builds swap in before the draw.
+        app.dispatch_transcript_build(Some(&host));
+        app.poll_transcript_worker();
+        // 4.10 Background preview reads (docs/tui-preview-pane-plan.md,
+        // layer 2): settle finished file reads and dispatch the current
+        // picker item's read before the draw.
+        app.poll_preview_loader();
 
         // 5. Draw.
         let mut cursor: Option<(u16, u16)> = None;

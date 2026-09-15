@@ -92,9 +92,9 @@ TUI to extension:
 | op | payload | meaning |
 |---|---|---|
 | `event` | one full log event | a new event matching `kinds` |
-| `tick` | `{seq, width, session, model, thinking, loop_running, color, statuses}` | cadence ping for status and frame extensions; `color` names the terminal capability level the TUI lowers hex wire colors to (color.rs `Level::name`) |
-| `frame` | `{seq, width, session, model, thinking, mode, loop_running}` | cadence ping for the frame extension; the `mode` label and `thinking` level drive its `frame_spec` |
-| `row` | `{seq, width, session, model, thinking, mode, loop_running}` | cadence ping for the row extension; the owner replies with the row content (`row_spec`) |
+| `tick` | `{seq, width, session, model, thinking, loop_running, color, statuses, cwd}` | cadence ping for status and frame extensions; `color` names the terminal capability level the TUI lowers hex wire colors to (color.rs `Level::name`); `cwd` is the host working directory |
+| `frame` | `{seq, width, session, model, thinking, mode, loop_running, cwd}` | cadence ping for the frame extension; the `mode` label and `thinking` level drive its `frame_spec` |
+| `row` | `{seq, width, session, model, thinking, mode, loop_running, cwd}` | cadence ping for the row extension; the owner replies with the row content (`row_spec`) |
 | `transform` | `{req, text, width, scope}` | rewrite one span |
 
 Extension to TUI:
@@ -239,6 +239,12 @@ where the core decides the sequence and an entry never claims a slot
   before `execvp`. So when the host dies without the stop sequence
   (for example `SIGKILL`), the extension's stdin gets EOF and the
   extension exits on its own
+- Working-dir export: at spawn the host sets the `RUSHI_CWD`
+  environment variable to its own working directory (where the user
+  launched the TUI). Extensions display or act on that directory
+  through `RUSHI_CWD` and the `cwd` tick field. They must not
+  guess it from `CONFIG`. Under Nix, `CONFIG` lives in the read-only
+  store
 - Restart budget: 3 attempts with 1 s / 2 s / 4 s backoff, then dead.
   The owned row shows a hint
 - A slow `transform` times out at 2 s. Fallback is the raw block

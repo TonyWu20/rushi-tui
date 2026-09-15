@@ -25,8 +25,8 @@
 
 use crate::config::TuiConfig;
 use crate::event::{Event, EventKind};
-use ratatui::style::{Color, Modifier, Style};
 use bon::builder;
+use ratatui::style::{Color, Modifier, Style};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, VecDeque};
@@ -73,8 +73,6 @@ pub const CAPS: &[&str] = &[
     "row",
 ];
 /// Cap on the number of cached extension line-replies per slot. The
-/// render layer only displays the last `TRANSCRIPT_EVENT_CAP` events,
-/// so keeping more than a multiple of that in memory is wasted. The
 /// cache evicts its oldest entry when it reaches this cap, so an
 /// active stream (the newest entry) is never wiped. This prevents
 /// unbounded growth in long-running sessions.
@@ -809,12 +807,24 @@ fn parse_commands_list(v: &Value) -> Option<Vec<ExtCommand>> {
             .unwrap_or(&id)
             .to_string();
         let is_setting = obj.get("kind").and_then(|k| k.as_str()) == Some("set");
-        let hint = obj.get("hint").and_then(|h| h.as_str()).unwrap_or("").to_string();
-        let help = obj.get("help").and_then(|h| h.as_str()).unwrap_or("").to_string();
+        let hint = obj
+            .get("hint")
+            .and_then(|h| h.as_str())
+            .unwrap_or("")
+            .to_string();
+        let help = obj
+            .get("help")
+            .and_then(|h| h.as_str())
+            .unwrap_or("")
+            .to_string();
         let options = obj
             .get("options")
             .and_then(|o| o.as_array())
-            .map(|arr| arr.iter().filter_map(|o| o.as_str().map(String::from)).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|o| o.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
         out.push(ExtCommand {
             id,
@@ -1144,9 +1154,18 @@ struct SlotShared {
 struct HostInner {
     slots: Vec<Arc<SlotShared>>,
     transform: Mutex<TransformRegistry>,
-    /// Bumped when a reply changes what the transcript shows. The
-    /// transcript cache key folds this version in.
+    /// Bumped on every extension reply, regardless of type. This is a
+    /// general "some reply changed" signal; the transcript cache key
+    /// does NOT fold this in (it uses `transcript_replies_version`).
     replies_version: AtomicU64,
+    /// Bumped only when transcript-visible ext data changes:
+    /// per-event `lines`, `transformed` spans, and the clears that
+    /// wipe them (dead extension, session switch). `status`,
+    /// `frame_spec`, and `row_spec` replies update their own UI
+    /// regions and never bump this, so a statusline tick at idle
+    /// does not force a full transcript rebuild
+    /// (docs/tui-perf-background-build-audit.md).
+    transcript_replies_version: AtomicU64,
     out_tx: mpsc::SyncSender<ExtItem>,
     /// Set by [`ExtHost::start`] from the host-level value.
     transform_timeout: Mutex<Duration>,
@@ -1172,6 +1191,12 @@ pub struct ExtHost {
     inner: Arc<HostInner>,
     disc: Discovery,
     config_path: PathBuf,
+    /// The working directory of the TUI process. This is where the
+    /// user launched the harness. It is host-owned state. Extensions
+    /// learn it from the tick `cwd` field and the `RUSHI_CWD` spawn
+    /// env var. They must not guess it from `CONFIG`. Under Nix that
+    /// is a read-only store path, not the user project.
+    working_dir: PathBuf,
     out_rx: mpsc::Receiver<ExtItem>,
     stop_flag: Arc<AtomicBool>,
     /// Backoff between restart attempts. The spec values are 1 s /
@@ -1227,6 +1252,7 @@ impl ExtHost {
                 slots,
                 transform: Mutex::new(TransformRegistry::new()),
                 replies_version: AtomicU64::new(0),
+                transcript_replies_version: AtomicU64::new(0),
                 out_tx,
                 transform_timeout: Mutex::new(TRANSFORM_TIMEOUT),
                 color_level: cfg.color.unwrap_or_else(crate::color::Level::detect),
@@ -1236,6 +1262,7 @@ impl ExtHost {
             }),
             disc: disc.clone(),
             config_path: cfg.config_path.clone(),
+            working_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             out_rx,
             stop_flag: Arc::new(AtomicBool::new(false)),
             restart_delays: RESTART_DELAYS,
@@ -1280,12 +1307,9 @@ impl ExtHost {
                     .spawn(move || writer_thread(wslot))
                     .ok();
             }
-            match spawn_gen(&slot, &m, &self.config_path) {
+            match spawn_gen(&slot, &m, &self.config_path, &self.working_dir) {
                 Ok(gen) => {
-                    ext_log(&format!(
-                        "spawn {} gen=0 pid={}",
-                        m.name, gen.0.pid
-                    ));
+                    ext_log(&format!("spawn {} gen=0 pid={}", m.name, gen.0.pid));
                     *slot.state.lock().unwrap() = SlotState::Running;
                     // A fresh generation: the staleness clock and
                     // flag reset with it.
@@ -1298,6 +1322,7 @@ impl ExtHost {
                     let delays = self.restart_delays;
                     let m2 = m.clone();
                     let cfg_path = self.config_path.clone();
+                    let mon_cwd = self.working_dir.clone();
                     std::thread::Builder::new()
                         .name(format!("tui-ext-mon-{}", m.name))
                         .spawn(move || {
@@ -1308,6 +1333,7 @@ impl ExtHost {
                                 .delays(delays)
                                 .manifest(m2)
                                 .config_path(cfg_path)
+                                .working_dir(mon_cwd)
                                 .idx(i)
                                 .first(gen)
                                 .call()
@@ -1354,7 +1380,10 @@ impl ExtHost {
                     continue;
                 }
             }
-            self.send_op(i, &json!({ "v": 1, "op": "event", "id": id, "event": obj, "width": width }));
+            self.send_op(
+                i,
+                &json!({ "v": 1, "op": "event", "id": id, "event": obj, "width": width }),
+            );
         }
     }
 
@@ -1364,8 +1393,9 @@ impl ExtHost {
     /// `assistant_message` that carries `usage`, uncapped, so
     /// cumulative stats survive a restart from the log alone.
     pub fn send_history(&self, events: &[Event], width: usize) {
-        let cap = crate::render::TRANSCRIPT_EVENT_CAP;
-        let base = events.len().saturating_sub(cap);
+        // No cap: the whole session history is replayed, so render
+        // capable extensions see every event of their kinds.
+        let base = 0;
         for (i, s) in self.inner.slots.iter().enumerate() {
             if *s.state.lock().unwrap() == SlotState::Skipped {
                 continue;
@@ -1420,6 +1450,12 @@ impl ExtHost {
         self.inner.commands_cache.lock().unwrap().clear();
         self.inner.invoke.lock().unwrap().clear();
         self.inner.replies_version.fetch_add(1, Ordering::SeqCst);
+        // Clearing wipes the lines cache and transform registry, so
+        // the transcript-visible data changed (built-in render
+        // returns). Bump the transcript version too.
+        self.inner
+            .transcript_replies_version
+            .fetch_add(1, Ordering::SeqCst);
     }
 
     /// Send due ticks to the status extensions. The main loop calls
@@ -1460,6 +1496,10 @@ impl ExtHost {
             if let Some(m) = p.model {
                 obj["model"] = json!(m);
             }
+            // Host working directory: where the user launched the TUI.
+            // Extensions display it instead of guessing from CONFIG,
+            // which under Nix is a read-only store path.
+            obj["cwd"] = json!(self.working_dir.to_string_lossy());
             self.send_op(i, &obj);
         }
     }
@@ -1501,6 +1541,7 @@ impl ExtHost {
         if let Some(m) = p.model {
             obj["model"] = json!(m);
         }
+        obj["cwd"] = json!(self.working_dir.to_string_lossy());
         self.send_op(i, &obj);
     }
 
@@ -1543,6 +1584,7 @@ impl ExtHost {
             if let Some(m) = p.model {
                 obj["model"] = json!(m);
             }
+            obj["cwd"] = json!(self.working_dir.to_string_lossy());
             self.send_op(i, &obj);
         }
     }
@@ -1678,9 +1720,7 @@ impl ExtHost {
             .map(|r| r.owner)
             .collect();
         for r in reg.reqs.values_mut() {
-            if matches!(r.state, InvokeState::Pending)
-                && now.duration_since(r.sent_at) > timeout
-            {
+            if matches!(r.state, InvokeState::Pending) && now.duration_since(r.sent_at) > timeout {
                 r.state = InvokeState::Stale;
             }
         }
@@ -1689,9 +1729,10 @@ impl ExtHost {
             let name = self.inner.slots.get(owner).map(|s| s.name.clone());
             self.drop_commands_for(owner);
             if let Some(name) = name {
-                let _ = self.inner.out_tx.try_send(ExtItem::InvokeTimeout {
-                    ext: name,
-                });
+                let _ = self
+                    .inner
+                    .out_tx
+                    .try_send(ExtItem::InvokeTimeout { ext: name });
             }
         }
     }
@@ -1699,11 +1740,7 @@ impl ExtHost {
     /// Remove the cached commands and in-flight invokes for one slot
     /// (used by [`mark_dead`] and by `poll_invokes` on timeout).
     fn drop_commands_for(&self, idx: usize) {
-        self.inner
-            .commands_cache
-            .lock()
-            .unwrap()
-            .remove(&idx);
+        self.inner.commands_cache.lock().unwrap().remove(&idx);
         {
             let mut reg = self.inner.invoke.lock().unwrap();
             for r in reg.reqs.values_mut() {
@@ -1729,13 +1766,10 @@ impl ExtHost {
                 continue;
             }
             let cmds = cache.get(i).map(|(_, c)| c.clone()).unwrap_or_default();
-            out.extend(crate::palette::items::from_extension(
-                &s.name, &cmds,
-            ));
+            out.extend(crate::palette::items::from_extension(&s.name, &cmds));
         }
         out
     }
-
 
     /// A resize re-requests every transform block: one new request
     /// per block, and the superseded request id stops matching. The
@@ -2027,11 +2061,29 @@ impl ExtHost {
             .map(|&i| self.disc.owner_name(i))
     }
 
-    /// The transcript cache key folds this version in, so a new
-    /// extension reply rebuilds the transcript (ui-extension-plan
-    /// stage 1: the cache folds in extension replies).
+    /// General extension reply version: bumped on every extension
+    /// reply (lines, status, frame, row, transformed). The transcript
+    /// cache key does not fold this in; it uses
+    /// [`transcript_replies_version`] instead, so non-transcript
+    /// replies (status, frame, row) do not force a transcript rebuild.
+    /// (docs/tui-perf-background-build-audit.md)
+    #[allow(dead_code)]
     pub fn replies_version(&self) -> u64 {
         self.inner.replies_version.load(Ordering::SeqCst)
+    }
+
+    /// The transcript-visible extension version.
+    ///
+    /// Bumps only when data the transcript build reads changes:
+    /// per-event `lines`, `transformed` spans, and the clears that
+    /// wipe them (dead extension, session switch). `status`,
+    /// `frame_spec`, and `row_spec` replies update their own UI
+    /// regions and never bump this. The transcript cache key folds
+    /// this in, not `replies_version`, so a statusline tick at idle
+    /// does not force a full transcript rebuild
+    /// (docs/tui-perf-background-build-audit.md).
+    pub fn transcript_replies_version(&self) -> u64 {
+        self.inner.transcript_replies_version.load(Ordering::SeqCst)
     }
 
     /// The extension names, in composed order.
@@ -2200,6 +2252,10 @@ impl HostInner {
                 cache.upsert(id, lines.clone());
                 drop(cache);
                 self.replies_version.fetch_add(1, Ordering::SeqCst);
+                // Per-event ext lines feed the transcript build, so
+                // the transcript-visible version bumps here too.
+                self.transcript_replies_version
+                    .fetch_add(1, Ordering::SeqCst);
                 let _ = self.out_tx.try_send(ExtItem::LinesCached {
                     ext: slot.name.clone(),
                 });
@@ -2298,6 +2354,10 @@ impl HostInner {
                 };
                 if ok {
                     self.replies_version.fetch_add(1, Ordering::SeqCst);
+                    // A transform span feeds the transcript build, so
+                    // the transcript-visible version bumps here too.
+                    self.transcript_replies_version
+                        .fetch_add(1, Ordering::SeqCst);
                     let _ = self.out_tx.try_send(ExtItem::TransformedCached { req });
                 }
             }
@@ -2506,7 +2566,11 @@ fn ext_log(msg: &str) {
         let _ = std::fs::create_dir_all(parent);
     }
     use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
         let _ = f.write_all(line.as_bytes());
     }
 }
@@ -2530,14 +2594,15 @@ fn ext_log_path() -> Option<std::path::PathBuf> {
 
 /// Spawn one extension generation. The child joins its own process
 /// group via `setsid`, so [`ExtHost::stop`] kills the whole group,
-/// not just the top process (docs/tui.md section 13.3). The working
-/// directory is the manifest dir; `CONFIG` and `EXT_DIR` are
-/// exported. Stderr is not part of the protocol: it goes to
-/// /dev/null.
+/// not just the top process (docs/tui.md section 13.3). The child
+/// chdir is the manifest dir. The exported env vars are `CONFIG`,
+/// `EXT_DIR`, and `RUSHI_CWD` (the host working directory). Stderr
+/// is not part of the protocol. It goes to /dev/null.
 fn spawn_gen(
     slot: &Arc<SlotShared>,
     m: &Manifest,
     config_path: &Path,
+    working_dir: &Path,
 ) -> Result<(ExtChild, Option<std::fs::File>), String> {
     let mut in_pipe = [0i32; 2];
     let mut out_pipe = [0i32; 2];
@@ -2565,6 +2630,8 @@ fn spawn_gen(
         CString::new(config_path.as_os_str().as_bytes().to_vec()).map_err(|e| e.to_string())?;
     let ext_dir_c =
         CString::new(m.dir.as_os_str().as_bytes().to_vec()).map_err(|e| e.to_string())?;
+    let host_cwd_c =
+        CString::new(working_dir.as_os_str().as_bytes().to_vec()).map_err(|e| e.to_string())?;
 
     unsafe {
         let pid = libc::fork();
@@ -2604,6 +2671,7 @@ fn spawn_gen(
                 let _ = libc::chdir(cwd_c.as_ptr());
                 libc::setenv(c"CONFIG".as_ptr(), config_c.as_ptr(), 1);
                 libc::setenv(c"EXT_DIR".as_ptr(), ext_dir_c.as_ptr(), 1);
+                libc::setenv(c"RUSHI_CWD".as_ptr(), host_cwd_c.as_ptr(), 1);
                 libc::execvp(argv[0].as_ptr(), argv_ptrs.as_ptr());
                 // execvp failed: 127 marks a generation that never
                 // started; the monitor counts it as a failed attempt.
@@ -2632,6 +2700,7 @@ fn monitor_thread(
     delays: [Duration; 3],
     manifest: Manifest,
     config_path: PathBuf,
+    working_dir: PathBuf,
     idx: usize,
     first: (ExtChild, Option<std::fs::File>),
 ) {
@@ -2671,7 +2740,7 @@ fn monitor_thread(
         }
         // A failed spawn consumes the attempt; the loop backs off
         // again on the next pass and dies when the budget is spent.
-        gen = match spawn_gen(&slot, &manifest, &config_path) {
+        gen = match spawn_gen(&slot, &manifest, &config_path, &working_dir) {
             Ok(g) => {
                 ext_log(&format!(
                     "respawn {} gen={} pid={}",
@@ -2733,6 +2802,11 @@ fn mark_dead(slot: &Arc<SlotShared>, inner: &Arc<HostInner>, idx: usize) {
         }
     }
     inner.replies_version.fetch_add(1, Ordering::SeqCst);
+    // The dead mark wipes the slot's lines cache and marks its
+    // transform spans stale, so the transcript-visible data changed.
+    inner
+        .transcript_replies_version
+        .fetch_add(1, Ordering::SeqCst);
     // Also clear any cached commands and in-flight invokes for this slot.
     inner.commands_cache.lock().unwrap().remove(&idx);
     {
@@ -2784,7 +2858,6 @@ mod tests {
         TuiConfig {
             clipboard_unnamed: false,
             sessions_root: root.join("sessions"),
-            schemas_dir: None,
             loop_cmd: None,
             config_dir: root.to_path_buf(),
             config_path: root.join("config.toml"),
@@ -2855,10 +2928,18 @@ protocol_v = 1
         std::fs::write(ext_dir.join("ext.toml"), ext_toml).unwrap();
         let m = load_manifest(&ext_dir).unwrap();
         // The resolved command_path must be absolute and point to the binary.
-        assert!(m.command_path.is_absolute(), "resolved path must be absolute");
-        assert_eq!(m.command_path, bin_path,
-            "relative command resolves against the manifest dir");
-        assert!(m.command_path.is_file(), "resolved path points to a real file");
+        assert!(
+            m.command_path.is_absolute(),
+            "resolved path must be absolute"
+        );
+        assert_eq!(
+            m.command_path, bin_path,
+            "relative command resolves against the manifest dir"
+        );
+        assert!(
+            m.command_path.is_file(),
+            "resolved path points to a real file"
+        );
     }
 
     #[test]
@@ -3040,11 +3121,7 @@ protocol_v = 1
 
         // `only_a` from the first dir survives; `shared` is the later
         // (second-dir) entry; `only_b` from the second dir is present.
-        let names: Vec<String> = d
-            .exts
-            .iter()
-            .map(|e| e.manifest.name.clone())
-            .collect();
+        let names: Vec<String> = d.exts.iter().map(|e| e.manifest.name.clone()).collect();
         assert!(names.contains(&"only_a".to_string()), "{names:?}");
         assert!(names.contains(&"only_b".to_string()), "{names:?}");
         assert_eq!(
@@ -3057,8 +3134,14 @@ protocol_v = 1
         );
         // The surviving `shared` entry comes from the later directory.
         let shared = &d.exts[d.index_by_name["shared"]];
-        assert!(shared.manifest.manifest_path.starts_with(&global_b), "later dir wins");
-        assert_eq!(d.kind_owners.get(&EventKind::ToolResult), Some(&d.index_by_name["shared"]));
+        assert!(
+            shared.manifest.manifest_path.starts_with(&global_b),
+            "later dir wins"
+        );
+        assert_eq!(
+            d.kind_owners.get(&EventKind::ToolResult),
+            Some(&d.index_by_name["shared"])
+        );
     }
 
     #[test]
@@ -4270,12 +4353,57 @@ done
             "{\"v\":1,\"op\":\"lines\",\"event_id\":1,\"lines\":[[\"a\",{}]]}",
         );
         let v2 = host.replies_version();
-        assert!(v2 > v1, "a reply bumps the version the transcript folds in");
+        assert!(v2 > v1, "a lines reply bumps the general reply version");
         host.clear_replies();
         assert!(
             host.inner.slots[0].lines_cache.lock().unwrap().is_empty(),
             "a session switch clears the reply cache"
         );
+        host.stop();
+    }
+
+    /// Status, frame, and row replies change their own UI regions but
+    /// not the transcript data. They must not bump the transcript
+    /// version that the cache key folds in. Per-event lines do
+    /// (docs/tui-perf-background-build-audit.md).
+    #[test]
+    fn status_frame_and_row_replies_do_not_bump_the_transcript_version() {
+        let tmp = TempDir::new().unwrap();
+        let manifest = "[ext]\ncommand = \"bash\"\nargs = [\"x.sh\"]\nprotocol_v = 1\n";
+        let host = host_with(&tmp, "x", manifest, "sleep 30");
+        host.start();
+
+        let tv0 = host.transcript_replies_version();
+        let rv0 = host.replies_version();
+
+        // A statusline content change bumps the generic version only.
+        host.reply_line(0, r#"{"v":1,"op":"status","lines":[["idle",{}]]}"#);
+        assert!(
+            host.replies_version() > rv0,
+            "a status reply bumps the generic version"
+        );
+        assert_eq!(
+            host.transcript_replies_version(),
+            tv0,
+            "a statusline change must not force a transcript rebuild"
+        );
+
+        // Frame and row replies are outside the transcript key space too.
+        host.reply_line(0, r#"{"v":1,"op":"frame_spec","spec":{}}"#);
+        host.reply_line(0, r#"{"v":1,"op":"row_spec","lines":[["working",{}]]}"#);
+        assert_eq!(
+            host.transcript_replies_version(),
+            tv0,
+            "frame and row replies must not force a transcript rebuild"
+        );
+
+        // Per-event lines feed the transcript build, so they bump it.
+        host.reply_line(0, r#"{"v":1,"op":"lines","event_id":1,"lines":[["a",{}]]}"#);
+        assert!(
+            host.transcript_replies_version() > tv0,
+            "a lines reply must bump the transcript version"
+        );
+
         host.stop();
     }
 
@@ -4304,10 +4432,7 @@ done
         );
         // Every line is `pid ms msg`: three space-separated fields.
         let l = body.lines().next().unwrap();
-        assert!(
-            l.split(' ').count() >= 3,
-            "the line is pid ms msg: {l:?}"
-        );
+        assert!(l.split(' ').count() >= 3, "the line is pid ms msg: {l:?}");
 
         std::env::remove_var("TUI_EXT_LOG");
     }

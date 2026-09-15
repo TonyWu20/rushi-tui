@@ -26,7 +26,8 @@ pub const SCROLLOFF: usize = 3;
 pub const COUNT_CAP: u32 = 99_999;
 /// The one-line status hint of the key table (section 4.4, the
 /// section 11.4 growth: the select-and-yank rows).
-pub const BROWSE_HINT: &str = "browse: v select, y yank, yy lines, yw word, b back, ss leave";
+pub const BROWSE_HINT: &str =
+    "browse: v select, y yank, yy lines, yw word, ye end, b back, ss leave";
 
 /// One search direction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -67,6 +68,20 @@ struct VisualSel {
     /// A `V` entry (linewise visual): the span shades whole display
     /// rows and yanks whole lines.
     linewise: bool,
+}
+
+/// The visual selection as seen by the renderer (section 11.4):
+/// `(anchor, active, linewise)` in transcript coordinates. The anchor
+/// pins at entry or a swap; the active end is the live cursor;
+/// `linewise` shades whole display rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VisualSelection {
+    /// The selection start point, `(line, col)`.
+    pub anchor: (usize, usize),
+    /// The live selection end, `(line, col)`. The cursor.
+    pub active: (usize, usize),
+    /// A `V` entry: whole display rows are the span.
+    pub linewise: bool,
 }
 
 /// The outcome of one command-line key.
@@ -118,7 +133,6 @@ impl Default for Search {
 /// `line` is a zero-based transcript line index, `col` a zero-based
 /// character position within that line. Every move clamps `col` to
 /// the line length (section 4.1).
-
 pub struct Browse {
     active: bool,
     /// Entry is pending a render pass: the cursor lands on the first
@@ -236,10 +250,12 @@ impl Browse {
     /// input): `(anchor, active_end, linewise)`, transcript
     /// coordinates. The active end is the cursor; `None` outside
     /// visual / linewise visual.
-    pub fn visual_selection(&self) -> Option<((usize, usize), (usize, usize), bool)> {
-        self.visual
-            .as_ref()
-            .map(|s| (s.anchor, (self.line, self.col), s.linewise))
+    pub fn visual_selection(&self) -> Option<VisualSelection> {
+        self.visual.as_ref().map(|s| VisualSelection {
+            anchor: s.anchor,
+            active: (self.line, self.col),
+            linewise: s.linewise,
+        })
     }
 
     /// The `[tui] clipboard = "unnamed"` flag (section 11.3): set at
@@ -377,17 +393,14 @@ impl Browse {
         self.last_h = 0;
     }
 
-    /// The renderer's layout sync (sections 4.6 and 4.7): when the
-    /// total or the height changes under a held cursor, the cursor
-    /// clamps to the new total and the view re-centers on it with
-    /// the scrolloff margins. A pending entry resolves here instead.
-    /// A pure tail growth (a rendered event landed, `grew = true`)
-    /// keeps the view put: no auto-follow (section 4.6). A growth
-    /// without a new event is a pane rewrap and re-centers
-    /// (section 4.7).
+    /// Renderer layout sync (sections 4.6, 4.7). A model-driven tail
+    /// change, growth or a settle shrink, pins the view so the
+    /// cursorline stays fixed. A rewrap, a resize, or a clamped
+    /// cursor re-centers on the cursor.
     pub fn sync(&mut self, total: usize, h: usize, scroll: &mut usize, grew: bool) {
-        let changed = total != self.last_total || h != self.last_h;
-        let pure_growth = total > self.last_total && grew && h == self.last_h;
+        let last = self.last_total;
+        let last_h = self.last_h;
+        let changed = total != last || h != last_h;
         self.last_total = total;
         self.last_h = h;
         if total == 0 {
@@ -397,24 +410,27 @@ impl Browse {
             self.pending_entry = false;
             return;
         }
-        // The cursor pins to its line number (section 4.6): a cap
-        // drop shifts the lines, the number keeps pointing, the
-        // fold / thinking toggle clamps to the new total.
         let clamped = self.line >= total;
         self.line = self.line.min(total - 1);
         if self.pending_entry {
-            // Entry: the cursor is the first visible line, col 0,
-            // and the view does not move (section 4.2).
             let start = total.saturating_sub(*scroll + h);
             *scroll = (*scroll).min(total.saturating_sub(h));
             self.line = start.min(total - 1);
             self.col = 0;
             self.pending_entry = false;
-        } else if changed && (!pure_growth || clamped) {
-            // A shrink, a height change, a rewrap growth, or a
-            // clamped cursor re-centers with the scrolloff margins
-            // (section 4.7).
-            *scroll = follow_view(total, h, self.line, *scroll);
+        } else if changed {
+            // A model-driven tail change at an unchanged pane height
+            // (a settled event grows the tail, or a settled stream
+            // tail shrinks it) pins the view so the cursorline stays
+            // fixed. A rewrap, a resize, or a clamped cursor re-centers
+            // with the scrolloff margins (section 4.7).
+            if !clamped && h == last_h && grew {
+                let delta = total as isize - last as isize;
+                let hi = total.saturating_sub(h) as isize;
+                *scroll = ((*scroll as isize) + delta).clamp(0, hi) as usize;
+            } else {
+                *scroll = follow_view(total, h, self.line, *scroll);
+            }
         }
     }
 
@@ -423,6 +439,37 @@ impl Browse {
     /// (the blank block cell at line end).
     pub fn clamp_col(&mut self, line_len: usize) {
         self.col = self.col.min(line_len);
+    }
+
+    pub fn goto(&mut self, total: usize, h: usize, line: usize, scroll: &mut usize) {
+        if total == 0 {
+            self.line = 0;
+            self.col = 0;
+            *scroll = 0;
+            return;
+        }
+        self.line = line.min(total - 1);
+        self.col = 0;
+        *scroll = follow_view(total, h, self.line, *scroll);
+    }
+
+    pub fn goto_line(
+        &mut self,
+        total: usize,
+        h: usize,
+        line: usize,
+        col: usize,
+        scroll: &mut usize,
+    ) {
+        if total == 0 {
+            self.line = 0;
+            self.col = 0;
+            *scroll = 0;
+            return;
+        }
+        self.line = line.min(total - 1);
+        self.col = col;
+        *scroll = follow_view(total, h, self.line, *scroll);
     }
 
     // ── the key table (sections 4.4 and 7.3) ─────────────────────
@@ -507,7 +554,11 @@ impl Browse {
                 // Any other key closes the line and acts.
                 _ => TypeKeyOutcome::Pass,
             },
-            Typing::Search { dir, mut input, origin } => match key {
+            Typing::Search {
+                dir,
+                mut input,
+                origin,
+            } => match key {
                 Key::Char(c) => {
                     input.push(c);
                     self.search.forward = dir == Dir::Forward;
@@ -520,12 +571,9 @@ impl Browse {
                             self.search.re_version += 1;
                             self.search.pattern = Some(input.clone());
                             self.search.active = true;
-                            if let Some(m) = next_match(
-                                v.texts,
-                                self.search.re.as_ref().unwrap(),
-                                origin,
-                                dir,
-                            ) {
+                            if let Some(m) =
+                                next_match(v.texts, self.search.re.as_ref().unwrap(), origin, dir)
+                            {
                                 self.search.active_match = Some(m);
                                 self.line = m.0;
                                 self.col = m.1;
@@ -570,7 +618,9 @@ impl Browse {
                             line: self.line,
                             col: self.col,
                         });
-                        if let Some(m) = next_match(v.texts, self.search.re.as_ref().unwrap(), origin, dir) {
+                        if let Some(m) =
+                            next_match(v.texts, self.search.re.as_ref().unwrap(), origin, dir)
+                        {
                             self.search.active_match = Some(m);
                             self.line = m.0;
                             self.col = m.1;
@@ -882,13 +932,21 @@ impl Browse {
                 // digit only once a count has started; a bare `0`
                 // is the line-start motion below.
                 d @ '0'..='9' if d != '0' || self.has_count => {
-                    self.pending =
-                        (self.pending * 10 + (d as u32 - '0' as u32)).min(COUNT_CAP);
+                    self.pending = (self.pending * 10 + (d as u32 - '0' as u32)).min(COUNT_CAP);
                     self.has_count = true;
                     return None;
                 }
-                m @ 'j' | m @ 'k' | m @ 'h' | m @ 'l' | m @ 'w' | m @ 'b'
-                | m @ '0' | m @ '^' | m @ '$' | m @ 'G' => {
+                m @ 'j'
+                | m @ 'k'
+                | m @ 'h'
+                | m @ 'l'
+                | m @ 'w'
+                | m @ 'e'
+                | m @ 'b'
+                | m @ '0'
+                | m @ '^'
+                | m @ '$'
+                | m @ 'G' => {
                     self.yank_motion(m, v, registers);
                     return None;
                 }
@@ -951,13 +1009,20 @@ impl Browse {
                 None
             }
             'w' => {
-                // The word motion (section 11.4): it extends the
-                // visual selection and the `y` operator; a bare `w`
-                // moves the cursor to the next word start.
+                // The word motion (section 11.4). It extends the
+                // visual selection and the `y` operator. A bare
+                // `w` moves to the next word start. The browse
+                // word class folds the hyphen in, so a hyphenated
+                // word is one word.
                 let n = self.motion_count() as usize;
                 if n > 0 && !v.texts.is_empty() {
                     let cursor = (self.line.min(v.total - 1), self.col);
-                    let res = crate::vim_editor::word_forward(v.texts, cursor, n.max(1) as u32);
+                    let res = crate::vim_editor::word_forward(
+                        v.texts,
+                        cursor,
+                        n.max(1) as u32,
+                        crate::vim_editor::WordClass::Browse,
+                    );
                     self.line = res.pos.0;
                     self.col = res.pos.1;
                     self.clamp_to_line(v);
@@ -970,14 +1035,43 @@ impl Browse {
                 None
             }
             'b' => {
-                // The word-backward motion (the mirror of `w`): it
-                // extends the visual selection and the `y` operator;
-                // a bare `b` moves the cursor to the previous word
-                // start.
+                // The word-backward motion, the mirror of `w`. It
+                // extends the visual selection and the `y` operator.
+                // A bare `b` moves to the previous word start, with
+                // the browse word class.
                 let n = self.motion_count() as usize;
                 if n > 0 && !v.texts.is_empty() {
                     let cursor = (self.line.min(v.total - 1), self.col);
-                    let res = crate::vim_editor::word_backward(v.texts, cursor, n.max(1) as u32);
+                    let res = crate::vim_editor::word_backward(
+                        v.texts,
+                        cursor,
+                        n.max(1) as u32,
+                        crate::vim_editor::WordClass::Browse,
+                    );
+                    self.line = res.pos.0;
+                    self.col = res.pos.1;
+                    self.clamp_to_line(v);
+                    // Linewise visual parks at col 0 of the new line.
+                    if matches!(self.visual, Some(VisualSel { linewise: true, .. })) {
+                        self.col = 0;
+                    }
+                }
+                None
+            }
+            'e' => {
+                // The word-end motion (the vim `e`). The cursor
+                // lands on the last character of the word, or the
+                // next word when it already sits on the last
+                // character. The browse word class applies.
+                let n = self.motion_count() as usize;
+                if n > 0 && !v.texts.is_empty() {
+                    let cursor = (self.line.min(v.total - 1), self.col);
+                    let res = crate::vim_editor::word_end(
+                        v.texts,
+                        cursor,
+                        n.max(1) as u32,
+                        crate::vim_editor::WordClass::Browse,
+                    );
                     self.line = res.pos.0;
                     self.col = res.pos.1;
                     self.clamp_to_line(v);
@@ -996,8 +1090,11 @@ impl Browse {
                     if c == '0' {
                         self.col = 0;
                     } else {
-                        let res =
-                            crate::vim_editor::first_nonblank_motion(v.texts, (self.line, self.col), 1);
+                        let res = crate::vim_editor::first_nonblank_motion(
+                            v.texts,
+                            (self.line, self.col),
+                            1,
+                        );
                         let len = v.texts.get(self.line).map(|t| line_len(t)).unwrap_or(0);
                         self.col = res.pos.1.min(len);
                     }
@@ -1022,12 +1119,8 @@ impl Browse {
                         self.clamp_to_line(v);
                         // Seed the view at the top; the scrolloff
                         // margins apply (section 4.5).
-                        *v.scroll = follow_view(
-                            v.total,
-                            v.h,
-                            self.line,
-                            v.total.saturating_sub(v.h),
-                        );
+                        *v.scroll =
+                            follow_view(v.total, v.h, self.line, v.total.saturating_sub(v.h));
                     }
                 } else {
                     self.pending_g = true;
@@ -1060,7 +1153,9 @@ impl Browse {
                 self.pending = 0;
                 self.has_count = false;
                 self.pending_g = false;
-                self.typing = Some(Typing::Goto { digits: String::new() });
+                self.typing = Some(Typing::Goto {
+                    digits: String::new(),
+                });
                 None
             }
             '/' => {
@@ -1125,10 +1220,7 @@ impl Browse {
                 // The anchor/active-end swap: the selection inverts
                 // around the cursor (the vim `o` / `O`).
                 if let Some(sel) = self.visual.as_mut() {
-                    let (l, c) = std::mem::replace(
-                        &mut sel.anchor,
-                        (self.line, self.col),
-                    );
+                    let (l, c) = std::mem::replace(&mut sel.anchor, (self.line, self.col));
                     self.line = l;
                     self.col = c;
                     if sel.linewise {
@@ -1191,7 +1283,10 @@ impl Browse {
         } else {
             *v.scroll = v.scroll.saturating_sub(dist);
         }
-        let start = v.total.saturating_sub(*v.scroll + v.h).min(v.total.saturating_sub(v.h));
+        let start = v
+            .total
+            .saturating_sub(*v.scroll + v.h)
+            .min(v.total.saturating_sub(v.h));
         let bottom = start.saturating_add(v.h - 1).min(v.total - 1);
         if up {
             // The top edge moved up: a cursor at the old top band,
@@ -1407,19 +1502,29 @@ pub(crate) fn browse_motion_range(
         // `G` without an explicit count goes to the last line; with
         // one, to line n (the editor's `G` rule).
         'G' => {
-            let n = if count_explicit { count.max(1) } else { texts.len() as u32 };
+            let n = if count_explicit {
+                count.max(1)
+            } else {
+                texts.len() as u32
+            };
             let res = ve::go_to_last_line(texts, cursor, n);
             ve::motion_to_range(cursor, &res)
         }
         'w' => {
-            let res = ve::word_forward(texts, cursor, count.max(1));
+            let res = ve::word_forward(texts, cursor, count.max(1), ve::WordClass::Browse);
             // The operator `w` rule: the `extend_w_eol` extension
             // (the final word reaches the line end).
             let res = ve::extend_w_eol(texts, cursor, res);
             ve::motion_to_range(cursor, &res)
         }
         'b' => {
-            let res = ve::word_backward(texts, cursor, count.max(1));
+            let res = ve::word_backward(texts, cursor, count.max(1), ve::WordClass::Browse);
+            ve::motion_to_range(cursor, &res)
+        }
+        'e' => {
+            // The operator `e` rule: the inclusive word end in the
+            // browse word class (the hyphen joins the word).
+            let res = ve::word_end(texts, cursor, count.max(1), ve::WordClass::Browse);
             ve::motion_to_range(cursor, &res)
         }
         '$' => {
@@ -1532,7 +1637,12 @@ pub struct BarGeom {
     pub cursor_cell: Option<usize>,
 }
 
-pub fn bar_geometry(total: usize, h: usize, scroll: usize, cursor: Option<usize>) -> Option<BarGeom> {
+pub fn bar_geometry(
+    total: usize,
+    h: usize,
+    scroll: usize,
+    cursor: Option<usize>,
+) -> Option<BarGeom> {
     if total == 0 || h == 0 {
         return None;
     }
@@ -1634,11 +1744,7 @@ fn next_match(
 /// takes the next word forward, or the previous word backward.
 /// Returns `(word, start, end, in_word)`, the end exclusive, and
 /// `in_word` says the cursor character is a word character.
-fn word_under_cursor(
-    text: &str,
-    col: usize,
-    dir: Dir,
-) -> Option<(String, usize, usize, bool)> {
+fn word_under_cursor(text: &str, col: usize, dir: Dir) -> Option<(String, usize, usize, bool)> {
     let chars: Vec<char> = text.chars().collect();
     let col = col.min(chars.len());
     let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_';
@@ -1683,5 +1789,231 @@ fn word_under_cursor(
             }
             Some((chars[i..e].iter().collect(), i, e, false))
         }
+    }
+}
+
+#[cfg(test)]
+mod stream_pin_tests {
+    use super::*;
+
+    /// A parked browse cursor: `Browse::new` plus cursor line and the
+    /// layout the previous draw reported.
+    fn parked(line: usize, total: usize, h: usize, scroll: usize) -> (Browse, usize) {
+        let mut b = Browse::new();
+        b.active = true;
+        b.pending_entry = false;
+        b.line = line;
+        b.col = 0;
+        b.last_total = total;
+        b.last_h = h;
+        (b, scroll)
+    }
+
+    /// The window top row for a total, scroll, and height.
+    fn top(total: usize, scroll: usize, h: usize) -> usize {
+        total.saturating_sub(scroll + h)
+    }
+
+    #[test]
+    fn stream_growth_pins_the_view() {
+        // The cursor sits on a settled history line. The live tail
+        // grows ten lines over ten frames. The window top stays put
+        // and the cursor keeps its line (section 4.6).
+        let (mut b, mut scroll) = parked(50, 100, 20, 33);
+        for total in 101..=110 {
+            b.sync(total, 20, &mut scroll, true);
+        }
+        assert_eq!(b.line, 50, "the cursor keeps its line");
+        assert_eq!(top(110, scroll, 20), 47, "the window top is pinned");
+    }
+
+    #[test]
+    fn settle_shrink_pins_the_view() {
+        // The live tail settled into a shorter event. The total
+        // shrank, but the window top and the cursor stay put.
+        let (mut b, mut scroll) = parked(50, 110, 20, 43);
+        b.sync(108, 20, &mut scroll, true);
+        assert_eq!(b.line, 50, "the cursor keeps its line");
+        assert_eq!(top(108, scroll, 20), 47, "the window top is pinned");
+    }
+
+    #[test]
+    fn stream_shrink_pins_the_view() {
+        // While the model is still active, the live tail shrank:
+        // the thinking block slid its window or the markdown body
+        // reflowed to fewer lines. No settled event landed, but the
+        // stream-tail change still pins the view so the cursorline
+        // holds (section 4.6, the cc08fa6 regression fix).
+        let (mut b, mut scroll) = parked(50, 100, 20, 33);
+        b.sync(90, 20, &mut scroll, true);
+        assert_eq!(b.line, 50, "the cursor keeps its line");
+        assert_eq!(top(90, scroll, 20), 47, "the window top is pinned");
+    }
+
+    #[test]
+    fn rewrap_shrink_recenters_on_cursor() {
+        // A pane rewrap shrinks the total with no model activity.
+        // The view re-centers on the cursor with the scrolloff
+        // margins (section 4.7), so the scroll offset does not
+        // stay pinned like a model-driven change would.
+        let (mut b, mut scroll) = parked(50, 100, 20, 33);
+        b.sync(90, 20, &mut scroll, false);
+        assert_eq!(b.line, 50, "the cursor keeps its line");
+        assert_eq!(scroll, 33, "the recenter leaves this scroll put");
+        assert_eq!(top(90, scroll, 20), 37, "the view slid up ten lines");
+    }
+
+    #[test]
+    fn tail_watch_growth_and_settle_keep_the_view() {
+        // The cursor rides the live tail. Growth pins the window
+        // top. The settle shrink keeps it put. The cursor screen
+        // row never moves during the whole stream.
+        let (mut b, mut scroll) = parked(99, 100, 20, 0);
+        for total in 101..=110 {
+            b.sync(total, 20, &mut scroll, true);
+        }
+        assert_eq!(b.line, 99, "the cursor keeps its line");
+        assert_eq!(top(110, scroll, 20), 80, "the window top is pinned");
+        let row_mid = b.line - top(110, scroll, 20);
+        b.sync(108, 20, &mut scroll, true);
+        assert_eq!(b.line, 99, "the cursor keeps its line");
+        assert_eq!(top(108, scroll, 20), 80, "the settle keeps the view put");
+        let row_end = b.line - top(108, scroll, 20);
+        assert_eq!(row_mid, row_end, "the cursor screen row never moves");
+    }
+
+    #[test]
+    fn clamped_cursor_recenters_on_settle() {
+        // The cursor parks on the live tail line. The settle shrinks
+        // the total past it, so the cursor clamps and the view
+        // re-centers on the clamped cursor.
+        let (mut b, mut scroll) = parked(109, 110, 20, 10);
+        b.sync(100, 20, &mut scroll, true);
+        assert_eq!(b.line, 99, "the cursor clamps to the last line");
+        assert_eq!(scroll, 0, "the view pins to the tail edge");
+    }
+
+    #[test]
+    fn streaming_lifecycle_holds_the_cursorline() {
+        // The full lifecycle the user reported. The cursor parks on
+        // a settled line. The live stream grows, then slides its
+        // thinking window (a mid-stream shrink, no settled event),
+        // then settles into a shorter event. Each frame the draw
+        // loop computes the flag exactly like
+        // `render.rs`: grew = a settled event landed OR the stream
+        // length changed, in either direction. The cursor screen row
+        // must never move through the whole stream.
+        let (mut b, mut scroll) = parked(50, 100, 20, 33);
+        let mut last_stream = 0usize;
+        let row0 = b.line - top(100, scroll, 20);
+        // Growth frames: the live tail extends the total.
+        for s in [10usize, 20, 30, 40] {
+            // The draw-loop predicate: a change in either direction
+            // of the stream length counts as a model-driven change.
+            let grew = last_stream != s;
+            last_stream = s;
+            b.sync(100 + s, 20, &mut scroll, grew);
+        }
+        assert_eq!(b.line - top(140, scroll, 20), row0, "growth holds the row");
+        // Mid-stream shrink: the stream block reflows to fewer lines
+        // with no settled event. The stream-length change alone must
+        // pin the view, not re-center on the cursor.
+        let grew = last_stream != 20;
+        b.sync(120, 20, &mut scroll, grew);
+        assert_eq!(
+            b.line - top(120, scroll, 20),
+            row0,
+            "the mid-stream shrink holds the row"
+        );
+        // The settle: a settled event lands, the stream clears.
+        b.sync(104, 20, &mut scroll, true);
+        assert_eq!(
+            b.line - top(104, scroll, 20),
+            row0,
+            "the settle holds the row"
+        );
+    }
+}
+
+#[cfg(test)]
+mod word_motion_tests {
+    use super::*;
+
+    /// Drive a sequence of char keys through the browse state machine
+    /// and return the final cursor position.
+    fn drive(texts: &[String], line: usize, col: usize, keys: &[char]) -> (usize, usize) {
+        let mut b = Browse::new();
+        b.active = true;
+        b.line = line;
+        b.col = col;
+        let mut scroll = 0usize;
+        let mut view = View {
+            total: texts.len(),
+            h: 24,
+            scroll: &mut scroll,
+            half: 10,
+            texts,
+            line_raw: &[],
+        };
+        let mut regs: std::collections::HashMap<char, crate::vim_editor::RegContent> =
+            std::collections::HashMap::new();
+        for k in keys {
+            let _ = b.key(Key::Char(*k), &mut view, &mut regs);
+        }
+        (b.line, b.col)
+    }
+
+    fn hyphen() -> Vec<String> {
+        vec!["foo-bar baz".to_string()]
+    }
+
+    #[test]
+    fn w_lands_on_the_next_word_start_not_the_hyphen() {
+        // The bug: `w` painted on the hyphen of a hyphenated word.
+        // Now it skips the whole `foo-bar` run to the start of `baz`.
+        assert_eq!(drive(&hyphen(), 0, 0, &['w']), (0, 8));
+        assert_eq!(drive(&hyphen(), 0, 1, &['w']), (0, 8));
+        // From the hyphen itself, the landing is the word start too.
+        assert_eq!(drive(&hyphen(), 0, 3, &['w']), (0, 8));
+    }
+
+    #[test]
+    fn b_lands_on_the_hyphenated_word_start() {
+        // From `baz`, `b` lands at the start of `foo-bar`, not on
+        // the hyphen or the start of `bar`.
+        assert_eq!(drive(&hyphen(), 0, 8, &['b']), (0, 0));
+    }
+
+    #[test]
+    fn e_lands_on_the_word_end() {
+        // `e` is now registered in browse mode. From the start of
+        // `foo-bar` it lands on the last char of the whole run.
+        assert_eq!(drive(&hyphen(), 0, 0, &['e']), (0, 6));
+        // From that char it crosses into the next word `baz`.
+        assert_eq!(drive(&hyphen(), 0, 6, &['e']), (0, 10));
+        // On the last word end it stays put.
+        assert_eq!(drive(&hyphen(), 0, 10, &['e']), (0, 10));
+    }
+
+    #[test]
+    fn counted_e_motions_step_word_by_word() {
+        // Positions: a0 -1 b2 sp3 c4 -5 d6 sp7 e8 -9 f10
+        let texts = vec!["a-b c-d e-f".to_string()];
+        assert_eq!(drive(&texts, 0, 0, &['e']), (0, 2));
+        // `2e` steps two word ends forward.
+        assert_eq!(drive(&texts, 0, 0, &['2', 'e']), (0, 6));
+    }
+
+    #[test]
+    fn ye_yanks_the_whole_hyphenated_word() {
+        let texts = hyphen();
+        let range = browse_motion_range(&texts, (0, 0), 'e', 1, false).unwrap();
+        let got = crate::vim_editor::extract_text(&texts, &range);
+        assert_eq!(got, "foo-bar");
+        assert!(!range.linewise);
+        // From `baz`, `ye` yanks that word alone.
+        let range = browse_motion_range(&texts, (0, 8), 'e', 1, false).unwrap();
+        let got = crate::vim_editor::extract_text(&texts, &range);
+        assert_eq!(got, "baz");
     }
 }

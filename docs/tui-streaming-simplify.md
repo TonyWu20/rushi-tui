@@ -1,8 +1,7 @@
 # TUI live stream into the main content area
 
-Status: Open. A simplification of the pinned live-stream block
-(`docs/tui-streaming-response.md`). Raised 2026-09-14.
-Not work for that session.
+Status: Implemented (2026-09-14). A simplification of the pinned
+live-stream block (`docs/tui-streaming-response.md`).
 
 ## 1. What to change
 

@@ -44,11 +44,9 @@ fn option_list(
     option_cursor: usize,
     palette: &crate::color::Palette,
 ) -> Vec<Vec<Seg>> {
-    let plain =
-        palette.style(crate::color::Role::PlainText, Modifier::empty());
+    let plain = palette.style(crate::color::Role::PlainText, Modifier::empty());
     let dim = palette.style(crate::color::Role::Hint, Modifier::DIM);
-    let accent =
-        palette.style(crate::color::Role::Accent, Modifier::BOLD);
+    let accent = palette.style(crate::color::Role::Accent, Modifier::BOLD);
 
     let mut out: Vec<Vec<Seg>> = Vec::new();
     for (i, opt) in item.options.iter().enumerate() {
@@ -82,12 +80,8 @@ fn option_list(
 
 /// Lines for help-text items. One `Seg` per line; blank line for an
 /// empty help.
-fn help_lines(
-    item: &PaletteItem,
-    palette: &crate::color::Palette,
-) -> Vec<Vec<Seg>> {
-    let plain =
-        palette.style(crate::color::Role::PlainText, Modifier::empty());
+fn help_lines(item: &PaletteItem, palette: &crate::color::Palette) -> Vec<Vec<Seg>> {
+    let plain = palette.style(crate::color::Role::PlainText, Modifier::empty());
     let help = if item.help.is_empty() {
         String::new()
     } else {
@@ -102,4 +96,3 @@ fn help_lines(
     }
     out
 }
-

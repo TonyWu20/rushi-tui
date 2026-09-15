@@ -62,17 +62,14 @@ const NOTIFY_DEBOUNCE: Duration = Duration::from_millis(50);
 /// it exits when it next tries to send after the receiver is dropped,
 /// or when the process ends.
 const TAIL_CAPACITY: usize = 256;
-/// Newest log bytes a single `read_events` load may allocate.
-const MAX_LOG_READ_BYTES: u64 = 50 * 1024 * 1024;
 /// Per-poll read cap; keeps tailing latency bounded without big reads.
 const TAIL_CHUNK_BYTES: u64 = 64 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct FileSessionPort {
     sessions_root: PathBuf,
-    schemas_dir: Option<PathBuf>,
     loop_cmd: Option<LoopCommand>,
-    config_dir: PathBuf,
+    working_dir: PathBuf,
     config_path: PathBuf,
 }
 
@@ -80,9 +77,13 @@ impl FileSessionPort {
     pub fn new(cfg: &TuiConfig) -> Self {
         FileSessionPort {
             sessions_root: cfg.sessions_root.clone(),
-            schemas_dir: cfg.schemas_dir.clone(),
             loop_cmd: cfg.loop_cmd.clone(),
-            config_dir: cfg.config_dir.clone(),
+            // The loop runs where the user launched the TUI, not where
+            // the config file lives. Under Nix the config dir is the
+            // read-only store path; the loop's cwd (and so its
+            // relative session paths and tool working directories)
+            // must stay in the user's project.
+            working_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             config_path: cfg.config_path.clone(),
         }
     }
@@ -175,8 +176,7 @@ fn tail_session(path: PathBuf, start: TailCursor, tx: SyncSender<WatchItem>) {
     // directory-level events fire faster than the tailer can act.
     // `None` means the backend was unavailable: poll on the fixed
     // interval instead.
-    let (notify_tx, notify_rx) =
-        std::sync::mpsc::channel::<DebounceEventResult>();
+    let (notify_tx, notify_rx) = std::sync::mpsc::channel::<DebounceEventResult>();
     let mut debouncer: Option<notify_debouncer_mini::Debouncer<_>> =
         new_debouncer(NOTIFY_DEBOUNCE, notify_tx).ok();
     if let Some(d) = debouncer.as_mut() {
@@ -315,7 +315,7 @@ fn read_tail(
     // this poll. A partial tail (no newline yet) cannot make progress
     // until new bytes arrive, so skip the clone-and-retry work that
     // would spin on an idle file.
-    if want == 0 && !carry.iter().any(|b| *b == b'\n') {
+    if want == 0 && !carry.contains(&b'\n') {
         return Ok(());
     }
 
@@ -455,18 +455,10 @@ impl SessionPort for FileSessionPort {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
                 Err(e) => return Err(BusError::from(e)),
             };
-            let start = if data.len() as u64 > MAX_LOG_READ_BYTES {
-                let cut = data.len() - MAX_LOG_READ_BYTES as usize;
-                // Drop the (possibly partial) first line after the cut.
-                data[cut..]
-                    .iter()
-                    .position(|b| *b == b'\n')
-                    .map(|i| cut + i + 1)
-                    .unwrap_or(data.len())
-            } else {
-                0
-            };
-            let chunk = &data[start..];
+            // No byte cap: the whole log is replayed so the session
+            // beginning stays reachable (docs/tui-conversation-
+            // browsing.md section 4.6, no replay cap).
+            let chunk = &data[..];
             // A read that races an in-flight append leaves the last line
             // without its trailing newline. That tail segment is still
             // being written, not a persisted malformed line. Drop it; the
@@ -492,6 +484,26 @@ impl SessionPort for FileSessionPort {
         })?
     }
 
+    async fn log_line_count(&self, session: &SessionId) -> Result<u64, BusError> {
+        let path = self.log_path(session)?;
+        let inner = tokio::task::spawn_blocking(move || -> Result<u64, BusError> {
+            let data = match std::fs::read(&path) {
+                Ok(d) => d,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+                Err(e) => return Err(BusError::from(e)),
+            };
+            // A complete line ends in a newline. An in-progress tail
+            // (no trailing newline) is not yet a written event, so it
+            // does not count.
+            Ok(data.iter().filter(|b| **b == b'\n').count() as u64)
+        })
+        .await
+        .map_err(|e| BusError::Io {
+            what: e.to_string(),
+        })?;
+        inner
+    }
+
     async fn append_event(&self, session: &SessionId, event: &Event) -> Result<(), BusError> {
         let obj = event
             .obj()
@@ -509,20 +521,13 @@ impl SessionPort for FileSessionPort {
             reason: e.to_string(),
         })?;
 
-        // G3: producers validate before append, when the schema file exists.
-        if let Some(dir) = &self.schemas_dir {
-            let dir_str = dir.to_str().ok_or_else(|| BusError::Io {
-                what: format!("schemas dir is not valid UTF-8: {}", dir.display()),
+        // G3: validate known event types via the typed Event enum.
+        // Additive types (P1b) are not in the kernel's closed set and
+        // flow through without validation.
+        if rushi_common::event::EVENT_TYPES.contains(&ty) {
+            rushi_common::event::parse_event(&json_line).map_err(|e| BusError::InvalidEvent {
+                reason: format!("typed event validation failed: {e}"),
             })?;
-            let schemas = rushi_common::event_validation::load_schemas(dir_str);
-            // Skip validation when the event type has no schema in the set
-            // (P1b: additive types need no schema to flow through the TUI).
-            if schemas.iter().any(|(t, _)| t == ty) {
-                rushi_common::event_validation::validate_value(&obj, &schemas)
-                    .map_err(|e| BusError::InvalidEvent {
-                        reason: format!("does not match schema: {e}"),
-                    })?;
-            }
         }
 
         let session_dir = self.session_dir(session)?;
@@ -593,7 +598,10 @@ impl SessionPort for FileSessionPort {
         let program = argv[0].clone();
         let mut cmd = tokio::process::Command::new(&program);
         cmd.args(&argv[1..]);
-        cmd.current_dir(&self.config_dir);
+        // The loop inherits the user's working directory (see the
+        // working_dir field). The CONFIG env var still points the loop
+        // at the packaged config file.
+        cmd.current_dir(&self.working_dir);
         cmd.env("CONFIG", &self.config_path);
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
@@ -862,7 +870,6 @@ fn pid_is_loop(pid: i32, session: &str) -> bool {
         .any(|arg| arg == session.as_bytes())
 }
 
-
 impl TailCursor {
     /// Private constructor used by the port; the TUI only ever uses
     /// `start()` / `end()` / cursors returned by the port itself.
@@ -889,26 +896,13 @@ mod tests {
         port: FileSessionPort,
     }
 
-    fn make_cfg(schemas: bool, loop_cmd: Option<(&str, Vec<&str>)>) -> Cfg {
+    fn make_cfg(loop_cmd: Option<(&str, Vec<&str>)>) -> Cfg {
         let dir = TempDir::new().unwrap();
         let root = dir.path().to_path_buf();
-        if schemas {
-            let sdir = root.join("schemas").join("events").join("v1");
-            std::fs::create_dir_all(&sdir).unwrap();
-            std::fs::write(
-                sdir.join("user_message.json"),
-                r#"{"type":"object","required":["v","type","ts","content"],"properties":{"v":{"type":"integer","const":1},"type":{"type":"string","const":"user_message"},"ts":{"type":"string"},"content":{"type":"string"}}}"#,
-            )
-            .unwrap();
-        }
         let cfg = TuiConfig {
             clipboard_unnamed: false,
             sessions_root: root.join("sessions"),
-            schemas_dir: if schemas {
-                Some(root.join("schemas").join("events").join("v1"))
-            } else {
-                None
-            },
+
             loop_cmd: loop_cmd.map(|(c, a)| LoopCommand {
                 command: c.to_string(),
                 args: a.into_iter().map(|s| s.to_string()).collect(),
@@ -982,7 +976,7 @@ mod tests {
 
     #[test]
     fn list_sessions_finds_only_dirs_with_logs() {
-        let c = make_cfg(false, None);
+        let c = make_cfg(None);
         let rt = runtime();
         std::fs::create_dir_all(c.dir.path().join("sessions").join("s1")).unwrap();
         std::fs::write(log_path(&c, "s1"), "{}\n").unwrap();
@@ -998,7 +992,7 @@ mod tests {
 
     #[test]
     fn list_sessions_missing_root_is_empty() {
-        let c = make_cfg(false, None);
+        let c = make_cfg(None);
         let rt = runtime();
         let ids = block_on(&rt, c.port.list_sessions()).unwrap();
         assert!(ids.is_empty());
@@ -1006,7 +1000,7 @@ mod tests {
 
     #[test]
     fn read_events_parses_lines_and_keeps_bad_lines() {
-        let c = make_cfg(false, None);
+        let c = make_cfg(None);
         let rt = runtime();
         std::fs::create_dir_all(c.dir.path().join("sessions").join("s1")).unwrap();
         std::fs::write(
@@ -1023,7 +1017,7 @@ mod tests {
 
     #[test]
     fn read_events_drops_in_progress_tail_without_newline() {
-        let c = make_cfg(false, None);
+        let c = make_cfg(None);
         let rt = runtime();
         std::fs::create_dir_all(c.dir.path().join("sessions").join("s1")).unwrap();
         // Two complete lines, then a third still being written. The
@@ -1045,13 +1039,13 @@ mod tests {
 
     #[test]
     fn read_loop_pid_missing_is_none() {
-        let c = make_cfg(false, None);
+        let c = make_cfg(None);
         assert_eq!(c.port.read_loop_pid(&SessionId::new("s1")).unwrap(), None);
     }
 
     #[test]
     fn read_loop_pid_returns_the_stored_pid() {
-        let c = make_cfg(false, None);
+        let c = make_cfg(None);
         let dir = c.dir.path().join("sessions").join("s1");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("loop.pid"), "12345\n").unwrap();
@@ -1063,7 +1057,7 @@ mod tests {
 
     #[test]
     fn stop_external_loop_without_artifact_is_none() {
-        let c = make_cfg(false, None);
+        let c = make_cfg(None);
         assert_eq!(
             c.port.stop_external_loop(&SessionId::new("ghost")).unwrap(),
             None
@@ -1072,7 +1066,7 @@ mod tests {
 
     #[test]
     fn external_loop_pid_without_artifact_is_none() {
-        let c = make_cfg(false, None);
+        let c = make_cfg(None);
         assert_eq!(
             c.port.external_loop_pid(&SessionId::new("ghost")).unwrap(),
             None
@@ -1081,7 +1075,7 @@ mod tests {
 
     #[test]
     fn external_loop_pid_dead_pid_is_none() {
-        let c = make_cfg(false, None);
+        let c = make_cfg(None);
         let dir = c.dir.path().join("sessions").join("s1");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("loop.pid"), "999999999\n").unwrap();
@@ -1094,7 +1088,7 @@ mod tests {
 
     #[test]
     fn external_loop_pid_reports_a_live_orphan_group() {
-        let c = make_cfg(false, None);
+        let c = make_cfg(None);
         let sid = SessionId::new("s-probe");
         let dir = c.dir.path().join("sessions").join("s-probe");
         std::fs::create_dir_all(&dir).unwrap();
@@ -1112,7 +1106,10 @@ mod tests {
             .args(["bash", "-c", &inner, "s-probe"])
             .spawn()
             .unwrap();
-        let mut guard = LoopGroupGuard { child: Some(child), leader: 0 };
+        let mut guard = LoopGroupGuard {
+            child: Some(child),
+            leader: 0,
+        };
         for _ in 0..100 {
             if pid_file.exists() {
                 break;
@@ -1160,7 +1157,7 @@ mod tests {
 
     #[test]
     fn pid_is_loop_requires_a_whole_argument_match() {
-        let c = make_cfg(false, None);
+        let c = make_cfg(None);
         let dir = c.dir.path().join("sessions").join("s-sub");
         std::fs::create_dir_all(&dir).unwrap();
         let pid_file = dir.join("leader.pid");
@@ -1176,7 +1173,10 @@ mod tests {
             .args(["bash", "-c", &inner, "s1_h1"])
             .spawn()
             .unwrap();
-        let mut guard = LoopGroupGuard { child: Some(child), leader: 0 };
+        let mut guard = LoopGroupGuard {
+            child: Some(child),
+            leader: 0,
+        };
         for _ in 0..100 {
             if pid_file.exists() {
                 break;
@@ -1206,7 +1206,7 @@ mod tests {
 
     #[test]
     fn stop_external_loop_kills_a_live_orphan_group() {
-        let c = make_cfg(false, None);
+        let c = make_cfg(None);
         let sid = SessionId::new("s-reattach");
         let dir = c.dir.path().join("sessions").join("s-reattach");
         std::fs::create_dir_all(&dir).unwrap();
@@ -1224,7 +1224,10 @@ mod tests {
             .args(["bash", "-c", &inner, "s-reattach"])
             .spawn()
             .unwrap();
-        let mut guard = LoopGroupGuard { child: Some(child), leader: 0 };
+        let mut guard = LoopGroupGuard {
+            child: Some(child),
+            leader: 0,
+        };
         // Wait for the leader to record its pid.
         for _ in 0..100 {
             if pid_file.exists() {
@@ -1332,7 +1335,7 @@ mod tests {
 
     #[test]
     fn read_events_missing_session_is_empty_not_error() {
-        let c = make_cfg(false, None);
+        let c = make_cfg(None);
         let rt = runtime();
         let evs = block_on(&rt, c.port.read_events(&SessionId::new("ghost"))).unwrap();
         assert!(evs.is_empty());
@@ -1340,7 +1343,7 @@ mod tests {
 
     #[test]
     fn append_trace_writes_a_timestamped_record_to_the_session_dir() {
-        let c = make_cfg(false, None);
+        let c = make_cfg(None);
         let rt = runtime();
         let sid = SessionId::new("s1");
         block_on(&rt, c.port.append_trace(&sid, "loop_spawn", "loop started")).unwrap();
@@ -1372,7 +1375,7 @@ mod tests {
 
     #[test]
     fn append_trace_rejects_an_id_that_escapes_the_sessions_root() {
-        let c = make_cfg(false, None);
+        let c = make_cfg(None);
         let rt = runtime();
         let sid = SessionId::new("../escape");
         let err = block_on(&rt, c.port.append_trace(&sid, "render", "x")).unwrap_err();
@@ -1381,7 +1384,7 @@ mod tests {
 
     #[test]
     fn append_event_creates_session_and_appends_one_line() {
-        let c = make_cfg(false, None);
+        let c = make_cfg(None);
         let rt = runtime();
         let ev = Event::Json {
             obj: serde_json::json!({"v":1,"type":"user_message","ts":"t","content":"hi"}),
@@ -1399,12 +1402,12 @@ mod tests {
 
     #[test]
     fn append_events_stay_separate_lines() {
-        let c = make_cfg(false, None);
+        let c = make_cfg(None);
         let rt = runtime();
         let sid = SessionId::new("s2");
         for i in 0..3 {
             let ev = Event::Json {
-                obj: serde_json::json!({"v":1,"type":"user_message","ts":"t","content":i}),
+                obj: serde_json::json!({"v":1,"type":"user_message","ts":"t","content":format!("m{i}")}),
             };
             block_on(&rt, c.port.append_event(&sid, &ev)).unwrap();
         }
@@ -1419,7 +1422,7 @@ mod tests {
 
     #[test]
     fn append_event_rejects_malformed_line_events() {
-        let c = make_cfg(false, None);
+        let c = make_cfg(None);
         let rt = runtime();
         let ev = Event::MalformedLine {
             line: "garbage".into(),
@@ -1430,7 +1433,7 @@ mod tests {
 
     #[test]
     fn append_event_rejects_object_without_type() {
-        let c = make_cfg(false, None);
+        let c = make_cfg(None);
         let rt = runtime();
         let ev = Event::Json {
             obj: serde_json::json!({"v":1,"ts":"t"}),
@@ -1441,7 +1444,7 @@ mod tests {
 
     #[test]
     fn append_event_validates_against_schema_when_present() {
-        let c = make_cfg(true, None);
+        let c = make_cfg(None);
         let rt = runtime();
         let good = Event::Json {
             obj: serde_json::json!({"v":1,"type":"user_message","ts":"t","content":"ok"}),
@@ -1478,61 +1481,11 @@ mod tests {
         block_on(&rt, c.port.append_event(&SessionId::new("s1"), &novel)).unwrap();
     }
 
-    /// The kernel's ext_status schema. This file is a kernel-owned ABI
-    /// (docs/tui-ext-repo-split.md section 5: the event vocabulary is a
-    /// kernel-owned shared ABI), so it lives in the kernel repo's
-    /// `schemas/`, two levels above a crate root that sits inside the
-    /// kernel. Tests run from the crate root. Resolve it for each
-    /// layout: the same-repo kernel checkout (or a combined tree) puts
-    /// it two levels up; in the split TUI repo the schemas tree lives in
-    /// the sibling kernel checkout; an explicit `RUSHI_SCHEMA_DIR`
-    /// (pointing at a kernel `schemas/` dir) wins for any layout, e.g.
-    /// a git-dep checkout at hosting time.
-    fn repo_ext_status_schema_path() -> std::path::PathBuf {
-        if let Ok(dir) = std::env::var("RUSHI_SCHEMA_DIR") {
-            let p = std::path::Path::new(&dir)
-                .join("events")
-                .join("v1")
-                .join("ext_status.json");
-            if p.exists() {
-                return p;
-            }
-        }
-        for base in ["../..", "../../../rust-unix-harness"] {
-            let p = std::path::Path::new(base)
-                .join("schemas")
-                .join("events")
-                .join("v1")
-                .join("ext_status.json");
-            if p.exists() {
-                return p.to_path_buf();
-            }
-        }
-        // Default (same-repo); the callers `.expect` on a missing file.
-        std::path::Path::new("../..")
-            .join("schemas")
-            .join("events")
-            .join("v1")
-            .join("ext_status.json")
-            .to_path_buf()
-    }
-
-    /// Copy the repo's ext_status schema into the temp schemas dir.
-    /// The port reads schemas from its config dir, which the test sets
-    /// to the temp dir. The copy puts the repo file in that dir.
-    fn write_ext_status_schema(c: &Cfg) {
-        let sdir = c.dir.path().join("schemas").join("events").join("v1");
-        std::fs::create_dir_all(&sdir).unwrap();
-        let src = repo_ext_status_schema_path();
-        std::fs::copy(&src, sdir.join("ext_status.json")).expect("repo schema file must exist");
-    }
-
     #[test]
     fn ext_status_producer_event_passes_schema_and_appends() {
         // G3: with the schema file present, the typed envelope from
         // `produce::ext_status` validates and lands in the log.
-        let c = make_cfg(true, None);
-        write_ext_status_schema(&c);
+        let c = make_cfg(None);
         let rt = runtime();
         let ev = crate::event::produce::ext_status("vim_mode", serde_json::json!("insert"));
         block_on(&rt, c.port.append_event(&SessionId::new("s1"), &ev)).unwrap();
@@ -1549,8 +1502,7 @@ mod tests {
     fn ext_status_missing_value_is_rejected() {
         // Stage 0 acceptance: a missing `value` field is rejected by
         // the schema check. Nothing lands in the log.
-        let c = make_cfg(true, None);
-        write_ext_status_schema(&c);
+        let c = make_cfg(None);
         let rt = runtime();
         let ev = Event::Json {
             obj: serde_json::json!({"v":1,"type":"ext_status","ts":"t","id":"vim_mode"}),
@@ -1564,31 +1516,24 @@ mod tests {
     }
 
     #[test]
-    fn repo_ext_status_schema_accepts_producer_and_rejects_missing_value() {
-        // The shipped schema file must pass under the port validator.
-        // A producer envelope passes. A missing `value` fails.
-        let raw = std::fs::read_to_string(repo_ext_status_schema_path())
-            .expect("repo schema file must exist");
-        let schema: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    fn ext_status_typed_validation_accepts_and_rejects() {
+        // The producer envelope passes typed validation.
         let produced = crate::event::produce::ext_status("vim_mode", serde_json::json!("insert"));
-        let produced_obj = produced
-            .obj()
-            .expect("a produced event has an object")
-            .clone();
-        assert!(
-            rushi_common::event_validation::validate_against_schema(&produced_obj, &schema),
-            "producer envelope must match the repo schema: {produced_obj:?}"
-        );
+        let json_line = serde_json::to_string(produced.obj().as_ref().unwrap()).unwrap();
+        rushi_common::event::parse_event(&json_line).expect("producer envelope must parse");
+
+        // Missing `value` fails typed validation.
         let missing_value = serde_json::json!({"v":1,"type":"ext_status","ts":"t","id":"vim_mode"});
+        let json_line2 = serde_json::to_string(&missing_value).unwrap();
         assert!(
-            !rushi_common::event_validation::validate_against_schema(&missing_value, &schema),
-            "a missing `value` must fail the repo schema"
+            rushi_common::event::parse_event(&json_line2).is_err(),
+            "a missing `value` must fail typed validation"
         );
     }
 
     #[test]
     fn append_event_rejects_path_traversal_session_ids() {
-        let c = make_cfg(false, None);
+        let c = make_cfg(None);
         let rt = runtime();
         let ev = Event::Json {
             obj: serde_json::json!({"v":1,"type":"user_message","ts":"t","content":"x"}),
@@ -1601,7 +1546,7 @@ mod tests {
 
     #[test]
     fn watch_sees_new_events_from_end() {
-        let c = make_cfg(false, None);
+        let c = make_cfg(None);
         std::fs::create_dir_all(c.dir.path().join("sessions").join("s1")).unwrap();
         std::fs::write(log_path(&c, "s1"), "old line\n").unwrap();
 
@@ -1629,9 +1574,44 @@ mod tests {
         drop(rx);
     }
 
+    /// The live tree-rewind path: the TUI appends its own `rewind` marker
+    /// through the port (`LogLine::commit`), not via a raw write. The
+    /// tailer must still deliver it. If it does not, the in-memory
+    /// mask never updates and the abandoned branch keeps rendering
+    /// (docs/tree-ui-design-from-human.md).
+    #[test]
+    fn watch_sees_self_appended_rewind_marker() {
+        let c = make_cfg(None);
+        let rt = runtime();
+        let sid = SessionId::new("s1");
+        for i in 0..4 {
+            let ev = Event::Json {
+                obj: serde_json::json!({"v":1,"type":"user_message","ts":"t","id":format!("u{i}"),"content":format!("m{i}")}),
+            };
+            block_on(&rt, c.port.append_event(&sid, &ev)).unwrap();
+        }
+        let rx = c.port.watch(&sid, TailCursor::end());
+        std::thread::sleep(Duration::from_millis(200)); // let the tailer attach
+        let marker = Event::Json {
+            obj: serde_json::json!({"v":1,"type":"rewind","ts":"t","target_seq":2,"mode":"on","reason":"tui_pick"}),
+        };
+        block_on(&rt, c.port.append_event(&sid, &marker)).unwrap();
+        match wait_item(&rx) {
+            WatchItem::Event { event, .. } => {
+                assert_eq!(
+                    event.kind(),
+                    EventKind::Rewind,
+                    "the self-appended marker must be delivered to the watch"
+                );
+            }
+            other => panic!("expected rewind event, got {other:?}"),
+        }
+        drop(rx);
+    }
+
     #[test]
     fn watch_holds_partial_line_until_newline() {
-        let c = make_cfg(false, None);
+        let c = make_cfg(None);
         std::fs::create_dir_all(c.dir.path().join("sessions").join("s1")).unwrap();
         let path = log_path(&c, "s1");
         std::fs::write(&path, "").unwrap();
@@ -1668,7 +1648,7 @@ mod tests {
 
     #[test]
     fn watch_survives_truncation() {
-        let c = make_cfg(false, None);
+        let c = make_cfg(None);
         std::fs::create_dir_all(c.dir.path().join("sessions").join("s1")).unwrap();
         let path = log_path(&c, "s1");
         std::fs::write(&path, "one\n").unwrap();
@@ -1697,7 +1677,7 @@ mod tests {
 
     #[test]
     fn watch_reports_gone_and_resumed() {
-        let c = make_cfg(false, None);
+        let c = make_cfg(None);
         let path = log_path(&c, "s1");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "x\n").unwrap();
@@ -1729,13 +1709,10 @@ mod tests {
 
     #[test]
     fn spawn_loop_streams_lines_and_reports_exit() {
-        let c = make_cfg(
-            false,
-            Some((
-                "bash",
-                vec!["-c", "echo out-line; echo err-line >&2; exit 3"],
-            )),
-        );
+        let c = make_cfg(Some((
+            "bash",
+            vec!["-c", "echo out-line; echo err-line >&2; exit 3"],
+        )));
         let rt = runtime();
         let sid = SessionId::new("s9");
         let handle = block_on(&rt, c.port.spawn_loop(&sid)).unwrap();
@@ -1783,7 +1760,7 @@ mod tests {
 
     #[test]
     fn spawn_loop_missing_config_is_bus_error() {
-        let c = make_cfg(false, None);
+        let c = make_cfg(None);
         let rt = runtime();
         let err = match block_on(&rt, c.port.spawn_loop(&SessionId::new("s9"))) {
             Err(e) => e,
@@ -1794,7 +1771,7 @@ mod tests {
 
     #[test]
     fn stop_terminates_group_and_wait_exit_resolves() {
-        let c = make_cfg(false, Some(("bash", vec!["-c", "sleep 30"])));
+        let c = make_cfg(Some(("bash", vec!["-c", "sleep 30"])));
         let rt = runtime();
         let sid = SessionId::new("s9");
         let handle = block_on(&rt, c.port.spawn_loop(&sid)).unwrap();
@@ -1850,9 +1827,14 @@ mod tests {
     #[test]
     fn watch_backpressure_burst_delivers_each_event_once() {
         const N: usize = 300; // > TAIL_CAPACITY (256)
-        let c = make_cfg(false, None);
+        let c = make_cfg(None);
         std::fs::create_dir_all(c.dir.path().join("sessions").join("burst")).unwrap();
-        let path = c.dir.path().join("sessions").join("burst").join("events.jsonl");
+        let path = c
+            .dir
+            .path()
+            .join("sessions")
+            .join("burst")
+            .join("events.jsonl");
 
         let sid = SessionId::new("burst");
         let rx = c.port.watch(&sid, TailCursor::start());
@@ -1889,7 +1871,8 @@ mod tests {
                     let now = std::time::Instant::now();
                     match quiet_since {
                         Some(q)
-                            if got.len() == N && now.duration_since(q) >= Duration::from_millis(500) =>
+                            if got.len() == N
+                                && now.duration_since(q) >= Duration::from_millis(500) =>
                         {
                             break
                         }
@@ -1909,10 +1892,7 @@ mod tests {
             // Match the quoted content so "line 42" cannot satisfy the
             // check for index 4 (a prefix would make the order test vacuous).
             let want = format!("\"line {i}\"");
-            assert!(
-                g.contains(&want),
-                "order broke at index {i}: {g}"
-            );
+            assert!(g.contains(&want), "order broke at index {i}: {g}");
         }
         drop(rx);
     }
@@ -1924,8 +1904,13 @@ mod tests {
     // interval.
     #[test]
     fn watch_inotify_append_delivered_before_fallback_tick() {
-        let c = make_cfg(false, None);
-        let path = c.dir.path().join("sessions").join("speed").join("events.jsonl");
+        let c = make_cfg(None);
+        let path = c
+            .dir
+            .path()
+            .join("sessions")
+            .join("speed")
+            .join("events.jsonl");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
@@ -1950,21 +1935,30 @@ mod tests {
                     elapsed < Duration::from_millis(500),
                     "append should be delivered in <500 ms via inotify, took {elapsed:?}"
                 );
-                assert!(event.compact().contains("\"fast\""), "{:?}", event.compact());
+                assert!(
+                    event.compact().contains("\"fast\""),
+                    "{:?}",
+                    event.compact()
+                );
             }
             Ok(other) => panic!("expected Event, got {other:?}"),
-            Err(e) => panic!(
-                "event not delivered within 500 ms: {e:?} — inotify wake may not be active"
-            ),
+            Err(e) => {
+                panic!("event not delivered within 500 ms: {e:?} — inotify wake may not be active")
+            }
         }
         drop(rx);
     }
 
     #[test]
     fn tailer_thread_exits_when_receiver_dropped() {
-        let c = make_cfg(false, None);
+        let c = make_cfg(None);
         std::fs::create_dir_all(c.dir.path().join("sessions").join("leak")).unwrap();
-        let path = c.dir.path().join("sessions").join("leak").join("events.jsonl");
+        let path = c
+            .dir
+            .path()
+            .join("sessions")
+            .join("leak")
+            .join("events.jsonl");
         std::fs::write(&path, "").unwrap();
 
         let sid = SessionId::new("leak");
@@ -1994,9 +1988,14 @@ mod tests {
 
     #[test]
     fn read_tail_returns_disconnected_when_receiver_dropped() {
-        let c = make_cfg(false, None);
+        let c = make_cfg(None);
         std::fs::create_dir_all(c.dir.path().join("sessions").join("dc")).unwrap();
-        let path = c.dir.path().join("sessions").join("dc").join("events.jsonl");
+        let path = c
+            .dir
+            .path()
+            .join("sessions")
+            .join("dc")
+            .join("events.jsonl");
         std::fs::write(
             &path,
             r#"{"v":1,"type":"user_message","ts":"t","content":"x"}

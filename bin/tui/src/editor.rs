@@ -90,4 +90,3 @@ pub fn run_editor(initial: &str, suspend: fn(), resume: fn()) -> Result<String, 
     let _ = std::fs::remove_file(&path);
     result
 }
-

@@ -219,8 +219,34 @@ fn is_blank_char(c: char) -> bool {
     c == ' ' || c == '\t'
 }
 
-fn is_punct_char(c: char) -> bool {
-    !is_word_char(c) && !is_blank_char(c)
+/// The word-class policy of the word motions: which characters join
+/// a word run. The editor keeps the plain vim classes (word /
+/// punct / blank). The browse transcript folds the hyphen into the
+/// word class. A hyphenated word like `foo-bar` is then one word.
+/// A word motion lands on a word start, never on the hyphen
+/// (the 2026-09-15 browse-cursor fix,
+/// `docs/tui_feature_requests_from_human.md`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WordClass {
+    /// The plain vim word class: alphanumeric plus `_`.
+    Editor,
+    /// The browse word class: the editor class, hyphen included.
+    Browse,
+}
+
+impl WordClass {
+    /// Does `c` join a word run under this policy?
+    fn is_word(&self, c: char) -> bool {
+        match self {
+            Self::Editor => is_word_char(c),
+            Self::Browse => is_word_char(c) || c == '-',
+        }
+    }
+
+    /// Does `c` belong to the punctuation class under this policy?
+    fn is_punct(&self, c: char) -> bool {
+        !self.is_word(c) && !is_blank_char(c)
+    }
 }
 
 fn is_blank_line(line: &str) -> bool {
@@ -437,24 +463,6 @@ impl Editor {
         self.push_undo();
         self.lines[self.row] = format!("{prefix}{value}{suffix}");
         self.col = at_col + value.chars().count();
-    }
-
-    /// The number of lines the text currently holds (at least 1).
-    /// Test-only accessor: no production caller.
-    #[cfg(test)]
-    pub fn n_lines(&self) -> usize {
-        if self.lines.is_empty() {
-            1
-        } else {
-            self.lines.len()
-        }
-    }
-
-    /// The cursor position in the document: `(row, col)`. Test-only
-    /// accessor: no production caller.
-    #[cfg(test)]
-    pub fn cursor(&self) -> (usize, usize) {
-        (self.row, self.col)
     }
 
     /// The visible display rows at `scroll` (the index of the first
@@ -1441,8 +1449,8 @@ impl Editor {
                     self.record_key(c);
                 }
                 let mut res = match c {
-                    'b' => word_backward(&self.lines, cursor, motion_count),
-                    'e' => word_end(&self.lines, cursor, motion_count),
+                    'b' => word_backward(&self.lines, cursor, motion_count, WordClass::Editor),
+                    'e' => word_end(&self.lines, cursor, motion_count, WordClass::Editor),
                     'W' => WORD_forward(&self.lines, cursor, motion_count),
                     'B' => WORD_backward(&self.lines, cursor, motion_count),
                     _ => WORD_end(&self.lines, cursor, motion_count),
@@ -1746,9 +1754,9 @@ impl Editor {
         let op = self.pending_operator;
         let current = chars_of(&self.lines, cursor.0).get(cursor.1).copied();
         let mut res = if op == Some('c') && current.is_some_and(|c| !is_blank_char(c)) {
-            word_end(&self.lines, cursor, n)
+            word_end(&self.lines, cursor, n, WordClass::Editor)
         } else {
-            word_forward(&self.lines, cursor, n)
+            word_forward(&self.lines, cursor, n, WordClass::Editor)
         };
         if op == Some('d')
             && n == 1
@@ -1786,8 +1794,7 @@ impl Editor {
     ) {
         let lines = self.lines.clone();
         let reg = self.register;
-        let (new_lines, cursor, enter_insert) =
-            apply_operator(op, &lines, range, registers, reg);
+        let (new_lines, cursor, enter_insert) = apply_operator(op, &lines, range, registers, reg);
         self.push_undo();
         self.lines = new_lines;
         self.row = clamp_line(self.lines.len(), cursor.0);
@@ -2653,15 +2660,15 @@ impl Editor {
             }
             Some('^') => self.col = first_nonblank(&self.lines[self.row]),
             Some('w') => {
-                let res = word_forward(&self.lines, cursor, count);
+                let res = word_forward(&self.lines, cursor, count, WordClass::Editor);
                 self.go_to(res.pos);
             }
             Some('b') | Some('e') | Some('W') | Some('B') | Some('E') => {
                 let c = ch.unwrap();
                 let res = match c {
-                    'b' => word_backward(&self.lines, cursor, count),
+                    'b' => word_backward(&self.lines, cursor, count, WordClass::Editor),
                     'B' => WORD_backward(&self.lines, cursor, count),
-                    'e' => word_end(&self.lines, cursor, count),
+                    'e' => word_end(&self.lines, cursor, count, WordClass::Editor),
                     'W' => WORD_forward(&self.lines, cursor, count),
                     _ => WORD_end(&self.lines, cursor, count),
                 };
@@ -2797,11 +2804,17 @@ impl Editor {
 /// transition between the word / punctuation / blank classes.
 /// At the end of the file the cursor stays on the last character;
 /// a `w` on the last word of a line lands on that word's last
-/// char, or crosses to the next line.
-pub(crate) fn word_forward(lines: &[String], cursor: (usize, usize), count: u32) -> MotionResult {
+/// char, or crosses to the next line. `cls` picks the word
+/// character set (the editor's or the browse hyphen-folding one).
+pub(crate) fn word_forward(
+    lines: &[String],
+    cursor: (usize, usize),
+    count: u32,
+    cls: WordClass,
+) -> MotionResult {
     let mut pos = cursor;
     for _ in 0..count.max(1) {
-        pos = next_word_start(lines, pos.0, pos.1);
+        pos = next_word_start(lines, pos.0, pos.1, cls);
     }
     MotionResult {
         pos,
@@ -2815,7 +2828,11 @@ pub(crate) fn word_forward(lines: &[String], cursor: (usize, usize), count: u32)
 /// motion did not move), an operator consumes to the end of the
 /// line. The pinned reference stops one char short. A plain
 /// movement ignores this: `go_to` clamps the column anyway.
-pub(crate) fn extend_w_eol(lines: &[String], cursor: (usize, usize), res: MotionResult) -> MotionResult {
+pub(crate) fn extend_w_eol(
+    lines: &[String],
+    cursor: (usize, usize),
+    res: MotionResult,
+) -> MotionResult {
     if res.pos.0 != cursor.0 {
         return res; // cross-line landing: the merge rule applies
     }
@@ -2839,7 +2856,7 @@ pub(crate) fn extend_w_eol(lines: &[String], cursor: (usize, usize), res: Motion
     }
 }
 
-fn next_word_start(lines: &[String], line: usize, col: usize) -> (usize, usize) {
+fn next_word_start(lines: &[String], line: usize, col: usize, cls: WordClass) -> (usize, usize) {
     if lines.is_empty() {
         return (0, 0);
     }
@@ -2854,12 +2871,12 @@ fn next_word_start(lines: &[String], line: usize, col: usize) -> (usize, usize) 
     }
 
     let ch = text.get(col).copied();
-    if ch.is_some_and(is_word_char) {
-        while col < text.len() && is_word_char(text[col]) {
+    if ch.is_some_and(|c| cls.is_word(c)) {
+        while col < text.len() && cls.is_word(text[col]) {
             col += 1;
         }
-    } else if ch.is_some_and(is_punct_char) {
-        while col < text.len() && is_punct_char(text[col]) {
+    } else if ch.is_some_and(|c| cls.is_punct(c)) {
+        while col < text.len() && cls.is_punct(text[col]) {
             col += 1;
         }
     }
@@ -2890,10 +2907,15 @@ fn next_word_start(lines: &[String], line: usize, col: usize) -> (usize, usize) 
 }
 
 /// `b` — the start of the previous word.
-pub(crate) fn word_backward(lines: &[String], cursor: (usize, usize), count: u32) -> MotionResult {
+pub(crate) fn word_backward(
+    lines: &[String],
+    cursor: (usize, usize),
+    count: u32,
+    cls: WordClass,
+) -> MotionResult {
     let mut pos = cursor;
     for _ in 0..count.max(1) {
-        pos = prev_word_start(lines, pos.0, pos.1);
+        pos = prev_word_start(lines, pos.0, pos.1, cls);
     }
     MotionResult {
         pos,
@@ -2902,7 +2924,7 @@ pub(crate) fn word_backward(lines: &[String], cursor: (usize, usize), count: u32
     }
 }
 
-fn prev_word_start(lines: &[String], line: usize, col: usize) -> (usize, usize) {
+fn prev_word_start(lines: &[String], line: usize, col: usize, cls: WordClass) -> (usize, usize) {
     if lines.is_empty() {
         return (0, 0);
     }
@@ -2925,12 +2947,12 @@ fn prev_word_start(lines: &[String], line: usize, col: usize) -> (usize, usize) 
     let text = chars_of(lines, line as usize);
     let mut c = col as usize;
     let ch = text.get(c).copied();
-    if ch.is_some_and(is_word_char) {
-        while c > 0 && is_word_char(text[c - 1]) {
+    if ch.is_some_and(|ch| cls.is_word(ch)) {
+        while c > 0 && cls.is_word(text[c - 1]) {
             c -= 1;
         }
-    } else if ch.is_some_and(is_punct_char) {
-        while c > 0 && is_punct_char(text[c - 1]) {
+    } else if ch.is_some_and(|ch| cls.is_punct(ch)) {
+        while c > 0 && cls.is_punct(text[c - 1]) {
             c -= 1;
         }
     }
@@ -2938,10 +2960,15 @@ fn prev_word_start(lines: &[String], line: usize, col: usize) -> (usize, usize) 
 }
 
 /// `e` — the end of the current / next word (inclusive motion).
-pub(crate) fn word_end(lines: &[String], cursor: (usize, usize), count: u32) -> MotionResult {
+pub(crate) fn word_end(
+    lines: &[String],
+    cursor: (usize, usize),
+    count: u32,
+    cls: WordClass,
+) -> MotionResult {
     let mut pos = cursor;
     for _ in 0..count.max(1) {
-        pos = next_word_end(lines, pos.0, pos.1);
+        pos = next_word_end(lines, pos.0, pos.1, cls);
     }
     MotionResult {
         pos,
@@ -2950,7 +2977,7 @@ pub(crate) fn word_end(lines: &[String], cursor: (usize, usize), count: u32) -> 
     }
 }
 
-fn next_word_end(lines: &[String], line: usize, col: usize) -> (usize, usize) {
+fn next_word_end(lines: &[String], line: usize, col: usize, cls: WordClass) -> (usize, usize) {
     if lines.is_empty() {
         return (0, 0);
     }
@@ -2979,12 +3006,12 @@ fn next_word_end(lines: &[String], line: usize, col: usize) -> (usize, usize) {
 
     // Run through the word chars of the same class.
     let ch = text.get(col).copied();
-    if ch.is_some_and(is_word_char) {
-        while col + 1 < text.len() && is_word_char(text[col + 1]) {
+    if ch.is_some_and(|c| cls.is_word(c)) {
+        while col + 1 < text.len() && cls.is_word(text[col + 1]) {
             col += 1;
         }
-    } else if ch.is_some_and(is_punct_char) {
-        while col + 1 < text.len() && is_punct_char(text[col + 1]) {
+    } else if ch.is_some_and(|c| cls.is_punct(c)) {
+        while col + 1 < text.len() && cls.is_punct(text[col + 1]) {
             col += 1;
         }
     }
@@ -3145,7 +3172,11 @@ fn go_to_first_line(lines: &[String], _cursor: (usize, usize), count: u32) -> Mo
 }
 
 /// `G` — to the last line, or line N with a count (linewise).
-pub(crate) fn go_to_last_line(lines: &[String], _cursor: (usize, usize), count: u32) -> MotionResult {
+pub(crate) fn go_to_last_line(
+    lines: &[String],
+    _cursor: (usize, usize),
+    count: u32,
+) -> MotionResult {
     let target = clamp_line(lines.len(), (count.max(1) as usize).saturating_sub(1));
     MotionResult {
         pos: (target, first_nonblank(&lines[target])),
@@ -3155,7 +3186,11 @@ pub(crate) fn go_to_last_line(lines: &[String], _cursor: (usize, usize), count: 
 }
 
 /// `^` — the first non-blank char of the line.
-pub(crate) fn first_nonblank_motion(lines: &[String], cursor: (usize, usize), _count: u32) -> MotionResult {
+pub(crate) fn first_nonblank_motion(
+    lines: &[String],
+    cursor: (usize, usize),
+    _count: u32,
+) -> MotionResult {
     MotionResult {
         pos: (cursor.0, first_nonblank(&lines[cursor.0])),
         linewise: false,
@@ -3682,7 +3717,10 @@ pub(crate) fn is_valid_register(name: char) -> bool {
 }
 
 /// Read a register (the pi-vim `getRegister`).
-pub(crate) fn get_register(registers: &HashMap<char, RegContent>, name: char) -> Option<RegContent> {
+pub(crate) fn get_register(
+    registers: &HashMap<char, RegContent>,
+    name: char,
+) -> Option<RegContent> {
     registers.get(&name).cloned()
 }
 
@@ -4240,5 +4278,66 @@ fn find_next_match(
             }
         }
         Some(*matches.last()?)
+    }
+}
+
+#[cfg(test)]
+mod word_class_tests {
+    use super::{word_backward, word_end, word_forward, WordClass};
+
+    fn lines() -> Vec<String> {
+        vec!["foo-bar baz".to_string()]
+    }
+
+    #[test]
+    fn editor_class_keeps_the_hyphen_a_word_break() {
+        // The editor word motion is unchanged by the browse fix.
+        // Under the editor class, `foo-bar` is two words. A `w`
+        // from the start lands on the hyphen.
+        let res = word_forward(&lines(), (0, 0), 1, WordClass::Editor);
+        assert_eq!(res.pos, (0, 3));
+    }
+
+    #[test]
+    fn browse_class_treats_the_hyphenated_word_as_one_word() {
+        // Under the browse class, `w` skips the whole `foo-bar`
+        // run and lands on the start of `baz`.
+        let res = word_forward(&lines(), (0, 0), 1, WordClass::Browse);
+        assert_eq!(res.pos, (0, 8));
+        // From the hyphen itself, the landing is the same.
+        let res = word_forward(&lines(), (0, 3), 1, WordClass::Browse);
+        assert_eq!(res.pos, (0, 8));
+    }
+
+    #[test]
+    fn browse_class_backward_lands_on_the_hyphenated_word_start() {
+        // From `baz`, `b` lands at the start of `foo-bar` (col 0).
+        // The editor class lands at the start of `bar` (col 4).
+        let res = word_backward(&lines(), (0, 8), 1, WordClass::Browse);
+        assert_eq!(res.pos, (0, 0));
+        let res = word_backward(&lines(), (0, 8), 1, WordClass::Editor);
+        assert_eq!(res.pos, (0, 4));
+    }
+
+    #[test]
+    fn browse_class_word_end_spans_the_hyphen() {
+        // `e` at the start of `foo-bar` lands on the last char of
+        // the whole run, the `r` at col 6. Not the `o` at col 2.
+        let res = word_end(&lines(), (0, 0), 1, WordClass::Browse);
+        assert_eq!(res.pos, (0, 6));
+        assert!(res.inclusive);
+        // The editor class stops at the end of `foo`.
+        let res = word_end(&lines(), (0, 0), 1, WordClass::Editor);
+        assert_eq!(res.pos, (0, 2));
+        // From the last char of `foo-bar`, `e` crosses into `baz`.
+        let res = word_end(&lines(), (0, 6), 1, WordClass::Browse);
+        assert_eq!(res.pos, (0, 10));
+    }
+
+    #[test]
+    fn browse_class_word_end_stays_on_the_last_word_end() {
+        // On the last char of the last word, `e` does not move.
+        let res = word_end(&lines(), (0, 10), 1, WordClass::Browse);
+        assert_eq!(res.pos, (0, 10));
     }
 }

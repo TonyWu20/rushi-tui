@@ -106,9 +106,7 @@ pub struct FileItemSource {
 
 impl FileItemSource {
     pub fn new(root: impl Into<std::path::PathBuf>) -> Self {
-        Self {
-            root: root.into(),
-        }
+        Self { root: root.into() }
     }
 
     /// The base root this source was created with.
@@ -121,11 +119,7 @@ impl FileItemSource {
     /// (the day-0 case and `../` navigation); otherwise labels are
     /// absolute paths, which is what path queries outside the base
     /// produce.
-    pub fn collect_in(
-        &self,
-        root: &std::path::Path,
-        scope: FileScope,
-    ) -> Vec<PickerItem> {
+    pub fn collect_in(&self, root: &std::path::Path, scope: FileScope) -> Vec<PickerItem> {
         let base = self.root.clone();
         if is_git_repo(root) {
             git_ls_files(root, scope)
@@ -204,10 +198,7 @@ pub fn query_root_tail(query: &str, base: &std::path::Path) -> (std::path::PathB
 /// Whether a query names a path: absolute, home-relative, or parent
 /// navigation.
 fn is_path_query(q: &str) -> bool {
-    q.starts_with('/')
-        || q.starts_with('~')
-        || q == ".."
-        || q.starts_with("../")
+    q.starts_with('/') || q.starts_with('~') || q == ".." || q.starts_with("../")
 }
 
 /// Expand a leading `~` to `$HOME`.
@@ -251,7 +242,11 @@ fn git_ls_files(root: &std::path::Path, scope: FileScope) -> Vec<String> {
         .output()
     {
         if let Ok(text) = String::from_utf8(output.stdout) {
-            out.extend(text.lines().filter(|l| !l.is_empty()).map(|l| l.to_string()));
+            out.extend(
+                text.lines()
+                    .filter(|l| !l.is_empty())
+                    .map(|l| l.to_string()),
+            );
         }
     }
     // Untracked files that are not git-ignored.
@@ -261,18 +256,17 @@ fn git_ls_files(root: &std::path::Path, scope: FileScope) -> Vec<String> {
         .output()
     {
         if let Ok(text) = String::from_utf8(output.stdout) {
-            out.extend(text.lines().filter(|l| !l.is_empty()).map(|l| l.to_string()));
+            out.extend(
+                text.lines()
+                    .filter(|l| !l.is_empty())
+                    .map(|l| l.to_string()),
+            );
         }
     }
     // The cycled-in scope: untracked files that ARE git-ignored.
     if scope.includes_ignored() {
         if let Ok(output) = std::process::Command::new("git")
-            .args([
-                "ls-files",
-                "--others",
-                "--ignored",
-                "--exclude-standard",
-            ])
+            .args(["ls-files", "--others", "--ignored", "--exclude-standard"])
             .current_dir(root)
             .output()
         {
@@ -308,12 +302,7 @@ fn walk_files(root: &std::path::Path, scope: FileScope) -> Vec<std::path::PathBu
     out
 }
 
-fn walk(
-    dir: &std::path::Path,
-    depth: usize,
-    scope: FileScope,
-    out: &mut Vec<std::path::PathBuf>,
-) {
+fn walk(dir: &std::path::Path, depth: usize, scope: FileScope, out: &mut Vec<std::path::PathBuf>) {
     if depth >= MAX_WALK_DEPTH || out.len() >= MAX_WALK_FILES {
         return;
     }
@@ -387,7 +376,10 @@ mod tests {
         let src = FileItemSource::new(tmp.clone());
         let items = src.collect_in(src.base(), FileScope::Standard);
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
-        assert!(labels.contains(&"src/main.rs"), "src/main.rs should be found");
+        assert!(
+            labels.contains(&"src/main.rs"),
+            "src/main.rs should be found"
+        );
         assert!(labels.contains(&"README.md"), "README.md should be found");
         if git_ok {
             assert!(is_git_repo(&tmp), "fresh git init dir should be detected");
@@ -482,7 +474,10 @@ mod tests {
         let base = std::path::PathBuf::from("/repo/app");
         assert_eq!(
             query_root_tail("../sibling/x.rs", &base),
-            (std::path::PathBuf::from("/repo/app/../sibling"), "x.rs".into())
+            (
+                std::path::PathBuf::from("/repo/app/../sibling"),
+                "x.rs".into()
+            )
         );
         assert_eq!(
             query_root_tail("..", &base),

@@ -309,7 +309,8 @@
         "fenix": "fenix",
         "flake-utils": "flake-utils",
         "nixpkgs": "nixpkgs",
-        "rushi-kernel": "rushi-kernel"
+        "rushi-kernel": "rushi-kernel",
+        "rushi-kernel-src": "rushi-kernel-src"
       }
     },
     "rushi-kernel": {
@@ -320,17 +321,33 @@
         "nixpkgs": "nixpkgs_5"
       },
       "locked": {
-        "lastModified": 1788965967,
-        "narHash": "sha256-3nYC6ptxgus4IHh6xlHs/GLEUGenGAsnYjwP3ui+jbM=",
-        "ref": "refs/heads/main",
-        "rev": "fdd7e09cde2f368534defabc6a3069a7f305640d",
-        "revCount": 179,
-        "type": "git",
-        "url": "file:/home/tony/programming/rust-unix-harness"
+        "lastModified": 1789332592,
+        "narHash": "sha256-jjBs/4TR9Gj5f/1xFJfNZmwMa+XVRRXg2fkhQ8gWasY=",
+        "owner": "TonyWu20",
+        "repo": "rushi",
+        "rev": "353424a70e4372145b1b60c586be74c6fa3e5f81",
+        "type": "github"
       },
       "original": {
-        "type": "git",
-        "url": "file:/home/tony/programming/rust-unix-harness"
+        "owner": "TonyWu20",
+        "repo": "rushi",
+        "type": "github"
+      }
+    },
+    "rushi-kernel-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1789332592,
+        "narHash": "sha256-jjBs/4TR9Gj5f/1xFJfNZmwMa+XVRRXg2fkhQ8gWasY=",
+        "owner": "TonyWu20",
+        "repo": "rushi",
+        "rev": "353424a70e4372145b1b60c586be74c6fa3e5f81",
+        "type": "github"
+      },
+      "original": {
+        "owner": "TonyWu20",
+        "repo": "rushi",
+        "type": "github"
       }
     },
     "rust-analyzer-src": {

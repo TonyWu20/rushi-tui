@@ -281,8 +281,12 @@ macchiato` as the first internal color scheme. Shipped in
       `empty_user_box_is_three_rows`,
       `assistant_message_has_no_marker_or_gutter`). The layout snapshots were
       regenerated.
-- [ ] When in browse mode, updates from model response should not flush the
+- [x] When in browse mode, updates from model response should not flush the
       screen to the latest position of the conversation.
+      Shipped: `Browse::sync` pins the view on any model-driven tail
+      change, stream growth and the settle shrink alike. The cursorline
+      holds through the whole streaming lifecycle. Detail:
+      `bin/tui/src/browse.rs` `sync`, tests `stream_pin_tests`.
 - [x] The `@` picker respects `.gitignore` by default, but sometimes the
       human needs to point at ignored files or directories (e.g. a
       specific session in `@sessions`). Shipped 2026-09-06: `Ctrl+I`
@@ -382,3 +386,108 @@ macchiato` as the first internal color scheme. Shipped in
       block cannot be scrolled and its grow/collapse drifts the
       cursorline position. Not work for that session. Detail:
       `docs/tui-streaming-simplify.md`.
+
+## New requests (2026-09-12)
+
+- [x] Restore markdown rendering in the thinking block. After the
+      `ratatui-markdown` migration the body used plain word-wrap.
+      Now `wrap_thinking` runs prose lines through `md_line`. The
+      tree-sitter fence and table-grid paths are unchanged.
+
+- [x] Add a `ThinkingTag` color role for the `thinking` label.
+      Expanded: `#c6a0f6`. Folded: `#8087a2`.
+      `Palette::thinking_tag(expanded)` picks the right one.
+
+- [x] Recolor the `Thinking` role to `#8087a2`. Updated the
+      `Level::thinking` fallback, the macchiato scheme, and the
+      color alignment doc.
+
+- [ ] Observation (2026-09-14): the text inside a markdown table
+      renders as raw text, with no syntax highlighting. The grid
+      itself (the fixed-width `table_grid` pass) draws, but each
+      cell's content passes through unprocessed — `table_cells`
+      (`bin/tui/src/highlight.rs`) pipe-splits the row and
+      `wrap_cell_text` word-wraps the raw string, so a cell never
+      goes through `md_line` (inline markdown) or the code
+      highlighter the way the surrounding prose does. Reported by
+      the user while reading a rendered reply; unrelated to the
+      streaming-perf work tracked elsewhere. Open.
+
+- [ ] Observation (2026-09-14): the picker preview pane truncates
+      file content to 50 lines (`FilePreviewer::new(50)` in
+      `bin/tui/src/render.rs`). The user wants no truncation — the
+      full file should be scrollable. Design: "no truncation" does
+      not mean rendering the whole file at once; it means windowed
+      rendering (only the visible window is highlighted per frame)
+      plus a cancellable background load, so an accidental hover on
+      a huge ignored file never freezes the TUI. Detail:
+      `docs/tui-preview-pane-plan.md`.
+
+## New requests (2026-09-13)
+
+- [x] Preview-pane text in the picker and palette floats was
+      truncated at the pane width instead of wrapping.
+      Fixed: `wrap_hard_lines` (in `render.rs`) pre-wraps each
+      hard line to the pane's inner width, so content reflows on
+      terminal resize. Detail:
+      `docs/tui-ratatui-ecosystem-audit.md` (§4.8).
+
+- [x] Also fixed a latent off-by-2 in the picker preview pane
+      where the two border rows were not subtracted from the
+      visible height. Detail:
+      `docs/tui-ratatui-ecosystem-audit.md` (§4.8).
+
+- [x] Fix browse-mode search typing. While the search line is
+      open, typing `s` armed the double-`s` exit instead of
+      entering the query. The exit arm is now suppressed while
+      the line is typing.
+
+- [x] Pin the browse view on streaming growth. The live tail
+      growth flushed the viewport and re-centered it. The stream
+      growth now pins the view like a settled event. Shipped
+      2026-09-13: the settle shrink pins too, so the cursorline
+      holds through the whole streaming lifecycle. Tests:
+      `stream_pin_tests` in `bin/tui/src/browse.rs`.
+- [x] No cap on the number of replayed events. The session start
+      must stay reachable in browse mode and the `tree` list.
+      Shipped 2026-09-13: the `TRANSCRIPT_EVENT_CAP`,
+      `EVENTS_CAP`, `MAX_LOG_READ_BYTES`, and `SCROLL_CAP` limits
+      are gone. `read_events` replays the whole log and the
+      transcript renders every in-memory event. Detail:
+      `docs/tui-conversation-browsing.md` section 4.6.
+
+- [ ] Yank returns the raw source (message bodies and thinking
+      blocks) instead of the rendered text.
+      Decision 2026-09-13: not implemented. The user conceded
+      to rendered-text yank. The renderer exposes no line
+      level source mapping. Anchoring raw ownership at a
+      block's first line made sub-block yanks behave
+      unexpectedly. A raw export path may be explored later.
+
+## New requests (2026-09-15)
+
+- [x] The browse cursor does not paint at the start of a word.
+      For a hyphenated word it paints on the hyphen. Shipped
+      2026-09-15: the browse word motion now runs under a
+      hyphen-folding word class (`WordClass::Browse`). A
+      hyphenated word like `foo-bar` is one word. `w` / `b` /
+      `e` land on a word start or word end, never on the
+      hyphen. The editor keeps the plain vim class
+      (`WordClass::Editor`). Detail: `WordClass` in
+      `bin/tui/src/vim_editor.rs`; the motion in
+      `bin/tui/src/browse.rs`. Tests: `word_motion_tests`,
+      `word_class_tests`.
+- [x] The vim `e` (end of word) motion is not registered while
+      in browse mode. Shipped 2026-09-15: `e` is now in the
+      browse key table (`char_key`). It is also in the `y`
+      operator list and `browse_motion_range` (`ye`). It uses
+      the browse word class. The status hint gained `ye end`.
+      Detail: `bin/tui/src/browse.rs`. Tests:
+      `e_lands_on_the_word_end`, `ye_yanks_the_whole_hyphenated_word`.
+- [x] Allow entering browse mode with a non-empty draft. Today
+      the double-`s` gate needs an empty input. Loosen it.
+      Shipped 2026-09-15: `browse_gate_open`
+      (`bin/tui/src/app.rs`) dropped the empty-draft condition.
+      The double-`s` now works in normal mode with a held
+      draft. The quit gate (`q q`) still needs an empty draft.
+      Tests: `browse_gate_tests` (`bin/tui/src/app.rs`).

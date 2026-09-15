@@ -172,6 +172,13 @@ pub trait SessionPort: Send + Sync {
     /// does not exist yet yields an empty list, not an error.
     async fn read_events(&self, session: &SessionId) -> Result<Vec<Event>, BusError>;
 
+    /// The number of complete lines in a session's log (the highest
+    /// 1-based seq written). Zero when the log does not exist yet. The
+    /// TUI maps its in-memory event window back to the 1-based log seq
+    /// that a rewind marker's `target_seq` requires (docs/tree-ui-
+    /// design-from-human.md).
+    async fn log_line_count(&self, session: &SessionId) -> Result<u64, BusError>;
+
     /// Append one event to a session's log. Must be atomic: a single
     /// append, never a rewrite. Validates the event against the type's
     /// JSON Schema when the schema file exists (G3).

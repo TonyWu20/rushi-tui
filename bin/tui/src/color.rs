@@ -135,12 +135,12 @@ impl Level {
     }
 
     /// The color for the model's thinking (reasoning) block. The pi
-    /// `thinkingText` role: the `dark` theme gray (`#808080`), the
-    /// `catppuccin macchiato` scheme the theme `subtext1` (`#b8c0e0`).
+    /// `thinkingText` role. A muted blue-gray (`#8087a2`), the
+    /// catppuccin macchiato `overlay1` tone.
     pub fn thinking(self) -> Color {
         match self {
-            Level::Rgb => Color::Rgb(0x80, 0x80, 0x80),
-            Level::C256 => lower(Color::Rgb(0x80, 0x80, 0x80), Level::C256),
+            Level::Rgb => Color::Rgb(0x80, 0x87, 0xa2),
+            Level::C256 => lower(Color::Rgb(0x80, 0x87, 0xa2), Level::C256),
             Level::C16 => Color::DarkGray,
         }
     }
@@ -235,8 +235,14 @@ pub enum Role {
     /// Structural punctuation token; the JSON braces, colons, commas
     /// and brackets color through it. pi `syntaxPunctuation`.
     SyntaxPunctuation,
-    /// The model thinking block. pi `thinkingText`.
+    /// The model thinking block body text. pi `thinkingText`.
     Thinking,
+    /// The leading `thinking` tag label of a thinking block.
+    ///
+    /// Distinct from [`Role::Thinking`] so the tag is colored
+    /// independently of the block text.  Expanded: `#c6a0f6`.
+    /// Folded: `#8087a2`.
+    ThinkingTag,
     /// Fold/expand hints and other muted text (`… +N more lines`).
     /// pi `muted`.
     Hint,
@@ -300,6 +306,11 @@ pub enum Role {
     /// shade so the cursor row is visible without overpowering the
     /// selection tone.
     CursorLine,
+    /// The border and title of the final-assistant-message panel
+    /// (docs/tui-turn-fold.md "Final message panel"): a rounded box
+    /// around the turn's idle reply. A tone distinct from the `Accent`
+    /// user-box border so the outcome reads as its own panel.
+    Report,
 }
 
 impl Role {
@@ -328,6 +339,7 @@ impl Role {
         Role::SyntaxOperator,
         Role::SyntaxPunctuation,
         Role::Thinking,
+        Role::ThinkingTag,
         Role::Hint,
         Role::Status,
         Role::Error,
@@ -349,6 +361,7 @@ impl Role {
         Role::ToolName,
         Role::Selection,
         Role::CursorLine,
+        Role::Report,
     ];
 
     /// The built-in value of the role at every capability level. The
@@ -380,6 +393,7 @@ impl Role {
             SyntaxOperator => Color::Rgb(0xd4, 0xd4, 0xd4),
             SyntaxPunctuation => Color::Rgb(0xd4, 0xd4, 0xd4),
             Thinking => level.thinking(),
+            ThinkingTag => Color::Rgb(0xc6, 0xa0, 0xf6),
             Hint => Color::Rgb(0x80, 0x80, 0x80),
             Status => Color::Rgb(0x66, 0x66, 0x66),
             Error | DiffRemoved => Color::Rgb(0xcc, 0x66, 0x66),
@@ -413,6 +427,9 @@ impl Role {
             // A blue selection tone (distinct from the `Hint`
             // search-highlight gray: lowers to Blue vs DarkGray at C16).
             Selection => Color::Rgb(0x36, 0x45, 0x73),
+            // The final-message panel border and title: a sapphire
+            // tone distinct from the `Accent` user-box border.
+            Report => Color::Rgb(0x74, 0xc7, 0xec),
         };
         lower(c, level)
     }
@@ -444,6 +461,7 @@ impl Role {
             SyntaxOperator => "syntax_operator",
             SyntaxPunctuation => "syntax_punctuation",
             Thinking => "thinking",
+            ThinkingTag => "thinking_tag",
             Hint => "hint",
             Status => "status",
             Error => "error",
@@ -465,15 +483,14 @@ impl Role {
             ToolName => "tool_name",
             Selection => "selection",
             CursorLine => "cursor_line",
+            Report => "report",
         }
     }
 
     /// Look up a role by its wire key, accepting both snake_case
     /// (`cursor_line`) and PascalCase (`CursorLine`) forms.
     pub fn from_key(k: &str) -> Option<Role> {
-        let norm = |s: &str| -> String {
-            s.to_lowercase().replace('_', "")
-        };
+        let norm = |s: &str| -> String { s.to_lowercase().replace('_', "") };
         let nk = norm(k);
         Role::ALL.iter().find(|r| norm(r.key()) == nk).copied()
     }
@@ -519,7 +536,7 @@ pub const SCHEME_CATPPUCCIN_MACCHIATO: &str = "catppuccin macchiato";
 /// internal scheme.
 pub fn catppuccin_macchiato() -> std::collections::HashMap<Role, &'static str> {
     use Role::*;
-    let pairs: [(Role, &str); 43] = [
+    let pairs: [(Role, &str); 45] = [
         (PlainText, "#cad3f5"),
         (ToolOutput, "#cad3f5"),
         (ToolCommand, "#c6a0f6"),
@@ -541,7 +558,8 @@ pub fn catppuccin_macchiato() -> std::collections::HashMap<Role, &'static str> {
         (SyntaxType, "#eed49f"),
         (SyntaxOperator, "#91d7e3"),
         (SyntaxPunctuation, "#939ab7"),
-        (Thinking, "#b8c0e0"),
+        (Thinking, "#8087a2"),
+        (ThinkingTag, "#c6a0f6"),
         (Hint, "#a5adcb"),
         (Status, "#8087a2"),
         (Error, "#ed8796"),
@@ -550,8 +568,8 @@ pub fn catppuccin_macchiato() -> std::collections::HashMap<Role, &'static str> {
         (DiffAdded, "#a6da95"),
         (DiffRemoved, "#ed8796"),
         (DiffContext, "#a5adcb"),
-        (DiffAddedBg, "#26402f"),
-        (DiffRemovedBg, "#3d2830"),
+        (DiffAddedBg, "#465159"),
+        (DiffRemovedBg, "#504559"),
         (Border0, "#8087a2"),
         (Border1, "#8bd5ca"),
         (Border2, "#a6da95"),
@@ -561,8 +579,12 @@ pub fn catppuccin_macchiato() -> std::collections::HashMap<Role, &'static str> {
         (ToolBoxBgSuccess, "#363a4f"),
         (ToolBoxBgError, "#363a4f"),
         (ToolName, "#c6a0f6"),
-        (Selection, "#5b6078"),
-        (CursorLine, "#1e2030"),
+        (Selection, "#6e738d"),
+        (CursorLine, "#494d64"),
+        // The sapphire tone of the catppuccin-macchiato `dark`
+        // theme: the final-message panel border and title
+        // (docs/tui-turn-fold.md "Final message panel").
+        (Report, "#74c7ec"),
     ];
     pairs.iter().cloned().collect()
 }
@@ -630,11 +652,14 @@ impl Palette {
     pub fn overlay(base: &Self, hexes: &std::collections::HashMap<Role, String>) -> Self {
         let mut colors = base.colors.clone();
         for (role, hex) in hexes {
-            let c = parse_scheme_color(hex)
-                .expect("the config layer validates the scheme hex values");
+            let c =
+                parse_scheme_color(hex).expect("the config layer validates the scheme hex values");
             colors.insert(*role, lower(c, base.level));
         }
-        Palette { level: base.level, colors }
+        Palette {
+            level: base.level,
+            colors,
+        }
     }
 
     /// The capability level the palette lowers to.
@@ -662,6 +687,18 @@ impl Palette {
             2 => self.color(Border2),
             3 => self.color(Border3),
             _ => self.color(Border4),
+        }
+    }
+
+    /// The color of the leading `thinking` tag. The tag is a distinct
+    /// role from the block text: while the block is expanded it uses
+    /// the `ThinkingTag` role (the active accent); while folded it
+    /// drops to the muted `Thinking` tone.
+    pub fn thinking_tag(&self, expanded: bool) -> Color {
+        if expanded {
+            self.color(Role::ThinkingTag)
+        } else {
+            self.color(Role::Thinking)
         }
     }
 }
@@ -698,7 +735,9 @@ pub fn palette_from_config(
         .get(name)
         .or_else(|| custom.get(&norm_name))
         .or_else(|| {
-            custom.iter().find_map(|(k, t)| (norm(k) == norm_name).then(|| t))
+            custom
+                .iter()
+                .find_map(|(k, t)| (norm(k) == norm_name).then_some(t))
         });
     match table {
         Some(hexes) => Ok(Palette::overlay(&base, hexes)),
@@ -760,10 +799,10 @@ fn palette256(idx: u8) -> (u8, u8, u8) {
 /// Nearest index in the 256 palette.
 ///
 /// Free-form RGB is quantized into the 6x6x6 cube (16-231) and the
-/// grayscale ramp (232-255); the basic 0-15 swatches are reserved for
-/// the native ANSI colors, so a true-color value never collapses onto
-/// a basic swatch even when one happens to be an exact match. Ties
-/// keep the lower index. Exact ramp values (the 24 grays) win with a
+/// grayscale ramp (232-255). The basic 0-15 swatches are reserved for
+/// the native ANSI colors. A true-color value never collapses onto a
+/// basic swatch, even when one happens to be an exact match. Ties keep
+/// the lower index. Exact ramp values (the 24 grays) win with a
 /// distance of 0, since no cube corner coincides with them.
 fn nearest_256(r: u8, g: u8, b: u8) -> u8 {
     let mut best: (u8, u32) = (16, u32::MAX);
@@ -820,4 +859,3 @@ fn dist(r: u8, g: u8, b: u8, pr: u8, pg: u8, pb: u8) -> u32 {
     // Squared Euclidean distance; the sum of squares is non-negative.
     (dr * dr + dg * dg + db * db) as u32
 }
-

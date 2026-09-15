@@ -184,9 +184,7 @@ impl CodeHl {
                 // lower to the terminal capability level.
                 h.line(line, lang)
                     .into_iter()
-                    .map(|(st, text)| {
-                        (crate::color::lower_style(st, palette.level()), text)
-                    })
+                    .map(|(st, text)| (crate::color::lower_style(st, palette.level()), text))
                     .collect()
             }
         }
@@ -481,7 +479,9 @@ fn fold_hint(
 fn split_line_number(line: &str) -> (Option<&str>, &str) {
     match line.find(':') {
         Some(pos) if pos > 0 && line[..pos].bytes().all(|b| b.is_ascii_digit()) => {
-            let rest = line[pos + 1..].strip_prefix(' ').unwrap_or(&line[pos + 1..]);
+            let rest = line[pos + 1..]
+                .strip_prefix(' ')
+                .unwrap_or(&line[pos + 1..]);
             (Some(&line[..pos]), rest)
         }
         _ => (None, line),
@@ -513,12 +513,18 @@ fn read_body(
     let text = value.get("text").and_then(|t| t.as_str()).unwrap_or("");
     let details = value.get("details").cloned().unwrap_or_default();
     // Read `total_lines` from details (kernel) or top-level (legacy/test).
-    let total = details.get("total_lines").and_then(|t| t.as_u64())
+    let total = details
+        .get("total_lines")
+        .and_then(|t| t.as_u64())
         .or_else(|| value.get("total_lines").and_then(|t| t.as_u64()));
     let lines: Vec<&str> = text.lines().collect();
     let count = total.map(|n| n as usize).unwrap_or(lines.len());
     let mut rows: Vec<BodyRow> = Vec::new();
-    let eff_expanded = if expand_frac >= 0.0 { expand_frac > 0.0 } else { expanded };
+    let eff_expanded = if expand_frac >= 0.0 {
+        expand_frac > 0.0
+    } else {
+        expanded
+    };
     match body_plan(cfg.read_mode, eff_expanded) {
         BodyPlan::NoBody => {
             rows.push(vec![(*hint, format!("↳ {count} lines hidden"))]);
@@ -531,12 +537,16 @@ fn read_body(
             let frac = if expand_frac >= 0.0 {
                 expand_frac.clamp(0.0, 1.0)
             } else {
-                if expanded { 1.0 } else { 0.0 }
+                if expanded {
+                    1.0
+                } else {
+                    0.0
+                }
             };
             let collapsed = cfg.preview_lines;
             let cap = collapsed
-                + ((cfg.expanded_preview_max_lines.saturating_sub(collapsed)) as f64 * frac)
-                    .round() as usize;
+                + ((cfg.expanded_preview_max_lines.saturating_sub(collapsed)) as f64 * frac).round()
+                    as usize;
             let remaining = lines.len().saturating_sub(cap);
             // The shared syntax-highlight entry point: the language is
             // detected from the read path; unknown types stay plain.
@@ -609,20 +619,25 @@ fn write_body(
     palette: &crate::color::Palette,
     expanded: bool,
     width: usize,
-    #[builder(default = -1.0)]
-    expand_frac: f64,
+    #[builder(default = -1.0)] expand_frac: f64,
 ) -> Vec<BodyRow> {
     // Read fields from `details` (kernel-wrapped) or top-level (legacy/test).
-    let path = value.get("details").and_then(|d| d.get("path"))
+    let path = value
+        .get("details")
+        .and_then(|d| d.get("path"))
         .or_else(|| value.get("path"))
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    let operation = value.get("details").and_then(|d| d.get("operation"))
+    let operation = value
+        .get("details")
+        .and_then(|d| d.get("operation"))
         .or_else(|| value.get("operation"))
         .and_then(|v| v.as_str())
         .unwrap_or("create");
-    let bytes = value.get("details").and_then(|d| d.get("bytes"))
+    let bytes = value
+        .get("details")
+        .and_then(|d| d.get("bytes"))
         .or_else(|| value.get("bytes"))
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
@@ -653,12 +668,16 @@ fn write_body(
         let frac = if expand_frac >= 0.0 {
             expand_frac.clamp(0.0, 1.0)
         } else {
-            if expanded { 1.0 } else { 0.0 }
+            if expanded {
+                1.0
+            } else {
+                0.0
+            }
         };
         let collapsed = cfg.diff_collapsed_lines;
         let cap = collapsed
-            + ((cfg.expanded_preview_max_lines.saturating_sub(collapsed)) as f64 * frac)
-                .round() as usize;
+            + ((cfg.expanded_preview_max_lines.saturating_sub(collapsed)) as f64 * frac).round()
+                as usize;
         let remaining = content_lines.len().saturating_sub(cap);
         // pi-tool-display write rendering (docs/tui-tool-display-fancy.md
         // section 5.2): each new/overwritten line is a `▌` marker plus a
@@ -710,28 +729,35 @@ fn edit_body(
     palette: &crate::color::Palette,
     expanded: bool,
     width: usize,
-    #[builder(default = -1.0)]
-    expand_frac: f64,
+    #[builder(default = -1.0)] expand_frac: f64,
 ) -> Vec<BodyRow> {
     // Read fields from `details` (kernel-wrapped) or top-level (legacy/test).
-    let path = value.get("details").and_then(|d| d.get("path"))
+    let path = value
+        .get("details")
+        .and_then(|d| d.get("path"))
         .or_else(|| value.get("path"))
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    let before: Vec<&str> = value.get("details").and_then(|d| d.get("before"))
+    let before: Vec<&str> = value
+        .get("details")
+        .and_then(|d| d.get("before"))
         .or_else(|| value.get("before"))
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .lines()
         .collect();
-    let after: Vec<&str> = value.get("details").and_then(|d| d.get("after"))
+    let after: Vec<&str> = value
+        .get("details")
+        .and_then(|d| d.get("after"))
         .or_else(|| value.get("after"))
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .lines()
         .collect();
-    let replace_all = value.get("details").and_then(|d| d.get("replace_all"))
+    let replace_all = value
+        .get("details")
+        .and_then(|d| d.get("replace_all"))
         .or_else(|| value.get("replace_all"))
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
@@ -768,11 +794,10 @@ fn edit_body(
             *hint,
             format!("↳ diff +{added} -{removed} • {layout_label} "),
         ));
-        if total > 0 {
+        if let Some(green_w) = (added * bar_w).checked_div(total) {
             // Integer split of the bar: green gets `added/total` of the
             // width (floor), red gets the remainder. When one side is
             // zero the whole bar is the other color.
-            let green_w = added * bar_w / total;
             let red_w = bar_w - green_w;
             stats.push((*hint, "[".to_string()));
             if green_w > 0 {
@@ -800,12 +825,16 @@ fn edit_body(
     let frac = if expand_frac >= 0.0 {
         expand_frac.clamp(0.0, 1.0)
     } else {
-        if expanded { 1.0 } else { 0.0 }
+        if expanded {
+            1.0
+        } else {
+            0.0
+        }
     };
     let collapsed = cfg.diff_collapsed_lines;
     let cap = collapsed
-        + ((cfg.expanded_preview_max_lines.saturating_sub(collapsed)) as f64 * frac)
-            .round() as usize;
+        + ((cfg.expanded_preview_max_lines.saturating_sub(collapsed)) as f64 * frac).round()
+            as usize;
     let total = before.len() + after.len();
     // The pi-tool-display coloring model (docs/tui-tool-display-fancy.md
     // section 5.2): changed lines are shown by a darker whole-line
@@ -886,20 +915,16 @@ fn edit_body(
                 };
                 // A side is "changed" when it has a line that differs
                 // from the other side (or the other side is short).
-                let left_changed = i < before.len()
-                    && (i >= after.len() || before[i] != after[i]);
-                let right_changed = i < after.len()
-                    && (i >= before.len() || after[i] != before[i]);
+                let left_changed = i < before.len() && (i >= after.len() || before[i] != after[i]);
+                let right_changed = i < after.len() && (i >= before.len() || after[i] != before[i]);
                 // Each pane is two segments: the gutter (marker + number
                 // + separator, in the lighter diff accent so the line
                 // number reads as a highlighted bar) and the
                 // syntax-highlighted content. The gutter owns a fixed
                 // width so the `│` stays in the same column on every
                 // row.
-                let lgutter =
-                    format!("{}{} │ ", if left_changed { "▌" } else { " " }, b_num);
-                let rgutter =
-                    format!("{}{} │ ", if right_changed { "▌" } else { " " }, a_num);
+                let lgutter = format!("{}{} │ ", if left_changed { "▌" } else { " " }, b_num);
+                let rgutter = format!("{}{} │ ", if right_changed { "▌" } else { " " }, a_num);
                 // Gutter: lighter diff accent + shade on the number.
                 let lg_style = if left_changed {
                     Style::default()
@@ -933,7 +958,7 @@ fn edit_body(
                 row.extend(highlighted_pane(
                     b, lang, cfg, palette, code, lc_shade, content_w,
                 ));
-                row.push((out.clone(), " │ ".to_string()));
+                row.push((*out, " │ ".to_string()));
                 row.push((rg_style, pad_cell(rgutter, gutter_w)));
                 row.extend(highlighted_pane(
                     a, lang, cfg, palette, code, rc_shade, content_w,
@@ -960,18 +985,18 @@ fn edit_body(
                 let a = after.get(i).copied().unwrap_or("");
                 let b_exists = i < before.len();
                 let a_exists = i < after.len();
-                let changed = b_exists
-                    && a_exists
-                    && before[i] != after[i];
+                let changed = b_exists && a_exists && before[i] != after[i];
                 let ln = i + 1;
                 // Removed line (only when it exists and is not context).
-                let removed = b_exists && (changed || !a_exists || (a_exists && before[i] != after[i]));
+                let removed =
+                    b_exists && (changed || !a_exists || (a_exists && before[i] != after[i]));
                 if removed && shown < cap {
                     let num = format!("{:>num_w$}", ln, num_w = num_w);
-                    let gutter =
-                        format!("▌ {num} │ ");
-                    let mut row: BodyRow =
-                        vec![(with_shade(marker_removed, palette.color(Role::DiffRemovedBg)), gutter)];
+                    let gutter = format!("▌ {num} │ ");
+                    let mut row: BodyRow = vec![(
+                        with_shade(marker_removed, palette.color(Role::DiffRemovedBg)),
+                        gutter,
+                    )];
                     for (st, s) in highlight_diff_line(b, lang, cfg, palette) {
                         let st = if st == Style::default() { *code } else { st };
                         row.push((with_shade(st, palette.color(Role::DiffRemovedBg)), s));
@@ -983,10 +1008,11 @@ fn edit_body(
                 let added = a_exists && (changed || !b_exists);
                 if added && shown < cap {
                     let num = format!("{:>num_w$}", ln, num_w = num_w);
-                    let gutter =
-                        format!("▌ {num} │ ");
-                    let mut row: BodyRow =
-                        vec![(with_shade(marker_added, palette.color(Role::DiffAddedBg)), gutter)];
+                    let gutter = format!("▌ {num} │ ");
+                    let mut row: BodyRow = vec![(
+                        with_shade(marker_added, palette.color(Role::DiffAddedBg)),
+                        gutter,
+                    )];
                     for (st, s) in highlight_diff_line(a, lang, cfg, palette) {
                         let st = if st == Style::default() { *code } else { st };
                         row.push((with_shade(st, palette.color(Role::DiffAddedBg)), s));
@@ -1000,11 +1026,8 @@ fn edit_body(
                     if shown < cap {
                         let num = format!("{:>num_w$}", ln, num_w = num_w);
                         let gutter = format!(" {num} │ ");
-                        let mut row: BodyRow = vec![(
-                            (*out),
-                            gutter,
-                        )];
-                        for (st, s) in highlight_diff_line(&context, lang, cfg, palette) {
+                        let mut row: BodyRow = vec![((*out), gutter)];
+                        for (st, s) in highlight_diff_line(context, lang, cfg, palette) {
                             let st = if st == Style::default() { *code } else { st };
                             row.push((st, s));
                         }
@@ -1042,9 +1065,7 @@ fn highlight_diff_line(
             let mut hl = tui_highlight::Highlighter::new();
             hl.line(line, lang)
                 .into_iter()
-                .map(|(st, text)| {
-                    (crate::color::lower_style(st, palette.level()), text)
-                })
+                .map(|(st, text)| (crate::color::lower_style(st, palette.level()), text))
                 .collect()
         }
     }
@@ -1175,15 +1196,18 @@ fn bash_body(
     err: bool,
     expanded: bool,
     width: usize,
-    #[builder(default = -1.0)]
-    expand_frac: f64,
+    #[builder(default = -1.0)] expand_frac: f64,
 ) -> Vec<BodyRow> {
     let text = value.get("text").and_then(|t| t.as_str()).unwrap_or("");
     let lines: Vec<&str> = text.lines().collect();
     let so = value.get("stdout").and_then(|s| s.as_str()).unwrap_or("");
     let se = value.get("stderr").and_then(|s| s.as_str()).unwrap_or("");
     let out_count = so.lines().count() + se.lines().count();
-    let eff_expanded = if expand_frac >= 0.0 { expand_frac > 0.0 } else { expanded };
+    let eff_expanded = if expand_frac >= 0.0 {
+        expand_frac > 0.0
+    } else {
+        expanded
+    };
     let mut rows: Vec<BodyRow> = Vec::new();
     match body_plan(cfg.bash_mode, eff_expanded) {
         BodyPlan::NoBody => {
@@ -1200,12 +1224,16 @@ fn bash_body(
             let frac = if expand_frac >= 0.0 {
                 expand_frac.clamp(0.0, 1.0)
             } else {
-                if expanded { 1.0 } else { 0.0 }
+                if expanded {
+                    1.0
+                } else {
+                    0.0
+                }
             };
             let collapsed = cfg.bash_collapsed_lines;
             let cap = collapsed
-                + ((cfg.expanded_preview_max_lines.saturating_sub(collapsed)) as f64 * frac)
-                    .round() as usize;
+                + ((cfg.expanded_preview_max_lines.saturating_sub(collapsed)) as f64 * frac).round()
+                    as usize;
 
             let cmd_line = lines.first().copied().unwrap_or("");
             let output_text = if lines.len() > 1 {
@@ -1288,12 +1316,16 @@ fn generic_body(
     let frac = if expand_frac >= 0.0 {
         expand_frac.clamp(0.0, 1.0)
     } else {
-        if expanded { 1.0 } else { 0.0 }
+        if expanded {
+            1.0
+        } else {
+            0.0
+        }
     };
     let collapsed = cfg.preview_lines;
     let cap = collapsed
-        + ((cfg.expanded_preview_max_lines.saturating_sub(collapsed)) as f64 * frac)
-            .round() as usize;
+        + ((cfg.expanded_preview_max_lines.saturating_sub(collapsed)) as f64 * frac).round()
+            as usize;
     let remaining = lines.len().saturating_sub(cap);
     for l in lines.iter().take(cap) {
         rows.push(vec![(*out, l.to_string())]);
@@ -1327,7 +1359,11 @@ pub fn json_body_rows(
     let frac = if expand_frac >= 0.0 {
         expand_frac.clamp(0.0, 1.0)
     } else {
-        if expanded { 1.0 } else { 0.0 }
+        if expanded {
+            1.0
+        } else {
+            0.0
+        }
     };
     // The cap: the read preview cap for read results, the generic
     // preview cap otherwise; the expanded state lifts both to the
@@ -1341,8 +1377,8 @@ pub fn json_body_rows(
         cfg.preview_lines
     };
     let cap = collapsed_cap
-        + ((cfg.expanded_preview_max_lines.saturating_sub(collapsed_cap)) as f64 * frac)
-            .round() as usize;
+        + ((cfg.expanded_preview_max_lines.saturating_sub(collapsed_cap)) as f64 * frac).round()
+            as usize;
     let mut rows: Vec<BodyRow> = Vec::new();
     let remaining = lines.len().saturating_sub(cap);
     for l in lines.iter().take(cap) {
@@ -1426,25 +1462,25 @@ fn inline_word_diff(
 
     // Prefix tokens.
     for t in &a[..prefix] {
-        old_segs.push((old_unchanged.clone(), t.clone()));
-        new_segs.push((new_unchanged.clone(), t.clone()));
+        old_segs.push((*old_unchanged, t.clone()));
+        new_segs.push((*new_unchanged, t.clone()));
     }
     // Changed middle (old).
     let old_mid = &a[prefix..a.len() - suffix];
     if !old_mid.is_empty() {
         let mid_text: String = old_mid.iter().cloned().collect();
-        old_segs.push((changed.clone(), mid_text));
+        old_segs.push((*changed, mid_text));
     }
     // Changed middle (new).
     let new_mid = &b[prefix..b.len() - suffix];
     if !new_mid.is_empty() {
         let mid_text: String = new_mid.iter().cloned().collect();
-        new_segs.push((changed.clone(), mid_text));
+        new_segs.push((*changed, mid_text));
     }
     // Suffix tokens.
     for t in &a[a.len() - suffix..] {
-        old_segs.push((old_unchanged.clone(), t.clone()));
-        new_segs.push((new_unchanged.clone(), t.clone()));
+        old_segs.push((*old_unchanged, t.clone()));
+        new_segs.push((*new_unchanged, t.clone()));
     }
 
     // If nothing changed, just return plain segments.
@@ -1525,7 +1561,11 @@ fn wrap_hard_line(line: &str, width: usize) -> Vec<String> {
             }
             continue;
         }
-        let need = if cur.is_empty() { wlen } else { cur.chars().count() + 1 + wlen };
+        let need = if cur.is_empty() {
+            wlen
+        } else {
+            cur.chars().count() + 1 + wlen
+        };
         if need > width {
             flush(&mut cur, &mut out);
         }
@@ -1577,6 +1617,95 @@ pub fn box_bg(palette: &crate::color::Palette, err: bool) -> Color {
 /// segment, the optional dim label segment, the status segment, and
 /// the background pad; a body row is one or more segments plus the
 /// background pad.
+/// The collapsed one-line header of a tool-result panel
+/// (docs/tui-turn-fold.md, L2): the name, the optional label and
+/// the status on the panel background.
+/// No body rows and no margin rows.
+/// The browse fold renders a result in this state unless the
+/// result is individually opened (L3).
+/// The same cells form the header row of the full panel.
+pub fn header_row(
+    name: &str,
+    label: &str,
+    status: &str,
+    width: usize,
+    palette: &crate::color::Palette,
+    err: bool,
+) -> BodyRow {
+    let bg = box_bg(palette, err);
+    // The tool name: purple accent, bold.
+    // The user pass of 2026-09-14 moved the name out of the top
+    // border. Now it is the header row of the borderless panel.
+    let name_style = Style::default()
+        .fg(palette.color(crate::color::Role::ToolName))
+        .add_modifier(Modifier::BOLD)
+        .bg(bg);
+    // The status tone: the pi `error` accent on a failed result.
+    // The muted hint on a success.
+    let status_style = if err {
+        palette
+            .style(crate::color::Role::Error, Modifier::BOLD)
+            .bg(bg)
+    } else {
+        Style::default()
+            .fg(palette.color(crate::color::Role::Hint))
+            .add_modifier(Modifier::DIM)
+            .bg(bg)
+    };
+    // One cell of left padding.
+    // The panel content starts one column in, the panel spans the
+    // full `width`.
+    let inner_w = width.saturating_sub(1).max(1);
+    let mut cells: Vec<(Style, String)> = Vec::new();
+    let mut used = 0usize;
+    let mut name_cell = format!(" {name}");
+    let avail = inner_w.saturating_sub(used);
+    if name_cell.chars().count() > avail {
+        let keep = avail.saturating_sub(1);
+        let cut: String = name_cell.chars().take(keep).collect();
+        name_cell = format!("{cut}…");
+    }
+    used = used.saturating_add(name_cell.chars().count());
+    cells.push((name_style, name_cell.clone()));
+    // The optional dim label sits between the name and the status.
+    // For a read result it is the file it read.
+    if !label.is_empty() {
+        let label_style = Style::default()
+            .fg(palette.color(crate::color::Role::Hint))
+            .add_modifier(Modifier::DIM)
+            .bg(bg);
+        let mut label_cell = format!(" {label}");
+        let avail = inner_w.saturating_sub(used);
+        if label_cell.chars().count() > avail {
+            let keep = avail.saturating_sub(1);
+            let cut: String = label_cell.chars().take(keep).collect();
+            label_cell = format!("{cut}…");
+        }
+        used = used.saturating_add(label_cell.chars().count());
+        cells.push((label_style, label_cell));
+    }
+    let mut st_cell = format!("  {status}");
+    let avail = inner_w.saturating_sub(used);
+    if st_cell.chars().count() > avail {
+        let keep = avail.saturating_sub(1);
+        let cut: String = st_cell.chars().take(keep).collect();
+        st_cell = format!("{cut}…");
+    }
+    used = used.saturating_add(st_cell.chars().count());
+    cells.push((status_style, st_cell));
+    // The background pad to the panel width.
+    // Every panel row is exactly `width` columns so the band fills
+    // the transcript row edge to edge.
+    let pad = width.saturating_sub(used);
+    cells.push((Style::default().bg(bg), " ".repeat(pad)));
+    cells
+}
+
+/// One panel row is one terminal line.
+/// The margin rows are the background pad to the full width.
+/// The header row carries the name, the optional dim label and the
+/// status. A body row is one or more segments plus the background
+/// pad.
 pub fn box_rows(
     name: &str,
     label: &str,
@@ -1587,81 +1716,14 @@ pub fn box_rows(
     err: bool,
 ) -> Vec<BodyRow> {
     let bg = box_bg(palette, err);
-    // The tool name in the purple accent, bold (the user pass of
-    // 2026-09-14: the name stood in the top border before, now it is
-    // the header row of the borderless panel).
-    let name_style = Style::default()
-        .fg(palette.color(crate::color::Role::ToolName))
-        .add_modifier(Modifier::BOLD)
-        .bg(bg);
-    // The status tone: the pi `error` accent (not a hard-coded red)
-    // on a failed result; the muted hint on a success.
-    let status_style = if err {
-        palette.style(crate::color::Role::Error, Modifier::BOLD).bg(bg)
-    } else {
-        Style::default()
-            .fg(palette.color(crate::color::Role::Hint))
-            .add_modifier(Modifier::DIM)
-            .bg(bg)
-    };
-    // One cell of left padding: the panel content starts one column
-    // in, the panel spans the full `width`.
-    let inner_w = width.saturating_sub(1).max(1);
     let mut out: Vec<BodyRow> = Vec::new();
-    // One row of top margin: a background-filled empty row so the
-    // content sits inside the lighter band with breathing room above
-    // it (the 2026-09-14 user pass: the two freed border rows become
-    // one top and one bottom margin).
+    // One row of top margin: a background-filled empty row.
+    // It gives the content breathing room above it.
+    // The 2026-09-14 user pass: the two freed border rows became
+    // one top and one bottom margin.
     out.push(vec![(Style::default().bg(bg), " ".repeat(width))]);
-    // The header row: one cell of padding + the tool name + two
-    // spaces + the status + the background pad to the panel width.
-    // The old `tool:<name>` title prefix is gone: the name stands
-    // alone in the purple accent.
-    {
-        let mut cells: Vec<(Style, String)> = Vec::new();
-        let mut used = 0usize;
-        let mut name_cell = format!(" {name}");
-        let avail = inner_w.saturating_sub(used);
-        if name_cell.chars().count() > avail {
-            let keep = avail.saturating_sub(1);
-            let cut: String = name_cell.chars().take(keep).collect();
-            name_cell = format!("{cut}…");
-        }
-        used = used.saturating_add(name_cell.chars().count());
-        cells.push((name_style, name_cell.clone()));
-        // The optional dim label (for a read result, the file it
-        // read) sits between the name and the status.
-        if !label.is_empty() {
-            let label_style = Style::default()
-                .fg(palette.color(crate::color::Role::Hint))
-                .add_modifier(Modifier::DIM)
-                .bg(bg);
-            let mut label_cell = format!(" {label}");
-            let avail = inner_w.saturating_sub(used);
-            if label_cell.chars().count() > avail {
-                let keep = avail.saturating_sub(1);
-                let cut: String = label_cell.chars().take(keep).collect();
-                label_cell = format!("{cut}…");
-            }
-            used = used.saturating_add(label_cell.chars().count());
-            cells.push((label_style, label_cell));
-        }
-        let mut st_cell = format!("  {status}");
-        let avail = inner_w.saturating_sub(used);
-        if st_cell.chars().count() > avail {
-            let keep = avail.saturating_sub(1);
-            let cut: String = st_cell.chars().take(keep).collect();
-            st_cell = format!("{cut}…");
-        }
-        used = used.saturating_add(st_cell.chars().count());
-        cells.push((status_style, st_cell));
-        // The background pad to the panel width: every panel row is
-        // exactly `width` columns so the band fills the transcript
-        // row edge to edge.
-        let pad = width.saturating_sub(used);
-        cells.push((Style::default().bg(bg), " ".repeat(pad)));
-        out.push(cells);
-    }
+    // The header row: the name, the optional label, the status.
+    out.push(header_row(name, label, status, width, palette, err));
     // The body rows: one cell of left padding (the leading space of
     // the first segment) and no border cells. A body row may hold
     // several segments (the split diff panes). Each segment keeps its
@@ -1819,10 +1881,7 @@ mod tests {
 
     #[test]
     fn panel_rows_span_the_full_width_and_keep_their_bg() {
-        let body: Vec<BodyRow> = vec![
-            vec![(Style::default(), "line".to_string())],
-            vec![],
-        ];
+        let body: Vec<BodyRow> = vec![vec![(Style::default(), "line".to_string())], vec![]];
         let rows = box_rows("bash", "", "exit 0", &body, 40, &pal(), false);
         let bg = pal().color(crate::color::Role::ToolBoxBgSuccess);
         for row in &rows {

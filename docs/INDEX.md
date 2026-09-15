@@ -4,24 +4,27 @@ Authoritative entry point for any agent starting a new session in
 this repo. Read this first. It tells you what exists, what is
 shipped, and what is next.
 
-## Repo state (2026-09-11)
+## Repo state (2026-09-15)
 
 **Working.** `bin/tui` is the swappable Ratatui TUI front-end for
 the `rushi` kernel. It compiles and runs against a sibling
 `rushi-common` path dep. The PTY smoke gate is
-`scripts/tui-pty-smoke.py`.
+`scripts/tui-pty-smoke.py`. The 2026-09-15 turn-fold re-scope
+landed. The fold now applies in the main view too. Thinking blocks
+start collapsed. The final reply sits in a `Report` panel.
 
 **Split.** This repo is the TUI half of the split described in
 `tui-ext-repo-split.md`. The kernel lives in
 `../rust-unix-harness`; UI extensions live in `../rushi-exts`.
 This repo has no build-time dependency on either.
 
-**Tests.** The suite now centres on 25 insta snapshot tests
-(`bin/tui/src/snapshot_tests.rs`) that capture the rendered
-terminal grid for each major state. Pure-logic tests remain for
-event parsing, config, port-file tailing, fuzzy matching, and the
-extension-host lifecycle. Method and conventions:
-`tui-insta-snapshot-testing.md`.
+**Tests.** The suite centres on 42 insta snapshot tests.
+They live in `bin/tui/src/snapshot_tests.rs` (41) and
+`render.rs` (1), capturing the rendered terminal grid for each
+major state. The turn fold contributes five (`snap_turn_fold_*`).
+Pure-logic tests remain for event parsing, config, port-file
+tailing, fuzzy matching, and the extension-host lifecycle.
+Method and conventions: `tui-insta-snapshot-testing.md`.
 
 ## Doc inventory
 
@@ -30,6 +33,7 @@ extension-host lifecycle. Method and conventions:
 | `tui.md` | Historical | 2026-09-07 | Original TUI proposal: coupling contract, `SessionPort`, wire format. Superseded by shipped code. |
 | `tui-plan.html` | Historical | 2026-09-07 | HTML implementation plan with mermaid diagrams for the first TUI build. |
 | `NEW-refactor.md` | Implemented | 2026-09-11 | Decision to drop syntect for tree-sitter and adopt the ratatui widget ecosystem. This repo is the result. |
+| `tui-ratatui-ecosystem-audit.md` | Active | 2026-09-13 | Per-module and per-feature audit of hand-rolled vs. ratatui-ecosystem libraries. Action items with priorities. |
 | `ui-extension.md` | Active | 2026-09-07 | UI extension design: protocol, host lifecycle, trust model. The contract for `../rushi-exts`. |
 | `ui-extension-plan.md` | Plan | 2026-09-07 | Staged build plan for the extension mechanism. |
 | `tui-extension-design-review.md` | Review | 2026-09-07 | Adversarial review of `ui-extension.md`: missing `notify` op, `transform` reply correlation. |
@@ -58,9 +62,17 @@ extension-host lifecycle. Method and conventions:
 | `goal-ux.md` | Spec | 2026-09-08 | Goal UX: prompt template, TUI status, `goal pause` / `goal clear`. |
 | `goal-ui_feedback_from_human.md` | Draft | 2026-09-10 | Human-reported goal UI bugs and feature requests. |
 | `tree-ui-design-from-human.md` | Draft | 2026-09-11 | Draft for the rewind/tree browse UI. |
-| `tui_feature_requests_from_human.md` | Active | 2026-09-10 | Slim index of all TUI feature requests with ship status. |
+| `tui_feature_requests_from_human.md` | Active | 2026-09-13 | Slim index of all TUI feature requests with ship status. |
 | `tui-ext-repo-split.md` | Historical | 2026-09-08 | The repo-split execution record. Marked STALE for the re-pointing step. |
 | `tui-insta-snapshot-testing.md` | Implemented | 2026-09-11 | The insta-snapshot test method: harness, snapshot set, determinism rules. |
+| `tui-perf-freeze-investigation.md` | Investigation | 2026-09-13 | Freeze root cause: the synchronous full transcript build on each cache-key miss. |
+| `tui-large-content-research.md` | Research | 2026-09-13 | Ecosystem survey: how ratatui apps (helix, atuin, zellij, gitui, codex-TUI, yazi, more) keep large content off the render thread. Maps patterns onto Option A and B. |
+| `tui-perf-background-build-plan.md` | Implemented | 2026-09-13 | Option A background build worker plus Option B width-keyed memo. Staged and committed. Test gates in the audit doc. |
+| `tui-perf-background-build-audit.md` | Audit | 2026-09-13 | Audit of the background build plan and the independent perf test for the 100 ms frame budget. |
+| `tui-perf-streaming-incremental-plan.md` | Spec | 2026-09-13 | Incremental cache for the live streaming block (thinking + text). Eliminates per-frame O(n) re-wrap/re-highlight; subsumes the keep-highlighter-alive optimisation. |
+| `tui-preview-pane-plan.md` | Spec | 2026-09-14 | No-truncation picker preview pane: windowed highlight (only the visible window), cancellable background load, and a size guard so huge ignored files never freeze the TUI. |
+| `tui-turn-fold.md` | Implemented | 2026-09-15 | Three-level fold in both the main and browse views. Thinking starts collapsed. The final reply sits in a title-less `Report` panel. Neovim-style `z` keys. |
+| `tui-handoff-turn-fold-rescope.md` | Closed | 2026-09-15 | Open items for the turn-fold re-scope. All items resolved on 2026-09-15: the `pty_perf` test is green (fine-grained 100 ms poll), the spec and index are updated, bookkeeping is recorded, diff churn is cleaned, clippy is clean across the workspace (the 33-warning backlog was cleared). |
 
 ## Status legend
 

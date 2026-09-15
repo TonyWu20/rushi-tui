@@ -8,12 +8,12 @@
 //! The float layout lives in `crate::float`, shared with the command
 //! palette (docs/tui-command-palette.md section 11).
 
+use bon::builder;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 use ratatui::Frame;
-use bon::builder;
 
 use super::fuzzy::Snapshot;
 use super::preview::Previewer;
@@ -105,9 +105,7 @@ pub fn render_picker<'frame>(
     let input_line = Line::from(vec![
         Span::styled(
             query_display.clone(),
-            Style::default()
-                .add_modifier(Modifier::BOLD)
-                .fg(prose),
+            Style::default().add_modifier(Modifier::BOLD).fg(prose),
         ),
         Span::styled(format!("  {hints}"), hint_style),
     ]);
@@ -212,31 +210,53 @@ fn render_preview(
     preview_rect: &Rect,
     palette: &crate::color::Palette,
 ) {
-    let header = previewer.header(item).unwrap_or_else(|| item.label.clone());
-    let content = previewer.content(item, palette);
-    let pane_h = preview_rect.height as usize;
-    let start = state.preview_scroll.min(content.len());
+    // The block border eats 2 rows and 2 columns; the inner size is
+    // the window the previewer highlights (docs/tui-preview-pane-
+    // plan.md, layer 3).
+    let inner_w = preview_rect.width.saturating_sub(2).max(1) as usize;
+    let visible_h = preview_rect.height.saturating_sub(2).max(1) as usize;
+    // `preview_scroll` is in hard-line units. It clamps to the total
+    // loaded line count. An unsettled load starts at 0, and the pane
+    // shows its placeholder.
+    let scroll = state.preview_scroll;
+    let start = state
+        .preview_load
+        .total_lines()
+        .map_or(0, |t| scroll.min(t.saturating_sub(1)));
+    let window = crate::picker::preview::PreviewWindow {
+        start,
+        count: visible_h + crate::picker::preview::PREVIEW_WRAP_MARGIN,
+        width: inner_w,
+    };
+    let header = previewer
+        .header(item, &state.preview_load)
+        .unwrap_or_else(|| item.label.clone());
+    let content = previewer.content(item, &state.preview_load, &window, palette);
     // Plain (default-style) segments get the pane's plain-text tone;
     // highlighted segments keep their palette syntax styles.
     let plain_base = palette.style(crate::color::Role::PlainText, Modifier::empty());
-    let lines: Vec<Line> = content
+    let styled: Vec<Vec<crate::highlight::Seg>> = content
         .iter()
-        .skip(start)
-        .take(pane_h)
         .map(|segs| {
-            if segs.is_empty() {
-                Line::from("")
-            } else {
-                let spans: Vec<Span> = segs
-                    .iter()
-                    .map(|(s, t)| {
-                        let style = if *s == Style::default() { plain_base } else { *s };
-                        Span::styled(t.clone(), style)
-                    })
-                    .collect();
-                Line::from(spans)
-            }
+            segs.iter()
+                .map(|(s, t)| {
+                    if *s == Style::default() {
+                        (plain_base, t.clone())
+                    } else {
+                        (*s, t.clone())
+                    }
+                })
+                .collect()
         })
+        .collect();
+    let wrapped = crate::render::wrap_hard_lines(&styled, inner_w);
+    // The window already starts at `preview_scroll` in hard-line
+    // units, so no display-row translation is needed.
+    let lines: Vec<Line> = wrapped
+        .iter()
+        .flat_map(|ls| ls.iter())
+        .take(visible_h)
+        .cloned()
         .collect();
     let preview_block = Block::bordered()
         .border_type(BorderType::Rounded)
@@ -249,4 +269,3 @@ fn render_preview(
 }
 
 // ── tests ───────────────────────────────────────────────────────────
-

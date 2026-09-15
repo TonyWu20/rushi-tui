@@ -22,6 +22,7 @@
 //! Multi-select and quickfix are later adds (section 9).
 
 use super::items::FileScope;
+use super::preview::PreviewLoad;
 
 /// The outcome of a picker key press.
 #[derive(Debug, Clone, PartialEq)]
@@ -75,6 +76,10 @@ pub struct PickerState {
     /// (docs/tui-file-picker.md P9). Cycled by `Ctrl+I` / `Tab`; the
     /// caller re-collects items when it changes.
     pub scope: FileScope,
+    /// The background preview read slot (docs/tui-preview-pane-plan.md,
+    /// layer 2). Cancelled on every cursor change: an in-flight read
+    /// for the old item is dropped when the cursor moves.
+    pub preview_load: PreviewLoad,
 }
 
 impl Default for PickerState {
@@ -96,6 +101,7 @@ impl PickerState {
             preview_shown: true,
             preview_forced: false,
             scope: FileScope::Standard,
+            preview_load: PreviewLoad::None,
         }
     }
 
@@ -110,6 +116,7 @@ impl PickerState {
         self.preview_shown = true;
         self.preview_forced = false;
         self.scope = FileScope::Standard;
+        self.preview_load = PreviewLoad::None;
     }
 
     /// Close the picker without committing.
@@ -121,6 +128,14 @@ impl PickerState {
         self.preview_scroll = 0;
         self.preview_forced = false;
         self.scope = FileScope::Standard;
+        self.preview_load = PreviewLoad::None;
+    }
+
+    /// Cancel the preview load. A cursor or query change orients the
+    /// pane at a different item, so any in-flight or settled load is
+    /// stale. The caller dispatches the fresh read.
+    fn cancel_preview_load(&mut self) {
+        self.preview_load = PreviewLoad::None;
     }
 
     /// The current cursor index.
@@ -142,6 +157,7 @@ impl PickerState {
         self.cursor = 0;
         self.top = 0;
         self.preview_scroll = 0;
+        self.cancel_preview_load();
         PickAction::Query
     }
 
@@ -153,6 +169,7 @@ impl PickerState {
         }
         self.query.pop();
         self.preview_scroll = 0;
+        self.cancel_preview_load();
         PickAction::Query
     }
 
@@ -166,6 +183,7 @@ impl PickerState {
         }
         self.adjust_top(count);
         self.preview_scroll = 0;
+        self.cancel_preview_load();
         PickAction::Move
     }
 
@@ -177,6 +195,7 @@ impl PickerState {
         self.cursor = self.cursor.saturating_sub(1);
         self.adjust_top(count);
         self.preview_scroll = 0;
+        self.cancel_preview_load();
         PickAction::Move
     }
 
@@ -188,6 +207,7 @@ impl PickerState {
         self.cursor = (self.cursor + self.visible).min(count - 1);
         self.adjust_top(count);
         self.preview_scroll = 0;
+        self.cancel_preview_load();
         PickAction::Move
     }
 
@@ -199,6 +219,7 @@ impl PickerState {
         self.cursor = self.cursor.saturating_sub(self.visible);
         self.adjust_top(count);
         self.preview_scroll = 0;
+        self.cancel_preview_load();
         PickAction::Move
     }
 
@@ -210,6 +231,7 @@ impl PickerState {
         self.cursor = 0;
         self.top = 0;
         self.preview_scroll = 0;
+        self.cancel_preview_load();
         PickAction::Move
     }
 
@@ -221,6 +243,7 @@ impl PickerState {
         self.cursor = count - 1;
         self.adjust_top(count);
         self.preview_scroll = 0;
+        self.cancel_preview_load();
         PickAction::Move
     }
 
@@ -309,6 +332,7 @@ impl PickerState {
         self.cursor = 0;
         self.top = 0;
         self.preview_scroll = 0;
+        self.cancel_preview_load();
         PickAction::Recollect
     }
 
@@ -332,7 +356,11 @@ impl PickerState {
                 PickAction::Closed
             }
             Key::Enter => {
-                let idx = if count > 0 { Some(self.cursor.min(count - 1)) } else { None };
+                let idx = if count > 0 {
+                    Some(self.cursor.min(count - 1))
+                } else {
+                    None
+                };
                 self.close();
                 PickAction::Commit(idx)
             }
@@ -357,4 +385,3 @@ impl PickerState {
 }
 
 // ── tests ───────────────────────────────────────────────────────────
-
