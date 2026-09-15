@@ -23,7 +23,7 @@ The human needs a GitHub account (call it `<YOU>`) with:
 
 - git auth set up (an SSH key, or a token for HTTPS remotes),
 - the `gh` CLI logged in (`gh auth status`),
-- Nix installed.
+- Nix installed. No Nix: use the bare toolchain path in Step 2b.
 
 The agent verifies the toolchain before starting:
 
@@ -34,6 +34,7 @@ gh auth status
 
 The first `nix develop` fetches `nixpkgs`, the kernel flake, and the Lean
 toolchain, so it can take a while. That is normal, not a failure.
+On the bare path (Step 2b), a missing `nix` in that check is expected.
 
 Install the coauthor-guard hooks, once per clone:
 
@@ -83,6 +84,57 @@ checkout is needed. To move the TUI to a newer kernel rev, run
 `cargo update -p rushi-common` (the pin moves to the kernel's current
 `main` head) and re-run the Step 6 gates. Do not hand-edit the dep
 URL/branch or its lock pin.
+
+## Step 2b — Bare toolchain (no Nix)
+
+The Rust flow works without Nix. `rushi-common` is a git dep on
+`TonyWu20/rushi`, so `cargo build` needs no sibling checkouts. Install
+the pieces the dev shell would have put on PATH:
+
+- Rust via `rustup` (stable), plus the two gate components:
+  `rustup component add clippy rustfmt`.
+- A C compiler (`gcc` or `clang`): the `tui-highlight` tree-sitter
+  grammar crates compile C parser sources via the `cc` build dep.
+- `python3` (standard library only. No pip packages) for the PTY
+  smoke script.
+
+Then run the Step 3 baseline in a plain shell, with no flake:
+
+```sh
+cargo build
+cargo test -p tui
+```
+
+The Step 6 gates run unchanged:
+
+```sh
+cargo clippy --workspace --all-targets
+cargo fmt -p tui -p tui-highlight -p tui-stream-drt --check
+```
+
+The extension PTY cases still take `KERNEL_ROOT` and `EXTS_ROOT`
+(absolute paths, as in Step 3).
+
+What you skip without Nix:
+
+- The Lean DRT gate (`cd lean && lake build TuiStreamSpec
+  TuiViewportSpec TuiStreamDrt`) needs the Lean 4 v4.30 toolchain
+  (`lake`, `lean`, `z3`). It also needs the mathlib oleans the flake
+  prebuilds and exports on `LEAN_PATH`. Building those oleans by hand
+  takes hours. Skip the gate unless your PR touches `lean/`. Say so
+  in the PR body.
+- The Nix-built `rushi` launcher. Build one from a kernel checkout
+  when you want to run the TUI for real:
+
+```sh
+git clone https://github.com/TonyWu20/rushi
+cd rushi
+cargo build --release
+```
+
+The launcher finds `tui` side-by-side first, then on PATH. Put the
+launcher next to the TUI `target/release/tui` binary, or export the
+TUI `target/release` dir on PATH.
 
 ## Step 3 — Baseline build and tests
 
