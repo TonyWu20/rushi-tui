@@ -3,7 +3,8 @@
 Status: shipped (2026-09-01). The feature request lives in
 `docs/tui_feature_requests_from_human.md` (2026-09-01 item),
 closed with a Shipped note. This doc is the plan and spec;
-sections 2 and 4 are the contract.
+sections 2 and 4 are the contract. Open request (2026-09-16):
+the TUI-derived `working` status, section 13.
 
 Revision (2026-09-01, same day): the value `model` renamed to
 `wait`. The timer moved from the built-in statusline row to a
@@ -19,6 +20,13 @@ presentation in the footer, ran two values together with no
 separator, and showed the thinking level as a bare number.
 The marker's presentation is the title bit and the working
 row. The `statuses` map stays on the tick payload.
+
+Revision (2026-09-16): an open request. The `working` state
+splits the `wait` phase into two: the request pending on the
+server, and the response streaming back. The state is TUI-
+derived from the session's `.model-stream` side channel. The
+kernel emits no new marker. The `ext_status` vocabulary is
+unchanged. Detail: section 13.
 
 ## 1. Purpose and justification
 
@@ -308,6 +316,92 @@ The request item closes with a `Shipped` note.
 - A TUI restart mid-call restores the indicator.
 - The request item in `docs/tui_feature_requests_from_human.md`
   shows the `Shipped` note.
+
+## 13. Open request: the `working` status (2026-09-16)
+
+Request: `docs/tui_feature_requests_from_human.md` (2026-09-16
+item). Status: open. This section is the design. Sections 2 and 4
+are extended on ship.
+
+The `wait` state covers two sub-phases of a model call. The TUI
+shows `waiting for model · Ns` for both. The first is the sent
+request pending on the server, with no response data yet. The
+second is the response streaming back, with deltas arriving
+through the session's `.model-stream`. The request adds a
+`working` state: `wait` is the request pending, and `working` is
+the response streaming.
+
+### 13.1 Marker source (decision 2026-09-16)
+
+No kernel change. The `ext_status` marker vocabulary stays
+`wait`/`tools`. The kernel emits no `working` marker. Per the
+refinement policy (`docs/refinement-policy.md`, P1a condition 3
+and the P4 pre-test), a TUI-only effect gets a rendering rule
+instead of a protocol change. The TUI already observes both
+inputs: the last `loop_phase` value (the log) and the session's
+`.model-stream` (`docs/tui-streaming-response.md`). The `working`
+state is derived, not emitted.
+
+### 13.2 Rendering rule
+
+One new row in the section 2 state table, derived at draw time:
+
+| State | Condition | Title bit | Working row |
+|---|---|---|---|
+| `working` | loop running, last marker `wait`, and the session stream buffer is open (`App::stream_buf()` is `Some`: at least one `.model-stream` delta line was read) | `[working]` | `model working · Ns` |
+
+- The derivation applies only inside `wait`. A missing marker, or
+  a value outside `wait`/`tools`, stays `running-unknown`
+  regardless of the stream buffer.
+- `working` persists for the whole in-flight window: from the
+  first delta to settle. It includes the window after the `done`
+  line where the stream is complete but the `assistant_message`
+  has not landed. It ends when `clear_stream` runs (the settle
+  event, the file deletion, or the error/cancel path).
+- The timer keeps the `wait` marker timestamp: `N` counts the
+  whole model call from the marker, not from the first delta. The
+  P5 span-format rules apply unchanged. The number never resets
+  at the `wait` → `working` transition.
+- The stale-file case is safe: the derivation needs the running
+  bit plus the `wait` marker. A dead loop with an undeleted
+  stream file is `idle`.
+
+### 13.3 Label (decision 2026-09-16)
+
+The state is named `working` as proposed. The earlier collision
+note is withdrawn: `running-unknown` is the internal
+`PhaseState::RunningUnknown` name only. Its user-visible strings
+are `[running]` and `Working...`, and the loop emits
+`wait`/`tools` markers in practice, so that fallback has never
+surfaced for the user.
+
+### 13.4 Open point
+
+- Row label: `model working · Ns` is proposed, to pair with
+  `waiting for model · Ns`. The one-word alternative is
+  `working · Ns`.
+
+### 13.5 Tests
+
+- running + marker `wait` + open stream buffer: bit `[working]`,
+  row `model working · Ns`.
+- running + marker `wait` + no stream file: the `wait` row is
+  unchanged.
+- The `done` line is read but not settled: still `working`.
+- Settle (`assistant_message`) clears the buffer: the state falls
+  back to the marker-derived one (`wait` until the next marker,
+  `tools`, or `idle`).
+- running + no marker + open stream buffer: `running-unknown`.
+- Running bit clear + a stale stream file: `idle`.
+- A restart onto a running session with a non-empty stream file:
+  `working` on the first draw.
+- Timer continuity: `N` during `working` counts from the `wait`
+  marker. The P5 format holds.
+
+On ship: section 2 gains the `working` row. `PhaseState` gains
+the variant. `phase_state`, `phase_bit`, and `working_row_text`
+in `bin/tui/src/render.rs` gain the arm. The property table gains
+P9. No kernel diff. The e2e marker test is unchanged.
 
 ## Properties
 
