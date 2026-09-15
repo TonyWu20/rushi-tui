@@ -2,9 +2,10 @@
 # docs/tui-ext-repo-split.md). It builds the `tui` binary and the
 # std-only `tui-stream-drt` DRT mirror.
 #
-# Bootstrap split (local path-dep, no remote yet): `rushi-common` is a
-# path dep on the sibling kernel checkout (../rust-unix-harness/).
-# Flip it to a pinned git dep on the kernel repo at hosting time.
+# Kernel dep (docs/tui-ext-repo-split.md section 4, item A1):
+# `rushi-common` is a git dep on the kernel repo
+# (github.com/TonyWu20/rushi, `crates/rushi`); the exact kernel rev is
+# pinned in Cargo.lock. Move it with `cargo update -p rushi-common`.
 
 [workspace]
 resolver = "2"

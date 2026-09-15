@@ -8,19 +8,15 @@
       url = "github:nix-community/fenix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    # The Nix-built `rushi` launcher (kernel flake packages.default)
-    # and the raw kernel source tree, both fetched from GitHub so the
-    # flake is hostable (no local sibling checkout required).
+    # The Nix-built `rushi` launcher (kernel flake packages.default),
+    # fetched from GitHub so the flake is hostable (no local sibling
+    # checkout required). The `rushi-common` crate is a git dep in
+    # bin/tui/Cargo.toml (rev pinned in Cargo.lock), resolved by cargo
+    # at build time, so no raw source-tree input is needed here.
     rushi-kernel = { url = "github:TonyWu20/rushi"; };
-    # Raw source tree (not a flake) so `builtins.toPath` can hand the
-    # crates/ subtree to the sed rewrite in patchPhase.
-    rushi-kernel-src = {
-      url = "github:TonyWu20/rushi";
-      flake = false;
-    };
   };
 
-  outputs = { self, nixpkgs, flake-utils, fenix, rushi-kernel, rushi-kernel-src, ... }:
+  outputs = { self, nixpkgs, flake-utils, fenix, rushi-kernel, ... }:
     let
       # Explicit system list instead of eachDefaultSystem (same reason
       # as the kernel flake: eachDefaultSystem transposes the result and
@@ -43,19 +39,15 @@
             "rust-analyzer"
           ]);
           rushiPkg = rushi-kernel.packages.${system}.default;
-          # The kernel source tree, used to satisfy the `rushi-common`
-          # path dep. Referenced in the patchPhase string interpolation,
-          # which tracks it as a build dependency for the sed rewrite.
-          kernelSrc = builtins.toPath rushi-kernel-src;
           moldStdenv = pkgs.stdenvAdapters.useMoldLinker pkgs.clangStdenv;
 
           # TUI package ($out/bin/tui contract, ext-flake-authoring.md
           # section 5.1). `src` stays the flake source so buildRustPackage
           # can read the workspace Cargo.toml/Cargo.lock at eval time.
-          # The bootstrap sibling-kernel path dep in bin/tui/Cargo.toml is
-          # rewritten to the kernel source in patchPhase. The `tui-highlight`
-          # intra-repo path dep and the `ratatui-markdown` git dep resolve
-          # within the source tree and the cargo lock respectively.
+          # The `rushi-common` kernel git dep (rev pinned in Cargo.lock)
+          # and the `ratatui-markdown` git dep resolve via cargo at build
+          # time; the `tui-highlight` intra-repo path dep resolves within
+          # the source tree.
           tuiPkg = pkgs.rustPlatform.buildRustPackage {
             pname = "rushi-tui";
             version = "0.1.0";
@@ -63,18 +55,13 @@
             nativeBuildInputs = [ rustToolchain ];
             cargoLock = {
               lockFile = ./Cargo.lock;
-              outputHashes = { "ratatui-markdown-0.3.6" = "sha256-++qk2uLCBvak22vQf2OmGta5YaLtHCKiKAx4wLVg7yk="; };
+              outputHashes = { "ratatui-markdown-0.3.6" = "sha256-++qk2uLCBvak22vQf2OmGta5YaLtHCKiKAx4wLVg7yk="; "rushi-common-0.1.0" = "sha256-aAESt56XM4fulN+aYdm/+EauKZqgj0RiNoD1Dzza46A="; };
             };
             # Build only the `tui` binary (and its path-dep
             # `tui-highlight`); skip the standalone `tui-stream-drt`
             # DRT mirror.
             cargoBuildFlags = [ "-p" "tui" ];
             doCheck = false;
-            patchPhase = ''
-              sed -i \
-                "s|\.\./\.\./\.\./rust-unix-harness/crates/rushi|${kernelSrc}/crates/rushi|" \
-                bin/tui/Cargo.toml
-            '';
             # No installPhase override: the default cargoInstallHook copies
             # the target-<triple>/release binaries into $out/bin (it knows
             # the target subdir). The kernel's side-by-side resolver
@@ -117,7 +104,8 @@
               ];
               shellHook = ''
                 echo "rushi-tui dev shell: rust + lean + Nix-built rushi on PATH."
-                echo "Build the TUI (sibling kernel path-dep):  cargo build --release"
+                echo "Build the TUI (rushi-common git dep):      cargo build --release"
+                echo "Ext-PTY tests: KERNEL_ROOT=<kernel abs path> EXTS_ROOT=<exts abs path> cargo test -p tui"
                 echo "DRT gate:  cd lean && lake build"
                 echo "Run the PTY smoke (two-repo):"
                 echo "  EXTS_ROOT=../rushi-exts python3 scripts/tui-pty-smoke.py \\"

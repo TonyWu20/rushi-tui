@@ -20,10 +20,11 @@ agent harness. This is the dedicated TUI repo from the split described in
 `CONTRIBUTING.md` — step-by-step from a fresh clone to an open PR, written
 for first-time contributors and their coding agents.
 
-## Building (bootstrap: local path dep, no remote yet)
-`rushi-common` is a sibling **path dep** on the kernel checkout
-(`../rust-unix-harness/crates/rushi`), so build from a checkout where the
-kernel sits next to this repo:
+## Building
+`rushi-common` is a **git dep** on the kernel repo
+(`github.com/TonyWu20/rushi`). The kernel crate is the `rushi-common`
+package in `crates/rushi`. The exact kernel rev is pinned in
+`Cargo.lock`. A plain clone builds with no sibling checkouts:
 
 ```
 cargo build          # builds tui + tui-stream-drt (+ kernel rushi-common via path dep)
@@ -36,5 +37,5 @@ cd lean && lake build TuiStreamSpec TuiViewportSpec TuiStreamDrt   # 3 TUI modul
 EXTS_ROOT=../rushi-exts python3 scripts/tui-pty-smoke.py target/debug/tui <kernel-root>
 ```
 
-At hosting time, the `rushi-common` path dep flips to a pinned git dep on
-the kernel repo (docs/tui-ext-repo-split.md section 4, item A1).
+To track a newer kernel rev: `cargo update -p rushi-common`, then
+re-run the gates (docs/tui-ext-repo-split.md section 4, item A1).

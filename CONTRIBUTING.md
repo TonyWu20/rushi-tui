@@ -75,11 +75,14 @@ cargo --version
 
 prints a version.
 
-Do **not** "fix" the `rushi-common` path dep in `bin/tui/Cargo.toml`. It
-points at a sibling kernel checkout on purpose. That is bootstrap state
-from `docs/tui-ext-repo-split.md` section 4, item A1. The flake rewrites
-it in `patchPhase` for the Nix build. A plain `cargo build` inside the dev
-shell uses the sibling layout the flake provides.
+`rushi-common` in `bin/tui/Cargo.toml` is a **git dep on the kernel
+repo** (`https://github.com/TonyWu20/rushi`, the `rushi-common` package
+in `crates/rushi`). The exact kernel rev is pinned in `Cargo.lock`. A
+plain `cargo build` fetches it from GitHub, so no sibling kernel
+checkout is needed. To move the TUI to a newer kernel rev, run
+`cargo update -p rushi-common` (the pin moves to the kernel's current
+`main` head) and re-run the Step 6 gates. Do not hand-edit the dep
+URL/branch or its lock pin.
 
 ## Step 3 — Baseline build and tests
 
@@ -140,9 +143,10 @@ cargo fmt -p tui -p tui-highlight -p tui-stream-drt --check
 The bar is zero clippy warnings across the workspace (see `docs/INDEX.md`).
 A failing gate means fix the cause. Do not weaken the test to pass.
 
-Only if the maintainer asks does the PTY smoke gate run. It needs two
-sibling checkouts (`rushi-exts` and the kernel), so it is not part of the
-normal flow:
+Only if the maintainer asks does the PTY smoke gate run. It needs a
+`rushi-exts` checkout and a kernel checkout (any clone of
+`https://github.com/TonyWu20/rushi`, passed as `<kernel-root>`), so it is
+not part of the normal flow:
 
 ```sh
 EXTS_ROOT=../rushi-exts python3 scripts/tui-pty-smoke.py target/debug/tui <kernel-root>
@@ -222,8 +226,9 @@ Run this checklist before opening the PR:
 
 - Never silently decide. When two plausible approaches exist, ask the
   human which one to take.
-- Never "fix" the bootstrap `rushi-common` path dep or bump unrelated
-  dependencies.
+- Do not hand-edit the `rushi-common` git dep or its `Cargo.lock` pin.
+  To move to a newer kernel rev, run `cargo update -p rushi-common` and
+  re-run the gates. Do not bump unrelated dependencies.
 - Keep the branch focused: one change per branch.
 - If a gate fails, fix the cause. Do not loosen tests, snapshots, or
   clippy to make the gate pass.

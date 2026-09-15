@@ -7,16 +7,18 @@ shipped, and what is next.
 ## Repo state (2026-09-15)
 
 **Working.** `bin/tui` is the swappable Ratatui TUI front-end for
-the `rushi` kernel. It compiles and runs against a sibling
-`rushi-common` path dep. The PTY smoke gate is
+the `rushi` kernel. It compiles and runs against the `rushi-common`
+git dep (`github.com/TonyWu20/rushi`, rev pinned in `Cargo.lock`).
+The PTY smoke gate is
 `scripts/tui-pty-smoke.py`. The 2026-09-15 turn-fold re-scope
 landed. The fold now applies in the main view too. Thinking blocks
 start collapsed. The final reply sits in a `Report` panel.
 
 **Split.** This repo is the TUI half of the split described in
-`tui-ext-repo-split.md`. The kernel lives in
-`../rust-unix-harness`; UI extensions live in `../rushi-exts`.
-This repo has no build-time dependency on either.
+`tui-ext-repo-split.md`. The kernel crate is the `rushi-common`
+git dep on `github.com/TonyWu20/rushi`. UI extensions live in
+`../rushi-exts`. This repo has no build-time dependency on either
+sibling checkout.
 
 **Tests.** The suite centres on 42 insta snapshot tests.
 They live in `bin/tui/src/snapshot_tests.rs` (41) and
@@ -64,7 +66,7 @@ Method and conventions: `tui-insta-snapshot-testing.md`.
 | `tree-ui-design-from-human.md` | Draft | 2026-09-15 | Draft for the rewind/tree browse UI. Follow-up decisions 2026-09-15: float navigation and focus, `Tab` completion, the event-type filter, prettified tool rows, pane parse + highlight. |
 | `tree-ui-design-from-human-phase-2.md` | Spec | 2026-09-15 | Build-ready spec for the four follow-up work items plus the `Tab` reservation. Key contract, row shapes, filter cycle, pane parse + highlight, test plan. Not yet implemented. |
 | `tui_feature_requests_from_human.md` | Active | 2026-09-15 | Slim index of all TUI feature requests with ship status. |
-| `tui-ext-repo-split.md` | Historical | 2026-09-08 | The repo-split execution record. Marked STALE for the re-pointing step. |
+| `tui-ext-repo-split.md` | Historical | 2026-09-15 | The repo-split execution record. The TUI `rushi-common` git re-pointing (item A1) landed 2026-09-15. |
 | `tui-insta-snapshot-testing.md` | Implemented | 2026-09-11 | The insta-snapshot test method: harness, snapshot set, determinism rules. |
 | `tui-perf-freeze-investigation.md` | Investigation | 2026-09-13 | Freeze root cause: the synchronous full transcript build on each cache-key miss. |
 | `tui-large-content-research.md` | Research | 2026-09-13 | Ecosystem survey: how ratatui apps (helix, atuin, zellij, gitui, codex-TUI, yazi, more) keep large content off the render thread. Maps patterns onto Option A and B. |

@@ -309,8 +309,7 @@
         "fenix": "fenix",
         "flake-utils": "flake-utils",
         "nixpkgs": "nixpkgs",
-        "rushi-kernel": "rushi-kernel",
-        "rushi-kernel-src": "rushi-kernel-src"
+        "rushi-kernel": "rushi-kernel"
       }
     },
     "rushi-kernel": {
@@ -320,22 +319,6 @@
         "flake-utils": "flake-utils_4",
         "nixpkgs": "nixpkgs_5"
       },
-      "locked": {
-        "lastModified": 1789332592,
-        "narHash": "sha256-jjBs/4TR9Gj5f/1xFJfNZmwMa+XVRRXg2fkhQ8gWasY=",
-        "owner": "TonyWu20",
-        "repo": "rushi",
-        "rev": "353424a70e4372145b1b60c586be74c6fa3e5f81",
-        "type": "github"
-      },
-      "original": {
-        "owner": "TonyWu20",
-        "repo": "rushi",
-        "type": "github"
-      }
-    },
-    "rushi-kernel-src": {
-      "flake": false,
       "locked": {
         "lastModified": 1789332592,
         "narHash": "sha256-jjBs/4TR9Gj5f/1xFJfNZmwMa+XVRRXg2fkhQ8gWasY=",

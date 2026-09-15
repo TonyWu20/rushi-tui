@@ -2321,6 +2321,7 @@ checksum = "47b34b781b31e5d73e9fbc8689c70551fd1ade9a19e3e28cfec8580a79290cc4"
 [[package]]
 name = "rushi-common"
 version = "0.1.0"
+source = "git+https://github.com/TonyWu20/rushi?branch=main#3a0f148195f9ff15d418edad3f6ad0034b01a811"
 dependencies = [
  "glob",
  "libc",
