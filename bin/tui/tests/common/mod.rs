@@ -234,11 +234,53 @@ pub struct Pty {
 
 impl Pty {
     pub fn spawn(bin: &str, session: &str, cfg: &Path, extra_path: Option<&str>) -> Self {
+        Self::spawn_inner(bin, session, cfg, extra_path, None, 24, 80)
+    }
+
+    /// Spawn the TUI in a custom working directory. The picker
+    /// enumerates files from the process cwd, so tests that need a
+    /// controlled file list (e.g. the preview size-guard case) point
+    /// the child here instead of inheriting the test cwd.
+    pub fn spawn_in(
+        bin: &str,
+        session: &str,
+        cfg: &Path,
+        extra_path: Option<&str>,
+        cwd: &Path,
+    ) -> Self {
+        Self::spawn_in_sized(bin, session, cfg, extra_path, cwd, 24, 80)
+    }
+
+    /// Like `spawn_in` with a custom window size. The picker's
+    /// preview pane drops out of the float layout below 85 columns,
+    /// so the preview tests (docs/tui-preview-pane-plan.md, plan
+    /// items 2 and 8) spawn wider.
+    pub fn spawn_in_sized(
+        bin: &str,
+        session: &str,
+        cfg: &Path,
+        extra_path: Option<&str>,
+        cwd: &Path,
+        rows: usize,
+        cols: usize,
+    ) -> Self {
+        Self::spawn_inner(bin, session, cfg, extra_path, Some(cwd), rows, cols)
+    }
+
+    fn spawn_inner(
+        bin: &str,
+        session: &str,
+        cfg: &Path,
+        extra_path: Option<&str>,
+        cwd: Option<&Path>,
+        rows: usize,
+        cols: usize,
+    ) -> Self {
         let mut amaster: libc::c_int = 0;
         let mut aslave: libc::c_int = 0;
         let mut winsz = libc::winsize {
-            ws_row: 24,
-            ws_col: 80,
+            ws_row: rows as u16,
+            ws_col: cols as u16,
             ws_xpixel: 0,
             ws_ypixel: 0,
         };
@@ -270,6 +312,15 @@ impl Pty {
                     let val = CString::new(new_path).unwrap();
                     let _ = libc::setenv(key.as_ptr(), val.as_ptr(), 1);
                 }
+                if let Some(d) = cwd {
+                    let c_d = CString::new(d.to_string_lossy().as_ref()).expect("cwd has no NUL");
+                    if libc::chdir(c_d.as_ptr()) != 0 {
+                        eprintln!(
+                            "spawn_in: chdir({d:?}) failed: {}",
+                            std::io::Error::last_os_error()
+                        );
+                    }
+                }
                 let c_bin = CString::new(bin).expect("bin has no NUL");
                 let c_sess = CString::new(session).expect("session has no NUL");
                 let c_cfg = CString::new(cfg.to_string_lossy().as_ref()).expect("cfg has no NUL");
@@ -290,7 +341,7 @@ impl Pty {
         Pty {
             master: amaster,
             child: pid as i32,
-            screen: Screen::new(24, 80),
+            screen: Screen::new(rows, cols),
             reaped: false,
             pending_utf8: Vec::new(),
         }

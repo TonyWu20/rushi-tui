@@ -24,10 +24,7 @@ use crate::tool_display::BodyRow;
 /// to fit. The result is a `Vec<BodyRow>` that can be used as a tool
 /// result body, with a header line describing the image followed by
 /// the half-block pixel rows.
-pub fn image_body_rows(
-    value: &serde_json::Value,
-    width: usize,
-) -> Option<Vec<BodyRow>> {
+pub fn image_body_rows(value: &serde_json::Value, width: usize) -> Option<Vec<BodyRow>> {
     let details = value.get("details").unwrap_or(value);
     let is_image = details.get("type").and_then(|t| t.as_str()) == Some("image");
     if !is_image {
@@ -103,10 +100,7 @@ pub fn image_body_rows(
     }
 
     let label = if let Some(ref p) = path {
-        format!(
-            "image {}x{} {mime}  {p}",
-            width_px, height_px
-        )
+        format!("image {}x{} {mime}  {p}", width_px, height_px)
     } else {
         format!("image {}x{} {mime}", width_px, height_px)
     };
@@ -127,10 +121,7 @@ pub fn image_body_rows(
 /// - Both pixels bright: full block `█`.
 /// - Top is brighter: upper half block `▀`, fg=top, bg=bottom.
 /// - Bottom is brighter: lower half block `▄`, fg=bottom, bg=top.
-fn halfblock_char(
-    top: &image::Rgba<u8>,
-    bot: &image::Rgba<u8>,
-) -> (char, Color, Color) {
+fn halfblock_char(top: &image::Rgba<u8>, bot: &image::Rgba<u8>) -> (char, Color, Color) {
     let top_lum = luminance(top);
     let bot_lum = luminance(bot);
     let top_color = Color::Rgb(top[0], top[1], top[2]);
@@ -152,4 +143,3 @@ fn luminance(px: &image::Rgba<u8>) -> u32 {
     // Rec. 709 luma coefficients, scaled to 0-255.
     (px[0] as u32 * 299 + px[1] as u32 * 587 + px[2] as u32 * 114) / 1000
 }
-

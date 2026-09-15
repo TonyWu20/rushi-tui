@@ -25,8 +25,8 @@
 
 use crate::config::TuiConfig;
 use crate::event::{Event, EventKind};
-use ratatui::style::{Color, Modifier, Style};
 use bon::builder;
+use ratatui::style::{Color, Modifier, Style};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, VecDeque};
@@ -807,12 +807,24 @@ fn parse_commands_list(v: &Value) -> Option<Vec<ExtCommand>> {
             .unwrap_or(&id)
             .to_string();
         let is_setting = obj.get("kind").and_then(|k| k.as_str()) == Some("set");
-        let hint = obj.get("hint").and_then(|h| h.as_str()).unwrap_or("").to_string();
-        let help = obj.get("help").and_then(|h| h.as_str()).unwrap_or("").to_string();
+        let hint = obj
+            .get("hint")
+            .and_then(|h| h.as_str())
+            .unwrap_or("")
+            .to_string();
+        let help = obj
+            .get("help")
+            .and_then(|h| h.as_str())
+            .unwrap_or("")
+            .to_string();
         let options = obj
             .get("options")
             .and_then(|o| o.as_array())
-            .map(|arr| arr.iter().filter_map(|o| o.as_str().map(String::from)).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|o| o.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
         out.push(ExtCommand {
             id,
@@ -1297,10 +1309,7 @@ impl ExtHost {
             }
             match spawn_gen(&slot, &m, &self.config_path, &self.working_dir) {
                 Ok(gen) => {
-                    ext_log(&format!(
-                        "spawn {} gen=0 pid={}",
-                        m.name, gen.0.pid
-                    ));
+                    ext_log(&format!("spawn {} gen=0 pid={}", m.name, gen.0.pid));
                     *slot.state.lock().unwrap() = SlotState::Running;
                     // A fresh generation: the staleness clock and
                     // flag reset with it.
@@ -1371,7 +1380,10 @@ impl ExtHost {
                     continue;
                 }
             }
-            self.send_op(i, &json!({ "v": 1, "op": "event", "id": id, "event": obj, "width": width }));
+            self.send_op(
+                i,
+                &json!({ "v": 1, "op": "event", "id": id, "event": obj, "width": width }),
+            );
         }
     }
 
@@ -1708,9 +1720,7 @@ impl ExtHost {
             .map(|r| r.owner)
             .collect();
         for r in reg.reqs.values_mut() {
-            if matches!(r.state, InvokeState::Pending)
-                && now.duration_since(r.sent_at) > timeout
-            {
+            if matches!(r.state, InvokeState::Pending) && now.duration_since(r.sent_at) > timeout {
                 r.state = InvokeState::Stale;
             }
         }
@@ -1719,9 +1729,10 @@ impl ExtHost {
             let name = self.inner.slots.get(owner).map(|s| s.name.clone());
             self.drop_commands_for(owner);
             if let Some(name) = name {
-                let _ = self.inner.out_tx.try_send(ExtItem::InvokeTimeout {
-                    ext: name,
-                });
+                let _ = self
+                    .inner
+                    .out_tx
+                    .try_send(ExtItem::InvokeTimeout { ext: name });
             }
         }
     }
@@ -1729,11 +1740,7 @@ impl ExtHost {
     /// Remove the cached commands and in-flight invokes for one slot
     /// (used by [`mark_dead`] and by `poll_invokes` on timeout).
     fn drop_commands_for(&self, idx: usize) {
-        self.inner
-            .commands_cache
-            .lock()
-            .unwrap()
-            .remove(&idx);
+        self.inner.commands_cache.lock().unwrap().remove(&idx);
         {
             let mut reg = self.inner.invoke.lock().unwrap();
             for r in reg.reqs.values_mut() {
@@ -1759,13 +1766,10 @@ impl ExtHost {
                 continue;
             }
             let cmds = cache.get(i).map(|(_, c)| c.clone()).unwrap_or_default();
-            out.extend(crate::palette::items::from_extension(
-                &s.name, &cmds,
-            ));
+            out.extend(crate::palette::items::from_extension(&s.name, &cmds));
         }
         out
     }
-
 
     /// A resize re-requests every transform block: one new request
     /// per block, and the superseded request id stops matching. The
@@ -2562,7 +2566,11 @@ fn ext_log(msg: &str) {
         let _ = std::fs::create_dir_all(parent);
     }
     use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
         let _ = f.write_all(line.as_bytes());
     }
 }
@@ -2796,7 +2804,9 @@ fn mark_dead(slot: &Arc<SlotShared>, inner: &Arc<HostInner>, idx: usize) {
     inner.replies_version.fetch_add(1, Ordering::SeqCst);
     // The dead mark wipes the slot's lines cache and marks its
     // transform spans stale, so the transcript-visible data changed.
-    inner.transcript_replies_version.fetch_add(1, Ordering::SeqCst);
+    inner
+        .transcript_replies_version
+        .fetch_add(1, Ordering::SeqCst);
     // Also clear any cached commands and in-flight invokes for this slot.
     inner.commands_cache.lock().unwrap().remove(&idx);
     {
@@ -2918,10 +2928,18 @@ protocol_v = 1
         std::fs::write(ext_dir.join("ext.toml"), ext_toml).unwrap();
         let m = load_manifest(&ext_dir).unwrap();
         // The resolved command_path must be absolute and point to the binary.
-        assert!(m.command_path.is_absolute(), "resolved path must be absolute");
-        assert_eq!(m.command_path, bin_path,
-            "relative command resolves against the manifest dir");
-        assert!(m.command_path.is_file(), "resolved path points to a real file");
+        assert!(
+            m.command_path.is_absolute(),
+            "resolved path must be absolute"
+        );
+        assert_eq!(
+            m.command_path, bin_path,
+            "relative command resolves against the manifest dir"
+        );
+        assert!(
+            m.command_path.is_file(),
+            "resolved path points to a real file"
+        );
     }
 
     #[test]
@@ -3103,11 +3121,7 @@ protocol_v = 1
 
         // `only_a` from the first dir survives; `shared` is the later
         // (second-dir) entry; `only_b` from the second dir is present.
-        let names: Vec<String> = d
-            .exts
-            .iter()
-            .map(|e| e.manifest.name.clone())
-            .collect();
+        let names: Vec<String> = d.exts.iter().map(|e| e.manifest.name.clone()).collect();
         assert!(names.contains(&"only_a".to_string()), "{names:?}");
         assert!(names.contains(&"only_b".to_string()), "{names:?}");
         assert_eq!(
@@ -3120,8 +3134,14 @@ protocol_v = 1
         );
         // The surviving `shared` entry comes from the later directory.
         let shared = &d.exts[d.index_by_name["shared"]];
-        assert!(shared.manifest.manifest_path.starts_with(&global_b), "later dir wins");
-        assert_eq!(d.kind_owners.get(&EventKind::ToolResult), Some(&d.index_by_name["shared"]));
+        assert!(
+            shared.manifest.manifest_path.starts_with(&global_b),
+            "later dir wins"
+        );
+        assert_eq!(
+            d.kind_owners.get(&EventKind::ToolResult),
+            Some(&d.index_by_name["shared"])
+        );
     }
 
     #[test]
@@ -4357,10 +4377,7 @@ done
         let rv0 = host.replies_version();
 
         // A statusline content change bumps the generic version only.
-        host.reply_line(
-            0,
-            r#"{"v":1,"op":"status","lines":[["idle",{}]]}"#,
-        );
+        host.reply_line(0, r#"{"v":1,"op":"status","lines":[["idle",{}]]}"#);
         assert!(
             host.replies_version() > rv0,
             "a status reply bumps the generic version"
@@ -4381,10 +4398,7 @@ done
         );
 
         // Per-event lines feed the transcript build, so they bump it.
-        host.reply_line(
-            0,
-            r#"{"v":1,"op":"lines","event_id":1,"lines":[["a",{}]]}"#,
-        );
+        host.reply_line(0, r#"{"v":1,"op":"lines","event_id":1,"lines":[["a",{}]]}"#);
         assert!(
             host.transcript_replies_version() > tv0,
             "a lines reply must bump the transcript version"
@@ -4418,10 +4432,7 @@ done
         );
         // Every line is `pid ms msg`: three space-separated fields.
         let l = body.lines().next().unwrap();
-        assert!(
-            l.split(' ').count() >= 3,
-            "the line is pid ms msg: {l:?}"
-        );
+        assert!(l.split(' ').count() >= 3, "the line is pid ms msg: {l:?}");
 
         std::env::remove_var("TUI_EXT_LOG");
     }

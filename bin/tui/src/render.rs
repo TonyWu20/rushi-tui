@@ -253,10 +253,7 @@ fn message_box_rows(
         ]));
     } else {
         for line in content {
-            let mut cells = vec![
-                Span::styled("│", border),
-                Span::raw(" ".repeat(left_pad)),
-            ];
+            let mut cells = vec![Span::styled("│", border), Span::raw(" ".repeat(left_pad))];
             let mut content_width = 0usize;
             for span in &line.spans {
                 // Keep the span's own foreground and modifiers.
@@ -265,8 +262,7 @@ fn message_box_rows(
                 content_width += span.content.chars().count();
             }
             // Right padding to the panel edge.
-            let right_pad =
-                inner.saturating_sub(left_pad).saturating_sub(content_width);
+            let right_pad = inner.saturating_sub(left_pad).saturating_sub(content_width);
             cells.push(Span::raw(" ".repeat(right_pad)));
             cells.push(Span::styled("│", border));
             rows.push(Line::from(cells));
@@ -443,8 +439,7 @@ fn event_lines<'a>(
                         Style::default().fg(palette.thinking_tag(state.thinking_expanded));
                     let prefix = if final_report { "" } else { LABEL };
                     if state.thinking_expanded {
-                        let header =
-                            vec![Span::styled(format!("{prefix}thinking"), tag_style)];
+                        let header = vec![Span::styled(format!("{prefix}thinking"), tag_style)];
                         think_rows.push(Line::from(header));
                         let content_w = if final_report {
                             user_box_content_w(width)
@@ -666,9 +661,8 @@ fn event_lines<'a>(
                 // The one-line header. No body, no margin rows.
                 // The raw output stays the yankable source of the row
                 // (section 11.3).
-                let row = crate::tool_display::header_row(
-                    &name, label, &status, width, palette, err,
-                );
+                let row =
+                    crate::tool_display::header_row(&name, label, &status, width, palette, err);
                 let spans: Vec<Span<'static>> =
                     row.into_iter().map(|(s, t)| Span::styled(t, s)).collect();
                 out.push(Line::from(spans));
@@ -709,8 +703,9 @@ fn event_lines<'a>(
                         expand_frac,
                     );
                 }
-                let rows =
-                    crate::tool_display::box_rows(&name, label, &status, &body, width, palette, err);
+                let rows = crate::tool_display::box_rows(
+                    &name, label, &status, &body, width, palette, err,
+                );
                 // The raw output is the shareable source of a result
                 // (section 11.3). The box's first row owns it so a
                 // yank returns the full output, not the display.
@@ -1297,7 +1292,10 @@ fn wrap_styled(segs: Vec<(Style, String)>, width: usize) -> Vec<Line<'static>> {
 /// frame with the pane's current inner width is what makes the
 /// preview pane reflow when the terminal resizes instead of
 /// clipping (docs/tui-ratatui-ecosystem-audit.md §4.8).
-pub fn wrap_hard_lines(lines: &[Vec<crate::highlight::Seg>], width: usize) -> Vec<Vec<Line<'static>>> {
+pub fn wrap_hard_lines(
+    lines: &[Vec<crate::highlight::Seg>],
+    width: usize,
+) -> Vec<Vec<Line<'static>>> {
     let width = width.max(1);
     lines
         .iter()
@@ -3530,8 +3528,7 @@ fn fold_summary_line(
     state: &RenderState,
     width: usize,
 ) -> Line<'static> {
-    let mut spans: Vec<Span<'static>> =
-        vec![Span::raw(" ".repeat(width.min(GUTTER)))];
+    let mut spans: Vec<Span<'static>> = vec![Span::raw(" ".repeat(width.min(GUTTER)))];
     if !sl.text.is_empty() {
         let dim = state.palette.style(crate::color::Role::Hint, Modifier::DIM);
         // The `⎿` leader art marks the collapsed-turn tally
@@ -3654,10 +3651,10 @@ pub fn build_transcript_input(input: &TranscriptBuildInput) -> TranscriptBuild {
         if !is_rewind && !fold.visible(w) {
             continue;
         }
-        let turn_start_summary: Option<crate::fold::SummaryLine> =
-            fold.turn_for_event(w)
-                .filter(|t| w == t.start)
-                .and_then(|t| fold.collapsed_summary(events, t));
+        let turn_start_summary: Option<crate::fold::SummaryLine> = fold
+            .turn_for_event(w)
+            .filter(|t| w == t.start)
+            .and_then(|t| fold.collapsed_summary(events, t));
         if !all.is_empty() {
             all.push(Line::from(""));
             line_raw.push(None);
@@ -4734,7 +4731,10 @@ pub fn draw(
                     settled: false,
                 })
             });
-        let previewer = crate::picker::preview::FilePreviewer::new(50);
+        // The windowed preview model (docs/tui-preview-pane-plan.md):
+        // no line cap. The pane highlights the visible window of the
+        // settled background load, through the shared window LRU.
+        let previewer = crate::picker::preview::FilePreviewer::new(app.preview_cache().clone());
         let show_preview = previewer.enabled()
             && app
                 .picker_ref()
@@ -5066,10 +5066,16 @@ mod cursor_span_tests {
             .join("\n");
         // The heading marker `#` is dropped; the text "Plan" is kept.
         assert!(joined.contains("Plan"), "heading text survives: {joined:?}");
-        assert!(!joined.contains("# Plan"), "the `#` marker is dropped: {joined:?}");
+        assert!(
+            !joined.contains("# Plan"),
+            "the `#` marker is dropped: {joined:?}"
+        );
         // Inline code renders without backticks.
         assert!(joined.contains("main.rs"), "inline code text: {joined:?}");
-        assert!(!joined.contains("`main.rs`"), "backticks are stripped: {joined:?}");
+        assert!(
+            !joined.contains("`main.rs`"),
+            "backticks are stripped: {joined:?}"
+        );
         // The heading line carries the Heading style, not the thinking tone.
         let heading_line = lines
             .iter()
@@ -5134,8 +5140,15 @@ mod tool_call_line_tests {
             .loop_running(false)
             .compaction_last_open(false)
             .call();
-        let joined: String = lines.iter().map(|l| l.to_string()).collect::<Vec<_>>().join("\n");
-        assert!(joined.contains("goal_complete"), "bare tool name: {joined:?}");
+        let joined: String = lines
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            joined.contains("goal_complete"),
+            "bare tool name: {joined:?}"
+        );
         assert!(!joined.contains("tool:"), "no tool: prefix: {joined:?}");
         assert!(
             !joined.contains('"'),
@@ -5146,7 +5159,6 @@ mod tool_call_line_tests {
 
 #[cfg(test)]
 // ── issue #4: user-message box, no markers, no indent ────────────────
-
 #[cfg(test)]
 mod user_box_tests {
     use super::user_box_rows;
@@ -5154,7 +5166,11 @@ mod user_box_tests {
     use ratatui::text::{Line, Span};
 
     fn joined(lines: &[Line<'static>]) -> String {
-        lines.iter().map(|l| l.to_string()).collect::<Vec<_>>().join("\n")
+        lines
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// The user panel: rounded border, "User" title, no background
@@ -5183,10 +5199,7 @@ mod user_box_tests {
         // No background fill: every span of every row is transparent.
         for line in &lines {
             for span in &line.spans {
-                assert!(
-                    span.style.bg.is_none(),
-                    "no panel background fill: {j:?}"
-                );
+                assert!(span.style.bg.is_none(), "no panel background fill: {j:?}");
             }
         }
     }
@@ -5239,9 +5252,8 @@ mod user_box_tests {
         use std::collections::{HashMap, HashSet};
 
         let palette = Palette::builtin(Level::Rgb);
-        let tool_display = crate::tool_display::ToolDisplay::preset(
-            crate::tool_display::Preset::OpenCode,
-        );
+        let tool_display =
+            crate::tool_display::ToolDisplay::preset(crate::tool_display::Preset::OpenCode);
         let fracs: HashMap<String, f64> = HashMap::new();
         let state = RenderState {
             palette: &palette,
@@ -5268,7 +5280,11 @@ mod user_box_tests {
             .loop_running(false)
             .compaction_last_open(false)
             .call();
-        let joined = lines.iter().map(|l| l.to_string()).collect::<Vec<_>>().join("\n");
+        let joined = lines
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(
             !joined.contains("assistant"),
             "no assistant marker: {joined:?}"
@@ -5297,9 +5313,8 @@ mod user_box_tests {
         use std::collections::{HashMap, HashSet};
 
         let palette = Palette::builtin(Level::Rgb);
-        let tool_display = crate::tool_display::ToolDisplay::preset(
-            crate::tool_display::Preset::OpenCode,
-        );
+        let tool_display =
+            crate::tool_display::ToolDisplay::preset(crate::tool_display::Preset::OpenCode);
         let fracs: HashMap<String, f64> = HashMap::new();
         let state = RenderState {
             palette: &palette,
@@ -5326,8 +5341,15 @@ mod user_box_tests {
             .loop_running(false)
             .compaction_last_open(false)
             .call();
-        let joined = lines.iter().map(|l| l.to_string()).collect::<Vec<_>>().join("\n");
-        assert!(joined.contains("thinking"), "the thinking label: {joined:?}");
+        let joined = lines
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            joined.contains("thinking"),
+            "the thinking label: {joined:?}"
+        );
         // Each reasoning line carries exactly one cell of left pad, not
         // the old 12-space gutter and not the bare left edge.
         for text in ["step one", "step two"] {
@@ -5340,19 +5362,14 @@ mod user_box_tests {
                 l.starts_with(' ') && !l.starts_with("  "),
                 "one-cell left pad: {l:?}"
             );
-            assert!(
-                !l.starts_with("            "),
-                "no 12-space gutter: {l:?}"
-            );
+            assert!(!l.starts_with("            "), "no 12-space gutter: {l:?}");
             assert!(l.trim_start().starts_with(text), "{l:?}");
         }
     }
-
 }
 
 #[cfg(test)]
 // ── §4.1 table rendering fixes ──────────────────────────────────────────
-
 #[cfg(test)]
 mod table_fix_tests {
     use crate::color::{Level, Palette};
@@ -5374,11 +5391,7 @@ mod table_fix_tests {
     /// A proper GFM table (header + separator) IS detected.
     #[test]
     fn gfm_table_is_detected() {
-        let lines: Vec<&str> = vec![
-            "| Name | Value |",
-            "|------|-------|",
-            "| a    | 1     |",
-        ];
+        let lines: Vec<&str> = vec!["| Name | Value |", "|------|-------|", "| a    | 1     |"];
         assert!(
             is_table_block_start(&lines, 0),
             "header + separator must be detected"
@@ -5405,15 +5418,31 @@ mod table_fix_tests {
         let grid = table_grid(&rows, 30, &palette);
         let joined: String = grid
             .iter()
-            .map(|row| row.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>().concat())
+            .map(|row| {
+                row.iter()
+                    .map(|(_, t)| t.as_str())
+                    .collect::<Vec<_>>()
+                    .concat()
+            })
             .collect::<Vec<_>>()
             .join("\n");
         // Every word of the original cell content must be present
         // (no truncation).
         for word in [
-            "very", "long", "value", "that", "exceeds",
-            "column", "width", "comfortably", "wrap",
-            "visual", "line", "inside", "the", "box",
+            "very",
+            "long",
+            "value",
+            "that",
+            "exceeds",
+            "column",
+            "width",
+            "comfortably",
+            "wrap",
+            "visual",
+            "line",
+            "inside",
+            "the",
+            "box",
         ] {
             assert!(
                 joined.contains(word),
@@ -5428,7 +5457,10 @@ mod table_fix_tests {
         // The cell must span more than one visual line (it wrapped).
         let data_line_count = grid
             .iter()
-            .filter(|row| row.iter().any(|(_, t)| t.contains("very") || t.contains("box")))
+            .filter(|row| {
+                row.iter()
+                    .any(|(_, t)| t.contains("very") || t.contains("box"))
+            })
             .count();
         assert!(
             data_line_count >= 2,
@@ -5439,7 +5471,6 @@ mod table_fix_tests {
 
 #[cfg(test)]
 // ── §4.8 preview-pane wrapping helpers ─────────────────────────────
-
 #[cfg(test)]
 mod wrap_hard_lines_tests {
     use crate::highlight::Seg;
@@ -5448,10 +5479,7 @@ mod wrap_hard_lines_tests {
 
     fn segs(texts: &[&str]) -> Vec<Seg> {
         let s = Style::default();
-        texts
-            .iter()
-            .map(|t| (s, t.to_string()))
-            .collect()
+        texts.iter().map(|t| (s, t.to_string())).collect()
     }
 
     /// Join one hard line's display lines with a marker so wrap
@@ -6119,7 +6147,6 @@ mod stream_cache_tests {
     }
 }
 
-
 #[cfg(test)]
 mod stream_cache_independent_tests {
     //! Independent verification of the live-stream-block incremental
@@ -6470,7 +6497,11 @@ mod stream_cache_independent_tests {
             let _ = stream_block_lines(&mut app, 80, usize::MAX);
         }
         assert_eq!(join_calls(), j_warm, "idle frames must skip the O(T) join");
-        assert_eq!(parse_calls(), p_warm, "idle frames must skip the markdown re-parse");
+        assert_eq!(
+            parse_calls(),
+            p_warm,
+            "idle frames must skip the markdown re-parse"
+        );
         assert!(
             Rc::ptr_eq(&t_warm, &cache_of(&app).think_lines),
             "idle frames must reuse the cached thinking lines"
@@ -6507,13 +6538,8 @@ mod stream_cache_independent_tests {
             let think_prefix = corpus[..i * per].to_string();
             let text_prefix = text[..i * text.len() / frames].to_string();
             let t0 = Instant::now();
-            let _ = wrap_thinking_full(
-                &think_prefix,
-                79,
-                &palette,
-                style,
-                HighlightEngine::Builtin,
-            );
+            let _ =
+                wrap_thinking_full(&think_prefix, 79, &palette, style, HighlightEngine::Builtin);
             let _ = wrap_markdown_p(&text_prefix, 79, &palette, prose);
             old_ms.push(t0.elapsed().as_millis());
         }
@@ -6574,13 +6600,7 @@ mod stream_cache_independent_tests {
         // OLD idle frame: full thinking rebuild plus full markdown
         // parse.
         let t_old = Instant::now();
-        let _ = wrap_thinking_full(
-            &think,
-            79,
-            &palette,
-            style,
-            HighlightEngine::Builtin,
-        );
+        let _ = wrap_thinking_full(&think, 79, &palette, style, HighlightEngine::Builtin);
         let _ = wrap_markdown_p(&text, 79, &palette, prose);
         let old_ms = t_old.elapsed().as_millis();
 

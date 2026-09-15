@@ -12,8 +12,8 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use frizbee::{Config, Matcher};
 use super::items::PickerItem;
+use frizbee::{Config, Matcher};
 
 /// Synchronously rank `labels` against `query` using the shared
 /// frizbee ranker (docs/tui-command-palette.md section 11: the palette
@@ -148,8 +148,11 @@ fn worker_loop(
                         .map(|m| items[m.index as usize].clone())
                         .collect()
                 };
-                *snap.lock().unwrap() =
-                    Arc::new(Snapshot { items: ranked, query: full, settled: true });
+                *snap.lock().unwrap() = Arc::new(Snapshot {
+                    items: ranked,
+                    query: full,
+                    settled: true,
+                });
             }
             Cmd::Replace(new_items) => {
                 items = new_items;

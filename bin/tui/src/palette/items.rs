@@ -49,15 +49,8 @@ pub struct PaletteItem {
 /// (docs/tui-thinking-block.md section 4). The palette
 /// `thinking-level` item offers these as options; `Ctrl+L` walks the
 /// same order.
-pub const THINKING_LEVEL_ORDER: &[&str] = &[
-    "none",
-    "minimal",
-    "low",
-    "medium",
-    "high",
-    "xhigh",
-    "max",
-];
+pub const THINKING_LEVEL_ORDER: &[&str] =
+    &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 /// The built-in palette commands (docs/tui-command-palette.md section 6).
 ///

@@ -38,8 +38,7 @@ pub struct BuildResult {
 /// (docs/tui-perf-background-build-plan.md, stage 4). Each new width
 /// event resets the deadline. Only the settled width after a burst of
 /// resizes or browse toggles builds. Event-commit misses bypass it.
-pub const TRANSCRIPT_WIDTH_DEBOUNCE: std::time::Duration =
-    std::time::Duration::from_millis(75);
+pub const TRANSCRIPT_WIDTH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(75);
 
 /// Keep the newest queued build request, drop the older ones.
 pub fn coalesce(burst: Vec<BuildRequest>) -> Option<BuildRequest> {
@@ -223,7 +222,14 @@ fn worker_loop<B: Fn(&TranscriptBuildInput) -> TranscriptBuild + Send + 'static>
         }
         let req = coalesce(burst).expect("a non-empty burst coalesces to its newest");
         let built = build_with_memo(&mut memo, &req, &build);
-        if out.send(BuildResult { seq: req.seq, key: req.key, build: built }).is_err() {
+        if out
+            .send(BuildResult {
+                seq: req.seq,
+                key: req.key,
+                build: built,
+            })
+            .is_err()
+        {
             return;
         }
     }
@@ -279,11 +285,9 @@ mod tests {
         let mut events = vec![];
         for i in 0..5 {
             events.push(
-                Event::parse_line(
-                    &format!(
-                        r#"{{"v":1,"type":"user_message","ts":"t","id":"u{i}","content":"hello {i}"}}"#
-                    ),
-                )
+                Event::parse_line(&format!(
+                    r#"{{"v":1,"type":"user_message","ts":"t","id":"u{i}","content":"hello {i}"}}"#
+                ))
                 .unwrap(),
             );
         }
@@ -477,7 +481,10 @@ mod tests {
             2,
             "the third request is a memo hit, so two builds"
         );
-        assert_eq!(r3.build, r1.build, "the third result is the cached first build");
+        assert_eq!(
+            r3.build, r1.build,
+            "the third result is the cached first build"
+        );
         assert_eq!(r3.key, key(1, 80, Level::Rgb));
         drop(tx);
         t.join().unwrap();
@@ -525,11 +532,9 @@ mod tests {
         let mut events = Vec::new();
         for i in 0..30 {
             events.push(
-                Event::parse_line(
-                    &format!(
-                        r#"{{"v":1,"type":"user_message","ts":"t","id":"b{i}","content":"{payload}"}}"#
-                    ),
-                )
+                Event::parse_line(&format!(
+                    r#"{{"v":1,"type":"user_message","ts":"t","id":"b{i}","content":"{payload}"}}"#
+                ))
                 .unwrap(),
             );
         }

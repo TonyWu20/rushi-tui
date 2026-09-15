@@ -1812,8 +1812,7 @@ impl Editor {
     ) {
         let lines = self.lines.clone();
         let reg = self.register;
-        let (new_lines, cursor, enter_insert) =
-            apply_operator(op, &lines, range, registers, reg);
+        let (new_lines, cursor, enter_insert) = apply_operator(op, &lines, range, registers, reg);
         self.push_undo();
         self.lines = new_lines;
         self.row = clamp_line(self.lines.len(), cursor.0);
@@ -2847,7 +2846,11 @@ pub(crate) fn word_forward(
 /// motion did not move), an operator consumes to the end of the
 /// line. The pinned reference stops one char short. A plain
 /// movement ignores this: `go_to` clamps the column anyway.
-pub(crate) fn extend_w_eol(lines: &[String], cursor: (usize, usize), res: MotionResult) -> MotionResult {
+pub(crate) fn extend_w_eol(
+    lines: &[String],
+    cursor: (usize, usize),
+    res: MotionResult,
+) -> MotionResult {
     if res.pos.0 != cursor.0 {
         return res; // cross-line landing: the merge rule applies
     }
@@ -2871,12 +2874,7 @@ pub(crate) fn extend_w_eol(lines: &[String], cursor: (usize, usize), res: Motion
     }
 }
 
-fn next_word_start(
-    lines: &[String],
-    line: usize,
-    col: usize,
-    cls: WordClass,
-) -> (usize, usize) {
+fn next_word_start(lines: &[String], line: usize, col: usize, cls: WordClass) -> (usize, usize) {
     if lines.is_empty() {
         return (0, 0);
     }
@@ -2944,12 +2942,7 @@ pub(crate) fn word_backward(
     }
 }
 
-fn prev_word_start(
-    lines: &[String],
-    line: usize,
-    col: usize,
-    cls: WordClass,
-) -> (usize, usize) {
+fn prev_word_start(lines: &[String], line: usize, col: usize, cls: WordClass) -> (usize, usize) {
     if lines.is_empty() {
         return (0, 0);
     }
@@ -3002,12 +2995,7 @@ pub(crate) fn word_end(
     }
 }
 
-fn next_word_end(
-    lines: &[String],
-    line: usize,
-    col: usize,
-    cls: WordClass,
-) -> (usize, usize) {
+fn next_word_end(lines: &[String], line: usize, col: usize, cls: WordClass) -> (usize, usize) {
     if lines.is_empty() {
         return (0, 0);
     }
@@ -3202,7 +3190,11 @@ fn go_to_first_line(lines: &[String], _cursor: (usize, usize), count: u32) -> Mo
 }
 
 /// `G` — to the last line, or line N with a count (linewise).
-pub(crate) fn go_to_last_line(lines: &[String], _cursor: (usize, usize), count: u32) -> MotionResult {
+pub(crate) fn go_to_last_line(
+    lines: &[String],
+    _cursor: (usize, usize),
+    count: u32,
+) -> MotionResult {
     let target = clamp_line(lines.len(), (count.max(1) as usize).saturating_sub(1));
     MotionResult {
         pos: (target, first_nonblank(&lines[target])),
@@ -3212,7 +3204,11 @@ pub(crate) fn go_to_last_line(lines: &[String], _cursor: (usize, usize), count: 
 }
 
 /// `^` — the first non-blank char of the line.
-pub(crate) fn first_nonblank_motion(lines: &[String], cursor: (usize, usize), _count: u32) -> MotionResult {
+pub(crate) fn first_nonblank_motion(
+    lines: &[String],
+    cursor: (usize, usize),
+    _count: u32,
+) -> MotionResult {
     MotionResult {
         pos: (cursor.0, first_nonblank(&lines[cursor.0])),
         linewise: false,
@@ -3739,7 +3735,10 @@ pub(crate) fn is_valid_register(name: char) -> bool {
 }
 
 /// Read a register (the pi-vim `getRegister`).
-pub(crate) fn get_register(registers: &HashMap<char, RegContent>, name: char) -> Option<RegContent> {
+pub(crate) fn get_register(
+    registers: &HashMap<char, RegContent>,
+    name: char,
+) -> Option<RegContent> {
     registers.get(&name).cloned()
 }
 

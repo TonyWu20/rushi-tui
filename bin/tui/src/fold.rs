@@ -72,9 +72,7 @@ pub fn tally_text(events: &[Event], lo: usize, hi: usize) -> Option<String> {
     // Count-descending, first-appearance order on ties.
     let order: Vec<usize> = {
         let mut idx: Vec<usize> = (0..names.len()).collect();
-        idx.sort_by(|&a, &b| {
-            names[b].1.cmp(&names[a].1).then_with(|| a.cmp(&b))
-        });
+        idx.sort_by(|&a, &b| names[b].1.cmp(&names[a].1).then_with(|| a.cmp(&b)));
         idx
     };
     // The agreed tally format (docs/tui-turn-fold.md "Summary line"):
@@ -93,11 +91,7 @@ pub fn tally_text(events: &[Event], lo: usize, hi: usize) -> Option<String> {
         parts.push(format!("{} \u{d7}{}", names[i].0, names[i].1));
     }
     if msgs > 0 {
-        parts.push(format!(
-            "{} msg{}",
-            msgs,
-            if msgs == 1 { "" } else { "s" }
-        ));
+        parts.push(format!("{} msg{}", msgs, if msgs == 1 { "" } else { "s" }));
     }
     Some(parts.join(" \u{b7} "))
 }
@@ -327,7 +321,12 @@ mod tests {
 
     #[test]
     fn tool_ids_collect_the_call_ids() {
-        let events = vec![user("u1"), call("c1", "bash"), result("c1"), call("c2", "read")];
+        let events = vec![
+            user("u1"),
+            call("c1", "bash"),
+            result("c1"),
+            call("c2", "read"),
+        ];
         assert_eq!(
             tool_ids(&events, 0, 4),
             vec!["c1".to_string(), "c2".to_string()]

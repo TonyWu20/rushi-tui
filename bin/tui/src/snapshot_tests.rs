@@ -92,7 +92,9 @@ fn snap_empty_app() {
 fn snap_session_with_conversation() {
     let events = vec![
         ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u1","content":"Hello, world"}"#),
-        ev(r#"{"v":1,"type":"assistant_message","ts":"t","id":"a1","content":"Hi! How can I help?","tool_calls":[],"stop_reason":"stop","usage":{"input_tokens":10,"output_tokens":5},"reasoning":{}}"#),
+        ev(
+            r#"{"v":1,"type":"assistant_message","ts":"t","id":"a1","content":"Hi! How can I help?","tool_calls":[],"stop_reason":"stop","usage":{"input_tokens":10,"output_tokens":5},"reasoning":{}}"#,
+        ),
         ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u2","content":"What is Rust?"}"#),
     ];
     let mut app = app_with_session(events);
@@ -145,8 +147,12 @@ fn snap_pending_user_messages() {
         ev(
             r#"{"v":1,"type":"assistant_message","ts":"t","id":"a1","content":"answering…","tool_calls":[],"stop_reason":"stop","usage":{"input_tokens":10,"output_tokens":5},"reasoning":{}}"#,
         ),
-        ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u2","content":"second question","queue":"follow"}"#),
-        ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u3","content":"third question","queue":"follow"}"#),
+        ev(
+            r#"{"v":1,"type":"user_message","ts":"t","id":"u2","content":"second question","queue":"follow"}"#,
+        ),
+        ev(
+            r#"{"v":1,"type":"user_message","ts":"t","id":"u3","content":"third question","queue":"follow"}"#,
+        ),
     ];
     let mut app = app_with_session(events);
     let (host, _tmp) = empty_host();
@@ -178,7 +184,9 @@ fn snap_assistant_thinking_block() {
 #[test]
 fn snap_tool_result_collapsed() {
     let events = vec![
-        ev(r#"{"v":1,"type":"tool_call","ts":"t","id":"c1","name":"bash","arguments":{"command":"make"}}"#),
+        ev(
+            r#"{"v":1,"type":"tool_call","ts":"t","id":"c1","name":"bash","arguments":{"command":"make"}}"#,
+        ),
         ev(
             r#"{"v":1,"type":"tool_result","ts":"t","id":"c1","value":{"text":"Compiling tui v0.1.0\nFinished in 3.2s\n","exit_code":0,"stdout":"Compiling tui v0.1.0\nFinished in 3.2s\n","stderr":"","timed_out":false,"truncated":false},"is_error":false}"#,
         ),
@@ -192,7 +200,9 @@ fn snap_tool_result_collapsed() {
 #[test]
 fn snap_tool_result_expanded() {
     let events = vec![
-        ev(r#"{"v":1,"type":"tool_call","ts":"t","id":"c1","name":"bash","arguments":{"command":"make"}}"#),
+        ev(
+            r#"{"v":1,"type":"tool_call","ts":"t","id":"c1","name":"bash","arguments":{"command":"make"}}"#,
+        ),
         ev(
             r#"{"v":1,"type":"tool_result","ts":"t","id":"c1","value":{"text":"Compiling tui v0.1.0\nFinished in 3.2s\n","exit_code":0,"stdout":"Compiling tui v0.1.0\nFinished in 3.2s\n","stderr":"","timed_out":false,"truncated":false},"is_error":false}"#,
         ),
@@ -251,7 +261,9 @@ fn snap_tool_result_edit() {
 fn snap_error_event() {
     let events = vec![
         ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u1","content":"do something"}"#),
-        ev(r#"{"v":1,"type":"error","ts":"t","message":{"code":"E404","detail":"file not found"}}"#),
+        ev(
+            r#"{"v":1,"type":"error","ts":"t","message":{"code":"E404","detail":"file not found"}}"#,
+        ),
     ];
     let mut app = app_with_session(events);
     let (host, _tmp) = empty_host();
@@ -278,9 +290,9 @@ fn snap_long_transcript_scrolled_back() {
 
 #[test]
 fn snap_narrow_terminal() {
-    let events = vec![
-        ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u1","content":"Hello in a narrow pane"}"#),
-    ];
+    let events = vec![ev(
+        r#"{"v":1,"type":"user_message","ts":"t","id":"u1","content":"Hello in a narrow pane"}"#,
+    )];
     let mut app = app_with_session(events);
     let (host, _tmp) = empty_host();
     let out = render(&mut app, &host, 60, 20);
@@ -409,22 +421,32 @@ fn fold_session_events() -> Vec<Event> {
         .join("\n");
     vec![
         ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u1","content":"first question"}"#),
-        ev(r#"{"v":1,"type":"assistant_message","ts":"t","id":"a1","content":"let me look","tool_calls":[],"stop_reason":"stop"}"#),
-        ev(r#"{"v":1,"type":"tool_call","ts":"t","id":"c1","name":"bash","arguments":{"command":"ls"}}"#),
+        ev(
+            r#"{"v":1,"type":"assistant_message","ts":"t","id":"a1","content":"let me look","tool_calls":[],"stop_reason":"stop"}"#,
+        ),
+        ev(
+            r#"{"v":1,"type":"tool_call","ts":"t","id":"c1","name":"bash","arguments":{"command":"ls"}}"#,
+        ),
         ev(&format!(
             r#"{{"v":1,"type":"tool_result","ts":"t","id":"c1","value":{{"text":{},"exit_code":0,"stdout":{},"stderr":"","timed_out":false,"truncated":false}},"is_error":false}}"#,
             serde_json::to_string(&c1_body).unwrap(),
             serde_json::to_string(&c1_body).unwrap(),
         )),
-        ev(r#"{"v":1,"type":"assistant_message","ts":"t","id":"a2","content":"final one","tool_calls":[],"stop_reason":"stop"}"#),
+        ev(
+            r#"{"v":1,"type":"assistant_message","ts":"t","id":"a2","content":"final one","tool_calls":[],"stop_reason":"stop"}"#,
+        ),
         ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u2","content":"second question"}"#),
-        ev(r#"{"v":1,"type":"assistant_message","ts":"t","id":"a3","content":"thinking out loud","tool_calls":[],"stop_reason":"stop"}"#),
+        ev(
+            r#"{"v":1,"type":"assistant_message","ts":"t","id":"a3","content":"thinking out loud","tool_calls":[],"stop_reason":"stop"}"#,
+        ),
         ev(r#"{"v":1,"type":"tool_call","ts":"t","id":"c2","name":"mymcp__ext","arguments":{}}"#),
         ev(&format!(
             r#"{{"v":1,"type":"tool_result","ts":"t","id":"c2","value":{{"text":{}}},"is_error":false}}"#,
             serde_json::to_string(&c2_body).unwrap(),
         )),
-        ev(r#"{"v":1,"type":"assistant_message","ts":"t","id":"a4","content":"final two","tool_calls":[],"stop_reason":"stop"}"#),
+        ev(
+            r#"{"v":1,"type":"assistant_message","ts":"t","id":"a4","content":"final two","tool_calls":[],"stop_reason":"stop"}"#,
+        ),
     ]
 }
 
@@ -606,7 +628,9 @@ fn snap_palette_light() {
 #[test]
 fn snap_tool_display_balanced() {
     let events = vec![
-        ev(r#"{"v":1,"type":"tool_call","ts":"t","id":"c1","name":"bash","arguments":{"command":"make"}}"#),
+        ev(
+            r#"{"v":1,"type":"tool_call","ts":"t","id":"c1","name":"bash","arguments":{"command":"make"}}"#,
+        ),
         ev(
             r#"{"v":1,"type":"tool_result","ts":"t","id":"c1","value":{"text":"line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\nline11\nline12\n","exit_code":0},"is_error":false}"#,
         ),
@@ -621,7 +645,9 @@ fn snap_tool_display_balanced() {
 #[test]
 fn snap_tool_display_verbose() {
     let events = vec![
-        ev(r#"{"v":1,"type":"tool_call","ts":"t","id":"c1","name":"bash","arguments":{"command":"make"}}"#),
+        ev(
+            r#"{"v":1,"type":"tool_call","ts":"t","id":"c1","name":"bash","arguments":{"command":"make"}}"#,
+        ),
         ev(
             r#"{"v":1,"type":"tool_result","ts":"t","id":"c1","value":{"text":"line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\nline11\nline12\n","exit_code":0},"is_error":false}"#,
         ),
@@ -664,7 +690,8 @@ fn snap_markdown_headings_and_lists() {
 
 #[test]
 fn snap_markdown_code_block() {
-    let md = "Here is some code:\n\n```rust\nfn main() {\n    println!(\"hello\");\n}\n```\n\nDone.";
+    let md =
+        "Here is some code:\n\n```rust\nfn main() {\n    println!(\"hello\");\n}\n```\n\nDone.";
     let events = vec![
         ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u1","content":"show code"}"#),
         ev(&format!(
@@ -715,7 +742,10 @@ fn snap_table_pipe_not_a_table() {
     let (host, _tmp) = empty_host();
     let out = render(&mut app, &host, 80, 24);
     // The `|` line stays text — no spurious grid.
-    assert!(out.contains("|x| y => x"), "pipe line must render as prose: {out}");
+    assert!(
+        out.contains("|x| y => x"),
+        "pipe line must render as prose: {out}"
+    );
     assert!(!out.contains('┌'), "no grid border expected: {out}");
     assert!(!out.contains('└'), "no grid border expected: {out}");
     insta::assert_snapshot!(out);
@@ -746,16 +776,14 @@ fn snap_table_wide_cell_wraps() {
     ] {
         assert!(out.contains(word), "word `{word}` must survive: {out}");
     }
-    assert!(
-        !out.contains('…'),
-        "no truncation ellipsis expected: {out}"
-    );
+    assert!(!out.contains('…'), "no truncation ellipsis expected: {out}");
     insta::assert_snapshot!(out);
 }
 
 #[test]
 fn snap_markdown_inline() {
-    let md = "Use **bold text** and *italic text* and `inline code` and [a link](https://example.com).";
+    let md =
+        "Use **bold text** and *italic text* and `inline code` and [a link](https://example.com).";
     let events = vec![
         ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u1","content":"show formatting"}"#),
         ev(&format!(
@@ -797,7 +825,7 @@ fn picker_preview_wide_line_wraps_not_truncates() {
     use crate::float::compute_float_layout;
     use crate::picker::fuzzy::Snapshot;
     use crate::picker::items::PickerItem;
-    use crate::picker::preview::FilePreviewer;
+    use crate::picker::preview::{FilePreviewer, PreviewLoad, WindowCache};
     use crate::picker::render::render_picker;
     use crate::picker::state::PickerState;
     use ratatui::layout::Rect;
@@ -820,8 +848,18 @@ fn picker_preview_wide_line_wraps_not_truncates() {
     };
     let mut state = PickerState::new();
     state.open("long", 5);
+    // Prime the load slot the way the dispatch path does
+    // (docs/tui-preview-pane-plan.md, layer 2): one settled load
+    // owns the pane content.
+    state.preview_load = PreviewLoad::Settled {
+        key: file.to_str().unwrap().to_string(),
+        lines: vec![line.clone()],
+        status: None,
+        mtime: 0,
+    };
 
-    let previewer = FilePreviewer::new(50);
+    let cache = std::sync::Arc::new(std::sync::Mutex::new(WindowCache::new()));
+    let previewer = FilePreviewer::new(cache);
     let layout = compute_float_layout(Rect::new(0, 0, 100, 30), true);
     // Narrow orientation: the preview pane is 58 cells wide, 56
     // inner. The 79-char line cannot fit on one display row.
@@ -936,7 +974,9 @@ fn tree_options_at(events: Vec<Event>, seq: usize, opt: usize) -> App {
 fn two_events() -> Vec<Event> {
     vec![
         ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u1","content":"hello"}"#),
-        ev(r#"{"v":1,"type":"assistant_message","ts":"t","id":"a1","content":"hi","tool_calls":[],"stop_reason":"stop","usage":{"input_tokens":1,"output_tokens":1},"reasoning":{}}"#),
+        ev(
+            r#"{"v":1,"type":"assistant_message","ts":"t","id":"a1","content":"hi","tool_calls":[],"stop_reason":"stop","usage":{"input_tokens":1,"output_tokens":1},"reasoning":{}}"#,
+        ),
     ]
 }
 
@@ -989,7 +1029,9 @@ fn tree_rewind_on_tool_result_no_restore() {
     use crate::app::Action;
     let events = vec![
         ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u1","content":"hi"}"#),
-        ev(r#"{"v":1,"type":"tool_call","ts":"t","id":"c1","name":"bash","arguments":{"command":"ls"}}"#),
+        ev(
+            r#"{"v":1,"type":"tool_call","ts":"t","id":"c1","name":"bash","arguments":{"command":"ls"}}"#,
+        ),
         ev(r#"{"v":1,"type":"tool_result","ts":"t","id":"c1","value":"ok"}"#),
     ];
     let mut app = tree_options_at(events, 3, 1);
@@ -1019,7 +1061,10 @@ fn tree_rewind_blocked_while_loop_runs() {
     let sid = app.active().cloned().unwrap();
     app.attach_external_loop(sid);
     let actions = app.commit_palette();
-    assert!(actions.is_empty(), "busy loop yields no port action: {actions:?}");
+    assert!(
+        actions.is_empty(),
+        "busy loop yields no port action: {actions:?}"
+    );
     assert!(app.status().is_some(), "the busy hint must flash");
     assert!(
         app.palette_state().open,
@@ -1038,10 +1083,7 @@ fn tree_summarize_options_flash_pending() {
         actions.is_empty(),
         "summarize options yield no port action: {actions:?}"
     );
-    assert!(
-        app.status().is_some(),
-        "the pending-kernel hint must flash"
-    );
+    assert!(app.status().is_some(), "the pending-kernel hint must flash");
     assert!(
         app.palette_state().open,
         "the options must stay open for the fallback pick"
@@ -1075,21 +1117,43 @@ fn rewind_marker_drops_abandoned_branch() {
     use crate::render::build_transcript;
     let events = vec![
         ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u1","content":"hello"}"#),
-        ev(r#"{"v":1,"type":"assistant_message","ts":"t","id":"a1","content":"hi","tool_calls":[],"stop_reason":"stop","usage":{"input_tokens":1,"output_tokens":1},"reasoning":{}}"#),
+        ev(
+            r#"{"v":1,"type":"assistant_message","ts":"t","id":"a1","content":"hi","tool_calls":[],"stop_reason":"stop","usage":{"input_tokens":1,"output_tokens":1},"reasoning":{}}"#,
+        ),
         ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u2","content":"question"}"#),
-        ev(r#"{"v":1,"type":"rewind","ts":"t","id":"w1","target_seq":2,"mode":"on","reason":"tui_pick"}"#),
+        ev(
+            r#"{"v":1,"type":"rewind","ts":"t","id":"w1","target_seq":2,"mode":"on","reason":"tui_pick"}"#,
+        ),
     ];
     let app = app_with_session(events);
     // Events 0,1 (seqs 1..=2) are on the active path: rendered.
     let build = build_transcript(&app, 80, None);
-    assert!(build.event_line_starts[0].is_some(), "active-path event 0 must render");
-    assert!(build.event_line_starts[1].is_some(), "active-path event 1 must render");
+    assert!(
+        build.event_line_starts[0].is_some(),
+        "active-path event 0 must render"
+    );
+    assert!(
+        build.event_line_starts[1].is_some(),
+        "active-path event 1 must render"
+    );
     // Event 2 (seq 3, the abandoned "question") is off the active path.
-    assert!(build.event_line_starts[2].is_none(), "the abandoned event must be dropped");
-    assert!(!build.lines.iter().any(|l| l.to_string().contains("question")));
+    assert!(
+        build.event_line_starts[2].is_none(),
+        "the abandoned event must be dropped"
+    );
+    assert!(!build
+        .lines
+        .iter()
+        .any(|l| l.to_string().contains("question")));
     // The rewind marker stays as the fork-boundary line.
-    assert!(build.event_line_starts[3].is_some(), "the fork marker must render");
-    assert!(build.lines.iter().any(|l| l.to_string().contains("rewound to seq 2")));
+    assert!(
+        build.event_line_starts[3].is_some(),
+        "the fork marker must render"
+    );
+    assert!(build
+        .lines
+        .iter()
+        .any(|l| l.to_string().contains("rewound to seq 2")));
 }
 
 /// Live delivery of the TUI's own rewind append. The marker is not in
@@ -1102,7 +1166,9 @@ fn rewind_marker_delivered_via_watch_drops_branch() {
     use crate::render::build_transcript;
     let events = vec![
         ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u1","content":"hello"}"#),
-        ev(r#"{"v":1,"type":"assistant_message","ts":"t","id":"a1","content":"hi","tool_calls":[],"stop_reason":"stop","usage":{"input_tokens":1,"output_tokens":1},"reasoning":{}}"#),
+        ev(
+            r#"{"v":1,"type":"assistant_message","ts":"t","id":"a1","content":"hi","tool_calls":[],"stop_reason":"stop","usage":{"input_tokens":1,"output_tokens":1},"reasoning":{}}"#,
+        ),
         ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u2","content":"question"}"#),
     ];
     let mut app = app_with_session(events);
@@ -1123,11 +1189,23 @@ fn rewind_marker_delivered_via_watch_drops_branch() {
     assert!(build.event_line_starts[0].is_some(), "event 0 must render");
     assert!(build.event_line_starts[1].is_some(), "event 1 must render");
     // The abandoned user message (seq 3) is dropped from the transcript.
-    assert!(build.event_line_starts[2].is_none(), "the abandoned event must be dropped");
-    assert!(!build.lines.iter().any(|l| l.to_string().contains("question")));
+    assert!(
+        build.event_line_starts[2].is_none(),
+        "the abandoned event must be dropped"
+    );
+    assert!(!build
+        .lines
+        .iter()
+        .any(|l| l.to_string().contains("question")));
     // The marker stays as the fork-boundary line.
-    assert!(build.event_line_starts[3].is_some(), "the fork marker must render");
-    assert!(build.lines.iter().any(|l| l.to_string().contains("rewound to seq 2")));
+    assert!(
+        build.event_line_starts[3].is_some(),
+        "the fork marker must render"
+    );
+    assert!(build
+        .lines
+        .iter()
+        .any(|l| l.to_string().contains("rewound to seq 2")));
 }
 
 /// The actual draw path: `transcript_lines` is cached, so the drop must
@@ -1138,14 +1216,21 @@ fn cached_transcript_drops_offpath_after_live_marker() {
     use crate::port::{TailCursor, WatchItem};
     let events = vec![
         ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u1","content":"AAA first question"}"#),
-        ev(r#"{"v":1,"type":"assistant_message","ts":"t","id":"a1","content":"BBB first answer","tool_calls":[],"stop_reason":"stop","usage":{"input_tokens":1,"output_tokens":1},"reasoning":{}}"#),
+        ev(
+            r#"{"v":1,"type":"assistant_message","ts":"t","id":"a1","content":"BBB first answer","tool_calls":[],"stop_reason":"stop","usage":{"input_tokens":1,"output_tokens":1},"reasoning":{}}"#,
+        ),
         ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u2","content":"CCC second question"}"#),
-        ev(r#"{"v":1,"type":"assistant_message","ts":"t","id":"a2","content":"DDD second answer","tool_calls":[],"stop_reason":"stop","usage":{"input_tokens":1,"output_tokens":1},"reasoning":{}}"#),
+        ev(
+            r#"{"v":1,"type":"assistant_message","ts":"t","id":"a2","content":"DDD second answer","tool_calls":[],"stop_reason":"stop","usage":{"input_tokens":1,"output_tokens":1},"reasoning":{}}"#,
+        ),
     ];
     let mut app = app_with_session(events);
     // Prime the cache with no marker: all four events render.
     let starts = app.transcript_event_line_starts(80, None);
-    assert!(starts.iter().all(|s| s.is_some()), "no drop before the marker");
+    assert!(
+        starts.iter().all(|s| s.is_some()),
+        "no drop before the marker"
+    );
     // The marker arrives live, exactly like the tailer delivers it.
     app.on_watch_item(WatchItem::Event {
         event: ev(
@@ -1170,5 +1255,7 @@ fn cached_transcript_drops_offpath_after_live_marker() {
     let lines = app.transcript_lines(80, None);
     assert!(!lines.iter().any(|l| l.to_string().contains("CCC")));
     assert!(!lines.iter().any(|l| l.to_string().contains("DDD")));
-    assert!(lines.iter().any(|l| l.to_string().contains("rewound to seq 3")));
+    assert!(lines
+        .iter()
+        .any(|l| l.to_string().contains("rewound to seq 3")));
 }

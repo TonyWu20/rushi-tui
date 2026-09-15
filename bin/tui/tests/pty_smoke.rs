@@ -667,3 +667,142 @@ fn ext_goal_row_bare() {
     );
     assert!(double_q_quit(&mut pty, 4.0), "still running after double-q");
 }
+
+/// A fixture cwd that is not under a git worktree. `collect_in`
+/// switches to `git ls-files` when a `.git` sits up the tree. This
+/// sandbox carries a stray `.git` in /tmp, which makes git fail and
+/// the picker enumerate zero items. HOME is a clean tree, mirroring
+/// `non_git_fixture` in picker/items.rs.
+fn non_git_fix_dir() -> std::path::PathBuf {
+    let home = std::env::var("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::env::temp_dir());
+    let p = home.join(format!(".tui-preview-fix-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&p).unwrap();
+    p
+}
+
+/// Wait until the TUI reaches the idle editor. The statusline names
+/// the session, so the marker is deterministic. The picker then
+/// opens on a typed `@`.
+fn wait_ready(pty: &mut Pty, session: &str) {
+    let marker = format!("Session: {session}");
+    let missing = wait_markers(pty, &[&marker], 10.0, 10.0);
+    assert!(
+        pty.alive(),
+        "process died during startup:\n{}",
+        pty.screen.text()
+    );
+    assert!(
+        missing.is_empty(),
+        "TUI did not reach the idle editor:\n{}",
+        pty.screen.text()
+    );
+}
+
+/// Plan 8: files over `PREVIEW_MAX_BYTES` are never read. The pane
+/// shows the size-guard placeholder and the TUI stays responsive
+/// (docs/tui-preview-pane-plan.md, layer 1).
+#[test]
+fn picker_preview_size_guard_no_freeze() {
+    let tmp = tmpdir();
+    let fix = non_git_fix_dir();
+    // A 50 MiB sparse file, over the 10 MiB guard cap.
+    let mut big = std::fs::File::create(fix.join("big.log")).unwrap();
+    use std::io::Seek;
+    big.seek(std::io::SeekFrom::Start(50 * 1024 * 1024))
+        .unwrap();
+    big.set_len(50 * 1024 * 1024).unwrap();
+    drop(big);
+    std::fs::write(fix.join("small1.txt"), "alpha\n").unwrap();
+    std::fs::write(fix.join("small2.txt"), "beta\n").unwrap();
+
+    let layer = empty_layer(&tmp);
+    let (cfg, sessions) = layer_cfg(&layer, None);
+    seed_session(&sessions, "preview-guard", &[]);
+
+    // 120 cols keeps the float above the compact threshold, so the
+    // preview pane renders.
+    let mut pty = Pty::spawn_in_sized(tui_bin(), "preview-guard", &cfg, None, &fix, 24, 120);
+    wait_ready(&mut pty, "preview-guard");
+    // Open the picker. `big.log` is item 0 (alphabetical order).
+    pty.write_input(b"@");
+    pty.pump(1.0);
+    // The fixture has fewer than `PREVIEW_CUTOFF` (4) items, so force
+    // the pane on with Ctrl+P.
+    pty.write_input(b"\x10");
+    let missing = wait_markers(&mut pty, &["too large to preview"], 15.0, 10.0);
+    assert!(
+        missing.is_empty(),
+        "size-guard placeholder not shown: {missing:?}\n{}",
+        pty.screen.text()
+    );
+    assert!(pty.alive(), "process died at the size guard");
+    // Move to a small file: its content must settle, proving the TUI
+    // is not frozen by the oversized file.
+    pty.write_input(b"\x1b[B");
+    let missing = wait_markers(&mut pty, &["alpha"], 15.0, 10.0);
+    assert!(
+        missing.is_empty(),
+        "small-file content not shown after move: {missing:?}\n{}",
+        pty.screen.text()
+    );
+    assert!(pty.alive(), "process died during the pane move");
+    // Drop the leftover `@`: the quit gate wants an empty draft.
+    pty.write_input(b"\x7f");
+    pty.pump(0.3);
+    assert!(double_q_quit(&mut pty, 4.0), "still running after double-q");
+    let _ = std::fs::remove_dir_all(&fix);
+}
+
+/// Plan 2 end-to-end: a cursor move cancels the in-flight preview
+/// load. `a0.txt` is a multi-megabyte regular file, so its background
+/// read has a real in-flight window. A blocking FIFO would jam the
+/// serial worker, so the case uses a file
+/// (docs/tui-preview-pane-plan.md, layer 2).
+#[test]
+fn picker_preview_cancel_inflight() {
+    let tmp = tmpdir();
+    let fix = non_git_fix_dir();
+    // ~3.2 MB: a real background read, still under the 10 MiB cap.
+    let filler: String = "filler-line-0123456789\n".repeat(150_000);
+    std::fs::write(fix.join("a0.txt"), format!("a0-head-marker\n{filler}")).unwrap();
+    std::fs::write(fix.join("b1.txt"), "b-line-1\nb-line-2\n").unwrap();
+
+    let layer = empty_layer(&tmp);
+    let (cfg, sessions) = layer_cfg(&layer, None);
+    seed_session(&sessions, "preview-cancel", &[]);
+
+    let mut pty = Pty::spawn_in_sized(tui_bin(), "preview-cancel", &cfg, None, &fix, 24, 120);
+    wait_ready(&mut pty, "preview-cancel");
+    // `a0.txt` is item 0 (alphabetical order): its read is in flight
+    // right after the picker opens.
+    pty.write_input(b"@");
+    let missing = wait_markers(&mut pty, &["a0.txt", "b1.txt"], 10.0, 10.0);
+    assert!(
+        missing.is_empty(),
+        "fixture files not listed: {missing:?}\n{}",
+        pty.screen.text()
+    );
+    // Fewer than `PREVIEW_CUTOFF` items: force the pane on, then move
+    // down so the `a0` load is cancelled and `b1` dispatches.
+    pty.write_input(b"\x10");
+    pty.write_input(b"\x1b[B");
+    let missing = wait_markers(&mut pty, &["b-line-1"], 20.0, 10.0);
+    assert!(
+        missing.is_empty(),
+        "new item content not shown after cancel: {missing:?}\n{}",
+        pty.screen.text()
+    );
+    let text = pty.screen.text().to_string();
+    assert!(
+        !text.contains("a0-head-marker"),
+        "stale item content still visible after cancel:\n{text}"
+    );
+    assert!(pty.alive(), "process died during the cancel");
+    // Drop the leftover `@` so the quit gate (empty draft) opens.
+    pty.write_input(b"\x7f");
+    pty.pump(0.3);
+    assert!(double_q_quit(&mut pty, 4.0), "still running after double-q");
+    let _ = std::fs::remove_dir_all(&fix);
+}

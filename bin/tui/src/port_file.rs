@@ -83,8 +83,7 @@ impl FileSessionPort {
             // read-only store path; the loop's cwd (and so its
             // relative session paths and tool working directories)
             // must stay in the user's project.
-            working_dir: std::env::current_dir()
-                .unwrap_or_else(|_| PathBuf::from(".")),
+            working_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             config_path: cfg.config_path.clone(),
         }
     }
@@ -177,8 +176,7 @@ fn tail_session(path: PathBuf, start: TailCursor, tx: SyncSender<WatchItem>) {
     // directory-level events fire faster than the tailer can act.
     // `None` means the backend was unavailable: poll on the fixed
     // interval instead.
-    let (notify_tx, notify_rx) =
-        std::sync::mpsc::channel::<DebounceEventResult>();
+    let (notify_tx, notify_rx) = std::sync::mpsc::channel::<DebounceEventResult>();
     let mut debouncer: Option<notify_debouncer_mini::Debouncer<_>> =
         new_debouncer(NOTIFY_DEBOUNCE, notify_tx).ok();
     if let Some(d) = debouncer.as_mut() {
@@ -527,10 +525,9 @@ impl SessionPort for FileSessionPort {
         // Additive types (P1b) are not in the kernel's closed set and
         // flow through without validation.
         if rushi_common::event::EVENT_TYPES.contains(&ty) {
-            rushi_common::event::parse_event(&json_line)
-                .map_err(|e| BusError::InvalidEvent {
-                    reason: format!("typed event validation failed: {e}"),
-                })?;
+            rushi_common::event::parse_event(&json_line).map_err(|e| BusError::InvalidEvent {
+                reason: format!("typed event validation failed: {e}"),
+            })?;
         }
 
         let session_dir = self.session_dir(session)?;
@@ -873,7 +870,6 @@ fn pid_is_loop(pid: i32, session: &str) -> bool {
         .any(|arg| arg == session.as_bytes())
 }
 
-
 impl TailCursor {
     /// Private constructor used by the port; the TUI only ever uses
     /// `start()` / `end()` / cursors returned by the port itself.
@@ -1110,7 +1106,10 @@ mod tests {
             .args(["bash", "-c", &inner, "s-probe"])
             .spawn()
             .unwrap();
-        let mut guard = LoopGroupGuard { child: Some(child), leader: 0 };
+        let mut guard = LoopGroupGuard {
+            child: Some(child),
+            leader: 0,
+        };
         for _ in 0..100 {
             if pid_file.exists() {
                 break;
@@ -1174,7 +1173,10 @@ mod tests {
             .args(["bash", "-c", &inner, "s1_h1"])
             .spawn()
             .unwrap();
-        let mut guard = LoopGroupGuard { child: Some(child), leader: 0 };
+        let mut guard = LoopGroupGuard {
+            child: Some(child),
+            leader: 0,
+        };
         for _ in 0..100 {
             if pid_file.exists() {
                 break;
@@ -1222,7 +1224,10 @@ mod tests {
             .args(["bash", "-c", &inner, "s-reattach"])
             .spawn()
             .unwrap();
-        let mut guard = LoopGroupGuard { child: Some(child), leader: 0 };
+        let mut guard = LoopGroupGuard {
+            child: Some(child),
+            leader: 0,
+        };
         // Wait for the leader to record its pid.
         for _ in 0..100 {
             if pid_file.exists() {
@@ -1476,8 +1481,6 @@ mod tests {
         block_on(&rt, c.port.append_event(&SessionId::new("s1"), &novel)).unwrap();
     }
 
-
-
     #[test]
     fn ext_status_producer_event_passes_schema_and_appends() {
         // G3: with the schema file present, the typed envelope from
@@ -1522,8 +1525,10 @@ mod tests {
         // Missing `value` fails typed validation.
         let missing_value = serde_json::json!({"v":1,"type":"ext_status","ts":"t","id":"vim_mode"});
         let json_line2 = serde_json::to_string(&missing_value).unwrap();
-        assert!(rushi_common::event::parse_event(&json_line2).is_err(),
-            "a missing `value` must fail typed validation");
+        assert!(
+            rushi_common::event::parse_event(&json_line2).is_err(),
+            "a missing `value` must fail typed validation"
+        );
     }
 
     #[test]
@@ -1704,12 +1709,10 @@ mod tests {
 
     #[test]
     fn spawn_loop_streams_lines_and_reports_exit() {
-        let c = make_cfg(
-            Some((
-                "bash",
-                vec!["-c", "echo out-line; echo err-line >&2; exit 3"],
-            )),
-        );
+        let c = make_cfg(Some((
+            "bash",
+            vec!["-c", "echo out-line; echo err-line >&2; exit 3"],
+        )));
         let rt = runtime();
         let sid = SessionId::new("s9");
         let handle = block_on(&rt, c.port.spawn_loop(&sid)).unwrap();
@@ -1826,7 +1829,12 @@ mod tests {
         const N: usize = 300; // > TAIL_CAPACITY (256)
         let c = make_cfg(None);
         std::fs::create_dir_all(c.dir.path().join("sessions").join("burst")).unwrap();
-        let path = c.dir.path().join("sessions").join("burst").join("events.jsonl");
+        let path = c
+            .dir
+            .path()
+            .join("sessions")
+            .join("burst")
+            .join("events.jsonl");
 
         let sid = SessionId::new("burst");
         let rx = c.port.watch(&sid, TailCursor::start());
@@ -1863,7 +1871,8 @@ mod tests {
                     let now = std::time::Instant::now();
                     match quiet_since {
                         Some(q)
-                            if got.len() == N && now.duration_since(q) >= Duration::from_millis(500) =>
+                            if got.len() == N
+                                && now.duration_since(q) >= Duration::from_millis(500) =>
                         {
                             break
                         }
@@ -1883,10 +1892,7 @@ mod tests {
             // Match the quoted content so "line 42" cannot satisfy the
             // check for index 4 (a prefix would make the order test vacuous).
             let want = format!("\"line {i}\"");
-            assert!(
-                g.contains(&want),
-                "order broke at index {i}: {g}"
-            );
+            assert!(g.contains(&want), "order broke at index {i}: {g}");
         }
         drop(rx);
     }
@@ -1899,7 +1905,12 @@ mod tests {
     #[test]
     fn watch_inotify_append_delivered_before_fallback_tick() {
         let c = make_cfg(None);
-        let path = c.dir.path().join("sessions").join("speed").join("events.jsonl");
+        let path = c
+            .dir
+            .path()
+            .join("sessions")
+            .join("speed")
+            .join("events.jsonl");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
@@ -1924,12 +1935,16 @@ mod tests {
                     elapsed < Duration::from_millis(500),
                     "append should be delivered in <500 ms via inotify, took {elapsed:?}"
                 );
-                assert!(event.compact().contains("\"fast\""), "{:?}", event.compact());
+                assert!(
+                    event.compact().contains("\"fast\""),
+                    "{:?}",
+                    event.compact()
+                );
             }
             Ok(other) => panic!("expected Event, got {other:?}"),
-            Err(e) => panic!(
-                "event not delivered within 500 ms: {e:?} — inotify wake may not be active"
-            ),
+            Err(e) => {
+                panic!("event not delivered within 500 ms: {e:?} — inotify wake may not be active")
+            }
         }
         drop(rx);
     }
@@ -1938,7 +1953,12 @@ mod tests {
     fn tailer_thread_exits_when_receiver_dropped() {
         let c = make_cfg(None);
         std::fs::create_dir_all(c.dir.path().join("sessions").join("leak")).unwrap();
-        let path = c.dir.path().join("sessions").join("leak").join("events.jsonl");
+        let path = c
+            .dir
+            .path()
+            .join("sessions")
+            .join("leak")
+            .join("events.jsonl");
         std::fs::write(&path, "").unwrap();
 
         let sid = SessionId::new("leak");
@@ -1970,7 +1990,12 @@ mod tests {
     fn read_tail_returns_disconnected_when_receiver_dropped() {
         let c = make_cfg(None);
         std::fs::create_dir_all(c.dir.path().join("sessions").join("dc")).unwrap();
-        let path = c.dir.path().join("sessions").join("dc").join("events.jsonl");
+        let path = c
+            .dir
+            .path()
+            .join("sessions")
+            .join("dc")
+            .join("events.jsonl");
         std::fs::write(
             &path,
             r#"{"v":1,"type":"user_message","ts":"t","content":"x"}

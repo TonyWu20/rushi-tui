@@ -4,11 +4,11 @@
 //! It never decides where the float is placed — the container in
 //! `render::draw` owns placement, mirroring the picker float.
 
+use bon::builder;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 use ratatui::Frame;
-use bon::builder;
 
 use crate::float::FloatLayout;
 use crate::palette::items::PaletteItem;
@@ -64,13 +64,7 @@ pub fn render_palette<'frame>(
     // The preview pane, if present.
     if let Some(preview_rect) = layout.preview {
         if let Some(item) = items.get(state.cursor()) {
-            render_preview_pane(
-                f,
-                item,
-                state,
-                &preview_rect,
-                palette,
-            );
+            render_preview_pane(f, item, state, &preview_rect, palette);
         }
     }
 
@@ -83,9 +77,7 @@ pub fn render_palette<'frame>(
     let input_line = Line::from(vec![
         Span::styled(
             query_display.clone(),
-            Style::default()
-                .add_modifier(Modifier::BOLD)
-                .fg(prose),
+            Style::default().add_modifier(Modifier::BOLD).fg(prose),
         ),
         Span::styled(format!("  {hints}"), hint_style),
     ]);
@@ -142,8 +134,11 @@ fn render_list(
 
             // Truncate the label to fit.
             let label_display = if item.label.chars().count() > max_chars {
-                let head: String =
-                    item.label.chars().take(max_chars.saturating_sub(1)).collect();
+                let head: String = item
+                    .label
+                    .chars()
+                    .take(max_chars.saturating_sub(1))
+                    .collect();
                 format!("{head}…")
             } else {
                 item.label.clone()
@@ -165,9 +160,7 @@ fn render_list(
             }
 
             // For Set items, show the current value in the hint column.
-            if matches!(item.kind, crate::palette::items::CmdKind::Set)
-                && item.options.is_empty()
-            {
+            if matches!(item.kind, crate::palette::items::CmdKind::Set) && item.options.is_empty() {
                 // Handled above via item.hint
             }
 
@@ -177,9 +170,7 @@ fn render_list(
 
     let list_block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(
-            palette.color(crate::color::Role::Status),
-        ))
+        .border_style(Style::default().fg(palette.color(crate::color::Role::Status)))
         .title(Line::from(Span::styled(
             "commands",
             Style::default().fg(palette.color(crate::color::Role::Hint)),
@@ -207,17 +198,13 @@ fn render_preview_pane(
     // (left + right).
     let visible_h = pane_h.saturating_sub(2).max(1);
     let inner_w = (preview_rect.width as usize).saturating_sub(2).max(1);
-    let plain_base = palette.style(
-        crate::color::Role::PlainText,
-        Modifier::empty(),
-    );
+    let plain_base = palette.style(crate::color::Role::PlainText, Modifier::empty());
     // Plain (default-style) segments get the pane's plain-text tone;
     // highlighted segments keep their palette styles.
     let styled: Vec<Vec<crate::highlight::Seg>> = content
         .iter()
         .map(|segs| {
-            segs
-                .iter()
+            segs.iter()
                 .map(|(s, t)| {
                     if *s == Style::default() {
                         (plain_base, t.clone())
@@ -237,11 +224,11 @@ fn render_preview_pane(
     // option is at hard-line index `option_cursor`. If it falls
     // outside the visible display-row window, adjust `preview_scroll`.
     if !item.options.is_empty() {
-        let sel = state.option_cursor.min(item.options.len().saturating_sub(1));
+        let sel = state
+            .option_cursor
+            .min(item.options.len().saturating_sub(1));
         let sel_disp = crate::render::hard_line_display_start(&wrapped, sel);
-        let top = state
-            .preview_scroll
-            .min(content.len().saturating_sub(1));
+        let top = state.preview_scroll.min(content.len().saturating_sub(1));
         let top_disp = crate::render::hard_line_display_start(&wrapped, top);
         let bottom_disp = top_disp + visible_h;
         if sel_disp < top_disp {
@@ -266,13 +253,10 @@ fn render_preview_pane(
 
     let preview_block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(
-            palette.color(crate::color::Role::Status),
-        ))
+        .border_style(Style::default().fg(palette.color(crate::color::Role::Status)))
         .title(Line::from(Span::styled(
             header,
             Style::default().fg(palette.color(crate::color::Role::Hint)),
         )));
     f.render_widget(Paragraph::new(lines).block(preview_block), *preview_rect);
 }
-

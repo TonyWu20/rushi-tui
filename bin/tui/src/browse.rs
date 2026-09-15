@@ -26,7 +26,8 @@ pub const SCROLLOFF: usize = 3;
 pub const COUNT_CAP: u32 = 99_999;
 /// The one-line status hint of the key table (section 4.4, the
 /// section 11.4 growth: the select-and-yank rows).
-pub const BROWSE_HINT: &str = "browse: v select, y yank, yy lines, yw word, ye end, b back, ss leave";
+pub const BROWSE_HINT: &str =
+    "browse: v select, y yank, yy lines, yw word, ye end, b back, ss leave";
 
 /// One search direction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -250,13 +251,11 @@ impl Browse {
     /// coordinates. The active end is the cursor; `None` outside
     /// visual / linewise visual.
     pub fn visual_selection(&self) -> Option<VisualSelection> {
-        self.visual
-            .as_ref()
-            .map(|s| VisualSelection {
-                anchor: s.anchor,
-                active: (self.line, self.col),
-                linewise: s.linewise,
-            })
+        self.visual.as_ref().map(|s| VisualSelection {
+            anchor: s.anchor,
+            active: (self.line, self.col),
+            linewise: s.linewise,
+        })
     }
 
     /// The `[tui] clipboard = "unnamed"` flag (section 11.3): set at
@@ -555,7 +554,11 @@ impl Browse {
                 // Any other key closes the line and acts.
                 _ => TypeKeyOutcome::Pass,
             },
-            Typing::Search { dir, mut input, origin } => match key {
+            Typing::Search {
+                dir,
+                mut input,
+                origin,
+            } => match key {
                 Key::Char(c) => {
                     input.push(c);
                     self.search.forward = dir == Dir::Forward;
@@ -568,12 +571,9 @@ impl Browse {
                             self.search.re_version += 1;
                             self.search.pattern = Some(input.clone());
                             self.search.active = true;
-                            if let Some(m) = next_match(
-                                v.texts,
-                                self.search.re.as_ref().unwrap(),
-                                origin,
-                                dir,
-                            ) {
+                            if let Some(m) =
+                                next_match(v.texts, self.search.re.as_ref().unwrap(), origin, dir)
+                            {
                                 self.search.active_match = Some(m);
                                 self.line = m.0;
                                 self.col = m.1;
@@ -618,7 +618,9 @@ impl Browse {
                             line: self.line,
                             col: self.col,
                         });
-                        if let Some(m) = next_match(v.texts, self.search.re.as_ref().unwrap(), origin, dir) {
+                        if let Some(m) =
+                            next_match(v.texts, self.search.re.as_ref().unwrap(), origin, dir)
+                        {
                             self.search.active_match = Some(m);
                             self.line = m.0;
                             self.col = m.1;
@@ -930,13 +932,21 @@ impl Browse {
                 // digit only once a count has started; a bare `0`
                 // is the line-start motion below.
                 d @ '0'..='9' if d != '0' || self.has_count => {
-                    self.pending =
-                        (self.pending * 10 + (d as u32 - '0' as u32)).min(COUNT_CAP);
+                    self.pending = (self.pending * 10 + (d as u32 - '0' as u32)).min(COUNT_CAP);
                     self.has_count = true;
                     return None;
                 }
-                m @ 'j' | m @ 'k' | m @ 'h' | m @ 'l' | m @ 'w' | m @ 'e'
-                | m @ 'b' | m @ '0' | m @ '^' | m @ '$' | m @ 'G' => {
+                m @ 'j'
+                | m @ 'k'
+                | m @ 'h'
+                | m @ 'l'
+                | m @ 'w'
+                | m @ 'e'
+                | m @ 'b'
+                | m @ '0'
+                | m @ '^'
+                | m @ '$'
+                | m @ 'G' => {
                     self.yank_motion(m, v, registers);
                     return None;
                 }
@@ -1080,8 +1090,11 @@ impl Browse {
                     if c == '0' {
                         self.col = 0;
                     } else {
-                        let res =
-                            crate::vim_editor::first_nonblank_motion(v.texts, (self.line, self.col), 1);
+                        let res = crate::vim_editor::first_nonblank_motion(
+                            v.texts,
+                            (self.line, self.col),
+                            1,
+                        );
                         let len = v.texts.get(self.line).map(|t| line_len(t)).unwrap_or(0);
                         self.col = res.pos.1.min(len);
                     }
@@ -1106,12 +1119,8 @@ impl Browse {
                         self.clamp_to_line(v);
                         // Seed the view at the top; the scrolloff
                         // margins apply (section 4.5).
-                        *v.scroll = follow_view(
-                            v.total,
-                            v.h,
-                            self.line,
-                            v.total.saturating_sub(v.h),
-                        );
+                        *v.scroll =
+                            follow_view(v.total, v.h, self.line, v.total.saturating_sub(v.h));
                     }
                 } else {
                     self.pending_g = true;
@@ -1144,7 +1153,9 @@ impl Browse {
                 self.pending = 0;
                 self.has_count = false;
                 self.pending_g = false;
-                self.typing = Some(Typing::Goto { digits: String::new() });
+                self.typing = Some(Typing::Goto {
+                    digits: String::new(),
+                });
                 None
             }
             '/' => {
@@ -1209,10 +1220,7 @@ impl Browse {
                 // The anchor/active-end swap: the selection inverts
                 // around the cursor (the vim `o` / `O`).
                 if let Some(sel) = self.visual.as_mut() {
-                    let (l, c) = std::mem::replace(
-                        &mut sel.anchor,
-                        (self.line, self.col),
-                    );
+                    let (l, c) = std::mem::replace(&mut sel.anchor, (self.line, self.col));
                     self.line = l;
                     self.col = c;
                     if sel.linewise {
@@ -1275,7 +1283,10 @@ impl Browse {
         } else {
             *v.scroll = v.scroll.saturating_sub(dist);
         }
-        let start = v.total.saturating_sub(*v.scroll + v.h).min(v.total.saturating_sub(v.h));
+        let start = v
+            .total
+            .saturating_sub(*v.scroll + v.h)
+            .min(v.total.saturating_sub(v.h));
         let bottom = start.saturating_add(v.h - 1).min(v.total - 1);
         if up {
             // The top edge moved up: a cursor at the old top band,
@@ -1491,7 +1502,11 @@ pub(crate) fn browse_motion_range(
         // `G` without an explicit count goes to the last line; with
         // one, to line n (the editor's `G` rule).
         'G' => {
-            let n = if count_explicit { count.max(1) } else { texts.len() as u32 };
+            let n = if count_explicit {
+                count.max(1)
+            } else {
+                texts.len() as u32
+            };
             let res = ve::go_to_last_line(texts, cursor, n);
             ve::motion_to_range(cursor, &res)
         }
@@ -1622,7 +1637,12 @@ pub struct BarGeom {
     pub cursor_cell: Option<usize>,
 }
 
-pub fn bar_geometry(total: usize, h: usize, scroll: usize, cursor: Option<usize>) -> Option<BarGeom> {
+pub fn bar_geometry(
+    total: usize,
+    h: usize,
+    scroll: usize,
+    cursor: Option<usize>,
+) -> Option<BarGeom> {
     if total == 0 || h == 0 {
         return None;
     }
@@ -1724,11 +1744,7 @@ fn next_match(
 /// takes the next word forward, or the previous word backward.
 /// Returns `(word, start, end, in_word)`, the end exclusive, and
 /// `in_word` says the cursor character is a word character.
-fn word_under_cursor(
-    text: &str,
-    col: usize,
-    dir: Dir,
-) -> Option<(String, usize, usize, bool)> {
+fn word_under_cursor(text: &str, col: usize, dir: Dir) -> Option<(String, usize, usize, bool)> {
     let chars: Vec<char> = text.chars().collect();
     let col = col.min(chars.len());
     let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_';
@@ -1905,10 +1921,18 @@ mod stream_pin_tests {
         let grew = last_stream != 20;
         last_stream = 20;
         b.sync(120, 20, &mut scroll, grew);
-        assert_eq!(b.line - top(120, scroll, 20), row0, "the mid-stream shrink holds the row");
+        assert_eq!(
+            b.line - top(120, scroll, 20),
+            row0,
+            "the mid-stream shrink holds the row"
+        );
         // The settle: a settled event lands, the stream clears.
         b.sync(104, 20, &mut scroll, true);
-        assert_eq!(b.line - top(104, scroll, 20), row0, "the settle holds the row");
+        assert_eq!(
+            b.line - top(104, scroll, 20),
+            row0,
+            "the settle holds the row"
+        );
     }
 }
 

@@ -355,8 +355,10 @@ impl TuiConfig {
             std::collections::HashMap<crate::color::Role, String>,
         > = std::collections::HashMap::new();
         // Merge `color_schemes` and the `custom_schemes` alias.
-        let mut raw_schemes: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>> =
-            std::collections::BTreeMap::new();
+        let mut raw_schemes: std::collections::BTreeMap<
+            String,
+            std::collections::BTreeMap<String, String>,
+        > = std::collections::BTreeMap::new();
         if let Some(t) = raw.tui.as_ref() {
             for (name, table) in t.color_schemes.iter() {
                 raw_schemes.insert(name.clone(), table.clone());
@@ -478,8 +480,8 @@ impl TuiConfig {
                     })?;
             }
             if let Some(m) = t.highlight_engine.as_deref() {
-                tool_display.highlight_engine =
-                    crate::tool_display::parse_highlight_engine(m).ok_or_else(|| {
+                tool_display.highlight_engine = crate::tool_display::parse_highlight_engine(m)
+                    .ok_or_else(|| {
                         format!(
                             "config [tui.tool_display] highlight_engine: unknown value {m:?} \
                              (expected tree-sitter (the default) or builtin)"
@@ -597,7 +599,10 @@ mod tests {
         let p = dir.path().join("config.toml");
         let cfg = TuiConfig::load(p.to_str().unwrap()).unwrap();
         assert!(cfg.loop_cmd.is_none());
-        assert_eq!(cfg.sessions_root, std::env::current_dir().unwrap().join("sessions"));
+        assert_eq!(
+            cfg.sessions_root,
+            std::env::current_dir().unwrap().join("sessions")
+        );
     }
 
     #[test]
@@ -617,7 +622,10 @@ arg_style = "append_session"
 "#,
         );
         let cfg = TuiConfig::load(dir.path().join("config.toml").to_str().unwrap()).unwrap();
-        assert_eq!(cfg.sessions_root, std::env::current_dir().unwrap().join("my-sessions"));
+        assert_eq!(
+            cfg.sessions_root,
+            std::env::current_dir().unwrap().join("my-sessions")
+        );
         let lc = cfg.loop_cmd.as_ref().unwrap();
         let argv = lc.argv(&crate::port::SessionId::new("s1"));
         assert_eq!(argv, vec!["bash", "scripts/loop.sh", "s1"]);
@@ -628,7 +636,10 @@ arg_style = "append_session"
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "config.toml", "[loop]\ncommand = \"bash\"\n");
         let cfg = TuiConfig::load(dir.path().join("config.toml").to_str().unwrap()).unwrap();
-        assert_eq!(cfg.sessions_root, std::env::current_dir().unwrap().join("sessions"));
+        assert_eq!(
+            cfg.sessions_root,
+            std::env::current_dir().unwrap().join("sessions")
+        );
     }
 
     #[test]

@@ -13,12 +13,12 @@ mod color;
 mod config;
 mod editor;
 mod event;
-mod fold;
 mod ext;
 mod float;
+mod fold;
 mod highlight;
-mod markdown;
 mod image_render;
+mod markdown;
 mod palette;
 mod picker;
 mod port;
@@ -134,9 +134,7 @@ fn key_input(k: &cevent::KeyEvent) -> Option<Key> {
             _ => None,
         };
     }
-    if k.modifiers.contains(cevent::KeyModifiers::ALT)
-        && k.code == cevent::KeyCode::Up
-    {
+    if k.modifiers.contains(cevent::KeyModifiers::ALT) && k.code == cevent::KeyCode::Up {
         return Some(Key::AltUp);
     }
     match k.code {
@@ -181,7 +179,11 @@ fn tui_log(msg: &str) {
         let _ = std::fs::create_dir_all(parent);
     }
     use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
         let ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis())
@@ -234,8 +236,8 @@ fn resolve_active_model_name(cfg: &TuiConfig) -> String {
 /// table wins over the global `[model]` table. A missing key
 /// defaults to `medium`. `off` normalizes to `none`.
 fn resolve_reasoning_effort(text: &str, active: &str) -> String {
-    let v: toml::Value = toml::from_str(text)
-        .unwrap_or_else(|_| toml::Value::Table(toml::map::Map::new()));
+    let v: toml::Value =
+        toml::from_str(text).unwrap_or_else(|_| toml::Value::Table(toml::map::Map::new()));
     let model_root = v
         .get("model")
         .cloned()
@@ -363,6 +365,9 @@ fn main() {
     // The first draw of a session shows a fast tail-window build.
     // The full build then lands in the background.
     app.attach_transcript_worker();
+    // Attach the background preview reader (docs/tui-preview-pane-
+    // plan.md, layer 2); dispatches and settles happen on it.
+    app.attach_preview_loader();
     // Optional transcript-rebuild trace (docs/tui-perf-background-build-audit.md).
     // `TUI_TRANSCRIPT_TRACE=1` writes to /tmp/tui-transcript-trace-<pid>.log;
     // a path value writes there instead.
@@ -378,6 +383,23 @@ fn main() {
                 eprintln!("transcript trace -> {}", path.display());
             }
             Err(e) => eprintln!("TUI_TRANSCRIPT_TRACE: cannot open {}: {e}", path.display()),
+        }
+    }
+    // Optional preview-load trace (docs/tui-preview-pane-plan.md,
+    // layer 2). `TUI_PREVIEW_TRACE=1` writes to
+    // /tmp/tui-preview-trace-<pid>.log; a path value writes there.
+    if let Ok(val) = std::env::var("TUI_PREVIEW_TRACE") {
+        let path = if val == "1" || val.is_empty() {
+            std::env::temp_dir().join(format!("tui-preview-trace-{}.log", std::process::id()))
+        } else {
+            std::path::PathBuf::from(&val)
+        };
+        match std::fs::File::create(&path) {
+            Ok(f) => {
+                app.set_preview_trace(f);
+                eprintln!("preview trace -> {}", path.display());
+            }
+            Err(e) => eprintln!("TUI_PREVIEW_TRACE: cannot open {}: {e}", path.display()),
         }
     }
     // The [tui] color override forces the capability level. Absent,
@@ -440,7 +462,12 @@ fn main() {
         // persistent probe marks the session running, so the status
         // bit shows the real state, not this process's memory.
         resync_external_loop(&rt, &port, &mut app, &id);
-        let init_width = term.size().map(|s| s.width as usize).unwrap_or(80).saturating_sub(16).max(40);
+        let init_width = term
+            .size()
+            .map(|s| s.width as usize)
+            .unwrap_or(80)
+            .saturating_sub(16)
+            .max(40);
         host.send_history(&events, init_width);
     } else {
         // No session argument: ask for a new session name instead of
@@ -507,7 +534,11 @@ fn main() {
                         .collect::<String>();
                     trace(&rt, &port, app.active(), "malformed_line", &raw);
                 }
-                host.forward_event((evs.len() - 1) as u64, &ev, last_width.saturating_sub(16).max(40));
+                host.forward_event(
+                    (evs.len() - 1) as u64,
+                    &ev,
+                    last_width.saturating_sub(16).max(40),
+                );
                 // Register the spawn time for fade-in tracking
                 // (docs/tui-tool-display-fancy.md section 7).
                 if ev.kind() == EventKind::ToolResult {
@@ -578,7 +609,12 @@ fn main() {
                     let items = host.command_items();
                     app.set_ext_commands(items);
                 }
-                ext::ExtItem::InvokeReply { ext: name, req, ok, message } => {
+                ext::ExtItem::InvokeReply {
+                    ext: name,
+                    req,
+                    ok,
+                    message,
+                } => {
                     if ok {
                         app.flash(format!("ext {name} (req {req}): {message}"));
                     } else {
@@ -1104,7 +1140,8 @@ fn main() {
                                 app.flash(format!("handoff to {name} — loop started"));
                             }
                             Err(e) => {
-                                let log_lines = rt.block_on(port.log_line_count(&old_sid)).unwrap_or(0);
+                                let log_lines =
+                                    rt.block_on(port.log_line_count(&old_sid)).unwrap_or(0);
                                 app.set_active(old_sid.clone(), old_events, log_lines);
                                 app.set_watch_rx(port.watch(&old_sid, TailCursor::end()));
                                 app.flash(format!("handoff to {name} failed: {e}"));
@@ -1147,9 +1184,7 @@ fn main() {
                         Ok(v) => {
                             let lvl = effort_level(&v);
                             app.set_thinking_level(lvl);
-                            app.flash(format!(
-                                "thinking level → {v} (level {lvl})"
-                            ));
+                            app.flash(format!("thinking level → {v} (level {lvl})"));
                         }
                         Err(e) => app.flash(e),
                     }
@@ -1191,14 +1226,10 @@ fn main() {
                     let req = host.request_invoke(&ext, &id, value.as_deref());
                     match req {
                         Some(req_id) => {
-                            app.flash(format!(
-                                "ext {ext}: {id} — pending (req {req_id})"
-                            ));
+                            app.flash(format!("ext {ext}: {id} — pending (req {req_id})"));
                         }
                         None => {
-                            app.flash(format!(
-                                "ext {ext}: {id} — extension not available"
-                            ));
+                            app.flash(format!("ext {ext}: {id} — extension not available"));
                         }
                     }
                 }
@@ -1210,9 +1241,7 @@ fn main() {
                         for id in &retracted_ids {
                             let ev = event::produce::user_message_retract(id);
                             if let Err(e) = rt.block_on(port.append_event(&sid, &ev)) {
-                                app.flash(format!(
-                                    "failed to retract message {id}: {e}"
-                                ));
+                                app.flash(format!("failed to retract message {id}: {e}"));
                             }
                         }
                     }
@@ -1399,6 +1428,10 @@ fn main() {
         // Then poll so finished builds swap in before the draw.
         app.dispatch_transcript_build(Some(&host));
         app.poll_transcript_worker();
+        // 4.10 Background preview reads (docs/tui-preview-pane-plan.md,
+        // layer 2): settle finished file reads and dispatch the current
+        // picker item's read before the draw.
+        app.poll_preview_loader();
 
         // 5. Draw.
         let mut cursor: Option<(u16, u16)> = None;

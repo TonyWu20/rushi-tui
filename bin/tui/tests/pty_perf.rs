@@ -88,7 +88,10 @@ fn perf_24mb_background_build_no_freeze() {
         if text.contains(REBUILD_MARKER) {
             break;
         }
-        assert!(pty.alive(), "the process died before the build indicator showed");
+        assert!(
+            pty.alive(),
+            "the process died before the build indicator showed"
+        );
         assert!(
             Instant::now() < deadline,
             "the build indicator never appeared within 60 s:\n{text}"

@@ -117,4 +117,3 @@ pub fn compute_float_layout(term: Rect, show_preview: bool) -> FloatLayout {
         orientation,
     }
 }
-

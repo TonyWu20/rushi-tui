@@ -529,6 +529,20 @@ pub struct App {
     /// Set by [`App::dispatch_transcript_build`], read by
     /// [`App::poll_transcript_worker`] to log settle latency.
     transcript_dispatched_at: Option<std::time::Instant>,
+    /// The highlighted-window LRU for the picker preview pane
+    /// (docs/tui-preview-pane-plan.md, layer 3). Shared with the
+    /// per-frame `FilePreviewer` through an `Arc`.
+    preview_cache: std::sync::Arc<std::sync::Mutex<crate::picker::preview::WindowCache>>,
+    /// The background preview reader (plan layer 2). `None` until
+    /// `attach_preview_loader`; the dispatch path then settles reads
+    /// on the main thread.
+    preview_loader: Option<crate::picker::preview::PreviewLoader>,
+    /// The monotonic sequence of dispatched preview reads.
+    preview_load_seq: u64,
+    /// Optional preview trace sink, enabled when `TUI_PREVIEW_TRACE`
+    /// is set (docs/tui-preview-pane-plan.md). `None` unless
+    /// enabled.
+    preview_trace: Option<std::sync::Mutex<std::fs::File>>,
     /// The terminal's color capability the built-in palette is lowered
     /// to, and the selected color scheme (docs/tui-color-scheme.md
     /// section 3). Set by the host in `main`; `new` defaults to the
@@ -788,6 +802,12 @@ impl App {
             transcript_partial: false,
             transcript_trace: None,
             transcript_dispatched_at: None,
+            preview_cache: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::picker::preview::WindowCache::new(),
+            )),
+            preview_loader: None,
+            preview_load_seq: 0,
+            preview_trace: None,
             palette: crate::color::Palette::builtin(crate::color::Level::detect()),
             tool_display: crate::tool_display::ToolDisplay::preset(
                 crate::tool_display::Preset::OpenCode,
@@ -979,7 +999,9 @@ impl App {
             return; // already collapsed
         }
         self.block_targets.insert(tool_id.to_string(), target);
-        self.block_fracs.entry(tool_id.to_string()).or_insert(current);
+        self.block_fracs
+            .entry(tool_id.to_string())
+            .or_insert(current);
         self.block_anim_from.insert(tool_id.to_string(), current);
         self.block_anim_start.insert(tool_id.to_string(), now);
         self.frac_epoch = self.frac_epoch.wrapping_add(1);
@@ -1005,7 +1027,7 @@ impl App {
                 .iter()
                 .any(|(id, t)| id != tool_id && *t > 0.0)
         {
-            return
+            return;
         }
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1183,8 +1205,7 @@ impl App {
         match hit {
             crate::fold::FoldCursorTarget::Block(id) => {
                 self.toggle_block_expand(&id);
-                self.fold_cursor_target =
-                    Some(crate::fold::FoldCursorTarget::Block(id));
+                self.fold_cursor_target = Some(crate::fold::FoldCursorTarget::Block(id));
             }
             crate::fold::FoldCursorTarget::Turn(seq) => {
                 if self.turn_fold.contains(&seq) {
@@ -1193,8 +1214,7 @@ impl App {
                     self.turn_fold.insert(seq);
                 }
                 self.bump_turn_fold();
-                self.fold_cursor_target =
-                    Some(crate::fold::FoldCursorTarget::Turn(seq));
+                self.fold_cursor_target = Some(crate::fold::FoldCursorTarget::Turn(seq));
             }
         }
     }
@@ -1210,8 +1230,7 @@ impl App {
                 self.block_targets.insert(id.clone(), v);
                 self.block_fracs.insert(id.clone(), v);
                 self.frac_epoch = self.frac_epoch.wrapping_add(1);
-                self.fold_cursor_target =
-                    Some(crate::fold::FoldCursorTarget::Block(id));
+                self.fold_cursor_target = Some(crate::fold::FoldCursorTarget::Block(id));
             }
             crate::fold::FoldCursorTarget::Turn(seq) => {
                 if open {
@@ -1220,8 +1239,7 @@ impl App {
                     self.turn_fold.remove(&seq);
                 }
                 self.bump_turn_fold();
-                self.fold_cursor_target =
-                    Some(crate::fold::FoldCursorTarget::Turn(seq));
+                self.fold_cursor_target = Some(crate::fold::FoldCursorTarget::Turn(seq));
             }
         }
     }
@@ -1232,17 +1250,8 @@ impl App {
         };
         let ids = crate::fold::tool_ids(self.events(), t.start + 1, t.end);
         let any_open = ids.iter().any(|id| {
-            self.block_fracs
-                .get(id)
-                .copied()
-                .unwrap_or(0.0)
-                > 0.5
-                || self
-                    .block_targets
-                    .get(id)
-                    .copied()
-                    .unwrap_or(0.0)
-                    > 0.5
+            self.block_fracs.get(id).copied().unwrap_or(0.0) > 0.5
+                || self.block_targets.get(id).copied().unwrap_or(0.0) > 0.5
         });
         let target: f64 = if any_open { 0.0 } else { 1.0 };
         for id in &ids {
@@ -1252,14 +1261,12 @@ impl App {
         if !ids.is_empty() {
             self.frac_epoch = self.frac_epoch.wrapping_add(1);
         }
-        self.fold_cursor_target =
-            Some(crate::fold::FoldCursorTarget::Turn(t.seq));
+        self.fold_cursor_target = Some(crate::fold::FoldCursorTarget::Turn(t.seq));
     }
 
     fn fold_open_all(&mut self) {
         let running = self.active().is_some_and(|s| self.loop_running(s));
-        let turns =
-            crate::fold::turns(self.events(), self.events_base_seq(), running);
+        let turns = crate::fold::turns(self.events(), self.events_base_seq(), running);
         for t in &turns {
             self.turn_fold.insert(t.seq);
         }
@@ -1270,8 +1277,7 @@ impl App {
         self.bump_turn_fold();
         self.frac_epoch = self.frac_epoch.wrapping_add(1);
         if let Some(t) = self.cursor_turn() {
-            self.fold_cursor_target =
-                Some(crate::fold::FoldCursorTarget::Turn(t.seq));
+            self.fold_cursor_target = Some(crate::fold::FoldCursorTarget::Turn(t.seq));
         }
     }
 
@@ -1284,8 +1290,7 @@ impl App {
         self.bump_turn_fold();
         self.frac_epoch = self.frac_epoch.wrapping_add(1);
         if let Some(t) = self.cursor_turn() {
-            self.fold_cursor_target =
-                Some(crate::fold::FoldCursorTarget::Turn(t.seq));
+            self.fold_cursor_target = Some(crate::fold::FoldCursorTarget::Turn(t.seq));
         }
     }
 
@@ -1304,8 +1309,7 @@ impl App {
             None => return,
         };
         let running = self.active().is_some_and(|s| self.loop_running(s));
-        let turns =
-            crate::fold::turns(self.events(), self.events_base_seq(), running);
+        let turns = crate::fold::turns(self.events(), self.events_base_seq(), running);
         if turns.is_empty() {
             return;
         }
@@ -1337,10 +1341,8 @@ impl App {
         };
         let line = match target {
             crate::fold::FoldCursorTarget::Turn(seq) => {
-                let running =
-                    self.active().is_some_and(|s| self.loop_running(s));
-                let turns =
-                    crate::fold::turns(self.events(), self.events_base_seq(), running);
+                let running = self.active().is_some_and(|s| self.loop_running(s));
+                let turns = crate::fold::turns(self.events(), self.events_base_seq(), running);
                 turns
                     .iter()
                     .find(|t| t.seq == seq)
@@ -1363,14 +1365,13 @@ impl App {
         let Some(layout) = self.browse_layout.as_ref() else {
             return;
         };
-        self.browse.goto(layout.total, layout.h, line, &mut self.scroll);
+        self.browse
+            .goto(layout.total, layout.h, line, &mut self.scroll);
     }
 
     pub fn fold_key(&mut self, c: char, total: usize, h: usize) -> bool {
         if c == 'z' {
-            if self.browse.typing()
-                || self.browse.visual_selection().is_some()
-            {
+            if self.browse.typing() || self.browse.visual_selection().is_some() {
                 return false;
             }
             self.z_fold_arm = Some(std::time::Instant::now());
@@ -1470,12 +1471,7 @@ impl App {
     /// the session's total log line count (the port's line count) and
     /// seeds `events_base_seq`, the 1-based log seq of the window's
     /// first retained event.
-    pub fn set_active(
-        &mut self,
-        id: SessionId,
-        events: Vec<Event>,
-        log_lines: u64,
-    ) {
+    pub fn set_active(&mut self, id: SessionId, events: Vec<Event>, log_lines: u64) {
         // No front trim: the whole session log is held in memory so
         // the beginning stays reachable (docs/tui-conversation-
         // browsing.md section 4.6, no replay cap).
@@ -1516,8 +1512,7 @@ impl App {
         // 1-based log seq of the retained window's first event: the
         // log's total line count minus the retained window length, plus
         // one (docs/tree-ui-design-from-human.md rewind target seqs).
-        self.events_base_seq =
-            (log_lines.saturating_sub(self.events.len() as u64) + 1) as usize;
+        self.events_base_seq = (log_lines.saturating_sub(self.events.len() as u64) + 1) as usize;
         self.scroll = 0;
         // The browse state never survives a session switch (section
         // 4.7): the reset rides the scroll reset.
@@ -1643,10 +1638,7 @@ impl App {
                     self.push_pending(StreamDeltaKind::Text, t);
                 }
             }
-            rushi_common::stage::ModelDelta::Reasoning {
-                item_id,
-                delta,
-            } => {
+            rushi_common::stage::ModelDelta::Reasoning { item_id, delta } => {
                 if !delta.is_empty() {
                     self.push_pending(StreamDeltaKind::Reasoning(item_id), delta);
                 }
@@ -1657,17 +1649,11 @@ impl App {
                 args_delta,
             } => {
                 if !args_delta.is_empty() {
-                    self.push_pending(
-                        StreamDeltaKind::ToolArgs(call_id, name),
-                        args_delta,
-                    );
+                    self.push_pending(StreamDeltaKind::ToolArgs(call_id, name), args_delta);
                 }
             }
             rushi_common::stage::ModelDelta::Done { .. } => {
-                self.stream_buf
-                    .as_mut()
-                    .expect("opened above")
-                    .done = true;
+                self.stream_buf.as_mut().expect("opened above").done = true;
             }
         }
     }
@@ -1675,7 +1661,8 @@ impl App {
     /// Append a delta to the pace queue and count its characters.
     fn push_pending(&mut self, kind: StreamDeltaKind, payload: String) {
         self.stream_pending_chars += payload.chars().count();
-        self.stream_pending.push_back(PendingStreamDelta { kind, payload });
+        self.stream_pending
+            .push_back(PendingStreamDelta { kind, payload });
     }
 
     /// Release queued stream content into the live buffer at a smooth
@@ -1746,8 +1733,7 @@ impl App {
     /// ticks at a high frame rate while this holds, so the paced text
     /// advances smoothly (docs/tui-streaming-response.md §6.5).
     pub fn stream_live(&self) -> bool {
-        !self.stream_pending.is_empty()
-            || self.stream_buf.as_ref().is_some_and(|b| !b.done)
+        !self.stream_pending.is_empty() || self.stream_buf.as_ref().is_some_and(|b| !b.done)
     }
 
     /// The characters waiting in the pace queue (§6.5). Test and
@@ -1805,9 +1791,7 @@ impl App {
                     // streaming-response.md §6.4).
                     if matches!(
                         event.kind(),
-                        EventKind::AssistantMessage
-                            | EventKind::Error
-                            | EventKind::Cancel
+                        EventKind::AssistantMessage | EventKind::Error | EventKind::Cancel
                     ) {
                         self.clear_stream();
                     }
@@ -1922,10 +1906,8 @@ impl App {
                 .as_ref()
                 .is_none_or(|d| d.width != key.width);
             if new_width_event {
-                self.transcript_width_debounce = Some(
-                    Instant::now()
-                        + crate::transcript_worker::TRANSCRIPT_WIDTH_DEBOUNCE,
-                );
+                self.transcript_width_debounce =
+                    Some(Instant::now() + crate::transcript_worker::TRANSCRIPT_WIDTH_DEBOUNCE);
             }
         } else {
             // Same width as the last build: no window, build now.
@@ -1978,10 +1960,7 @@ impl App {
     }
 
     /// True when the cached transcript matches the build key.
-    fn transcript_cache_matches(
-        &self,
-        key: &crate::transcript_worker::BuildKey,
-    ) -> bool {
+    fn transcript_cache_matches(&self, key: &crate::transcript_worker::BuildKey) -> bool {
         self.transcript_cache.as_ref().is_some_and(|c| {
             c.events_version == key.events_version
                 && c.width == key.width
@@ -2024,8 +2003,45 @@ impl App {
     /// `main` calls this once before the event loop. Without it the
     /// miss path falls back to the synchronous main-thread build.
     pub fn attach_transcript_worker(&mut self) {
-        self.transcript_worker =
-            Some(crate::transcript_worker::TranscriptWorker::spawn());
+        self.transcript_worker = Some(crate::transcript_worker::TranscriptWorker::spawn());
+    }
+
+    /// The shared preview window LRU (docs/tui-preview-pane-plan.md,
+    /// layer 3). The render path hands an `Arc` clone to the
+    /// per-frame `FilePreviewer` so highlights reuse across frames.
+    pub fn preview_cache(
+        &self,
+    ) -> &std::sync::Arc<std::sync::Mutex<crate::picker::preview::WindowCache>> {
+        &self.preview_cache
+    }
+
+    /// Attach the background preview reader (docs/tui-preview-pane-
+    /// plan.md, layer 2). Without it, dispatches settle reads on the
+    /// main thread.
+    pub fn attach_preview_loader(&mut self) {
+        self.preview_loader = Some(crate::picker::preview::PreviewLoader::spawn());
+    }
+
+    /// Enable the preview trace by opening a sink file
+    /// (docs/tui-preview-pane-plan.md). `main` wires this up when
+    /// `TUI_PREVIEW_TRACE` is set. Every dispatch, settle, and drop
+    /// writes one line.
+    pub fn set_preview_trace(&mut self, file: std::fs::File) {
+        self.preview_trace = Some(std::sync::Mutex::new(file));
+    }
+
+    /// Append one line to the preview trace sink, if enabled.
+    fn trace_preview(&mut self, msg: &str) {
+        let Some(trace) = self.preview_trace.as_mut() else {
+            return;
+        };
+        use std::io::Write;
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let f = trace.get_mut().unwrap();
+        let _ = writeln!(f, "{ts} {msg}");
     }
 
     /// Enable the transcript-rebuild trace by opening a sink file
@@ -2074,10 +2090,7 @@ impl App {
     /// Without a worker, or when the send fails on a dead worker,
     /// the build runs on the main thread as the fallback. Returns
     /// true when a build was queued or run.
-    pub fn dispatch_transcript_build(
-        &mut self,
-        ext: Option<&crate::ext::ExtHost>,
-    ) -> bool {
+    pub fn dispatch_transcript_build(&mut self, ext: Option<&crate::ext::ExtHost>) -> bool {
         if !self.transcript_rebuild_requested || self.transcript_build_in_flight {
             return false;
         }
@@ -2131,7 +2144,11 @@ impl App {
                 self.transcript_build_in_flight = true;
                 self.transcript_rebuild_requested = false;
                 self.transcript_dispatched_at = Some(Instant::now());
-                self.trace_transcript(&format!("dispatch worker seq={} {}", seq, Self::fmt_key(&key)));
+                self.trace_transcript(&format!(
+                    "dispatch worker seq={} {}",
+                    seq,
+                    Self::fmt_key(&key)
+                ));
                 true
             }
             Err(_) => {
@@ -2139,7 +2156,10 @@ impl App {
                 // safety valve: drop the worker and build here.
                 self.transcript_worker = None;
                 self.transcript_build_in_flight = false;
-                self.trace_transcript(&format!("dispatch main-thread(fallback) {}", Self::fmt_key(&key)));
+                self.trace_transcript(&format!(
+                    "dispatch main-thread(fallback) {}",
+                    Self::fmt_key(&key)
+                ));
                 self.store_transcript_build(
                     &key,
                     &crate::render::build_transcript(self, key.width, ext),
@@ -2203,6 +2223,164 @@ impl App {
             // A result whose key no longer matches the desired key is
             // dropped: the newer miss owns the rebuild.
         }
+    }
+
+    /// The payload key of the current picker cursor item, if any.
+    fn current_preview_key(&self) -> Option<String> {
+        let m = self.picker_matcher.as_ref()?;
+        m.snapshot()
+            .items
+            .get(self.picker.cursor())
+            .map(|i| i.payload.clone())
+    }
+
+    /// Dispatch the preview read for the current cursor item
+    /// (docs/tui-preview-pane-plan.md, layer 2). A no-op when a load
+    /// for that item is already pending or settled, or the pane is
+    /// hidden. The layer-1 guard settles over-cap and unreadable
+    /// files locally: no read is ever dispatched for them.
+    pub fn dispatch_preview_load(&mut self) {
+        if !self.picker.open {
+            return;
+        }
+        let snap = match self.picker_matcher.as_ref() {
+            Some(m) => m.snapshot(),
+            None => return,
+        };
+        // The pane auto-hides below the cutoff; skip read work while
+        // it is hidden.
+        if !self
+            .picker
+            .preview_visible(snap.items.len(), crate::picker::render::PREVIEW_CUTOFF)
+        {
+            return;
+        }
+        // Only rank against the settled snapshot of the live query:
+        // a transient ranking would dispatch reads the re-rank
+        // discards.
+        if !snap.settled || snap.query != self.picker.query {
+            return;
+        }
+        let Some(item) = snap.items.get(self.picker.cursor()) else {
+            return;
+        };
+        let key = item.payload.clone();
+        // A pending or settled load for this item already owns the
+        // slot.
+        if self.picker.preview_load.key() == Some(key.as_str()) {
+            return;
+        }
+        match crate::picker::preview::plan_read(&key) {
+            crate::picker::preview::PreviewPlan::TooLarge { size } => {
+                self.picker.preview_load = crate::picker::preview::PreviewLoad::Settled {
+                    key: key.clone(),
+                    lines: Vec::new(),
+                    status: Some(crate::picker::preview::PreviewStatus::TooLarge { size }),
+                    mtime: 0,
+                };
+                self.trace_preview(&format!("too-large {key} size={size}"));
+            }
+            crate::picker::preview::PreviewPlan::Unreadable => {
+                self.picker.preview_load = crate::picker::preview::PreviewLoad::Settled {
+                    key: key.clone(),
+                    lines: Vec::new(),
+                    status: Some(crate::picker::preview::PreviewStatus::Unreadable),
+                    mtime: 0,
+                };
+                self.trace_preview(&format!("unreadable {key}"));
+            }
+            crate::picker::preview::PreviewPlan::Read { mtime } => {
+                self.preview_load_seq += 1;
+                let seq = self.preview_load_seq;
+                self.picker.preview_load = crate::picker::preview::PreviewLoad::Pending {
+                    key: key.clone(),
+                    seq,
+                };
+                let req = crate::picker::preview::PreviewRequest {
+                    seq,
+                    key: key.clone(),
+                    path: item.payload.clone(),
+                    mtime,
+                };
+                let Some(loader) = self.preview_loader.as_ref() else {
+                    // No worker attached (tests): settle on the main
+                    // thread. The guard bounds the read.
+                    let res = crate::picker::preview::read_one(&req);
+                    self.settle_preview_result(res);
+                    self.trace_preview(&format!("dispatch main-thread seq={seq} {key}"));
+                    return;
+                };
+                match loader.send(req) {
+                    Ok(()) => {
+                        self.trace_preview(&format!("dispatch seq={seq} {key}"));
+                    }
+                    Err(_) => {
+                        // The worker channel is closed: the worker
+                        // died. Drop it and settle on the main thread.
+                        self.preview_loader = None;
+                        self.trace_preview(&format!(
+                            "dispatch main-thread(fallback) seq={seq} {key}"
+                        ));
+                        let req = crate::picker::preview::PreviewRequest {
+                            seq,
+                            key,
+                            path: item.payload.clone(),
+                            mtime,
+                        };
+                        let res = crate::picker::preview::read_one(&req);
+                        self.settle_preview_result(res);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Settle one finished read into the slot. A result for an item
+    /// the cursor left is the cancelled load: it is dropped.
+    fn settle_preview_result(&mut self, res: crate::picker::preview::PreviewResult) {
+        let Some(current) = self.current_preview_key() else {
+            return;
+        };
+        if crate::picker::preview::settle_load(&mut self.picker.preview_load, &res, &current) {
+            self.trace_preview(&format!("settle seq={} {}", res.seq, res.key));
+        } else {
+            self.trace_preview(&format!("drop(stale) seq={} {}", res.seq, res.key));
+        }
+    }
+
+    /// Poll the preview reader and reconcile the load slot
+    /// (docs/tui-preview-pane-plan.md, layer 2). The main loop calls
+    /// this before each draw. Results for the current item settle;
+    /// stale results are dropped. A missing load for the current
+    /// item dispatches, so opening the picker heals itself.
+    pub fn poll_preview_loader(&mut self) {
+        if !self.picker.open {
+            return;
+        }
+        if let Some(loader) = self.preview_loader.as_ref() {
+            let mut results = Vec::new();
+            let mut gone = false;
+            loop {
+                match loader.try_recv_result() {
+                    Ok(r) => results.push(r),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        gone = true;
+                        break;
+                    }
+                }
+            }
+            if gone {
+                // The worker died. Drop it; in-flight state resets so
+                // the main-thread fallback below can re-dispatch.
+                self.preview_loader = None;
+                self.picker.preview_load = crate::picker::preview::PreviewLoad::None;
+            }
+            for res in results {
+                self.settle_preview_result(res);
+            }
+        }
+        self.dispatch_preview_load();
     }
 
     /// True while a transcript rebuild is recorded or a build is in
@@ -2269,7 +2447,11 @@ impl App {
         ext: Option<&crate::ext::ExtHost>,
     ) -> Vec<Option<usize>> {
         let _ = self.transcript_lines(width, ext);
-        self.transcript_cache.as_ref().unwrap().event_line_starts.clone()
+        self.transcript_cache
+            .as_ref()
+            .unwrap()
+            .event_line_starts
+            .clone()
     }
 
     /// Events of the active session, oldest first.
@@ -2315,7 +2497,6 @@ impl App {
         self.view_only_target = None;
         target
     }
-
 
     /// Map tool_call id -> (name, arguments), for result rendering.
     /// The arguments are the call arguments verbatim: the write
@@ -2766,7 +2947,8 @@ impl App {
         if self.pending_name.is_some() {
             return;
         }
-        self.palette_state.open(self.viewport.saturating_sub(4).max(5));
+        self.palette_state
+            .open(self.viewport.saturating_sub(4).max(5));
         self.palette_cmd_requested = true;
     }
 
@@ -2804,7 +2986,11 @@ impl App {
                             id: sid.as_str().to_string(),
                             label: sid.as_str().to_string(),
                             kind: crate::palette::items::CmdKind::Goto,
-                            hint: if is_active { "active".to_string() } else { String::new() },
+                            hint: if is_active {
+                                "active".to_string()
+                            } else {
+                                String::new()
+                            },
                             help,
                             options: Vec::new(),
                             ext: None,
@@ -2814,10 +3000,7 @@ impl App {
                 // Rank by the filter portion of the query (text after the goto prefix).
                 let labels: Vec<String> = items.iter().map(|i| i.label.clone()).collect();
                 let ranked = crate::picker::fuzzy::rank_fuzzy(&labels, filter);
-                ranked
-                    .into_iter()
-                    .map(|i| items[i].clone())
-                    .collect()
+                ranked.into_iter().map(|i| items[i].clone()).collect()
             }
             // The tree sub-list: the active session's events, fuzzy-
             // searchable (docs/tree-ui-design-from-human.md).
@@ -2826,22 +3009,17 @@ impl App {
             }
             // The four outcome options for a tree-picked event. Fixed
             // order; the query does not rank them.
-            crate::palette::state::PaletteStage::TreeOptions => {
-                self.tree_option_items()
-            }
+            crate::palette::state::PaletteStage::TreeOptions => self.tree_option_items(),
             // The root command list.
             crate::palette::state::PaletteStage::Root => {
                 let items = self.palette_items();
-                let labels: Vec<String> = items.iter().map(|i| {
-                    format!("{} {}", i.label, i.hint)
-                })
-                .collect();
+                let labels: Vec<String> = items
+                    .iter()
+                    .map(|i| format!("{} {}", i.label, i.hint))
+                    .collect();
                 let query = state.filter_query();
                 let ranked = crate::picker::fuzzy::rank_fuzzy(&labels, query);
-                ranked
-                    .into_iter()
-                    .map(|i| items[i].clone())
-                    .collect()
+                ranked.into_iter().map(|i| items[i].clone()).collect()
             }
         }
     }
@@ -2850,10 +3028,7 @@ impl App {
     /// active session's events, one line each, type-tagged and
     /// fuzzy-ranked by `filter`. Each item's `id` is the event's 1-based
     /// log seq. ExtStatus events are skipped (they add no transcript row).
-    fn tree_event_items(
-        &self,
-        filter: &str,
-    ) -> Vec<crate::palette::items::PaletteItem> {
+    fn tree_event_items(&self, filter: &str) -> Vec<crate::palette::items::PaletteItem> {
         use crate::palette::items::{CmdKind, PaletteItem};
         use crate::picker::fuzzy::rank_fuzzy;
         let events = self.events();
@@ -2871,7 +3046,7 @@ impl App {
         let labels: Vec<String> = candidates.iter().map(|(_, l)| l.clone()).collect();
         let ranked = rank_fuzzy(&labels, filter);
         let base = self.events_base_seq;
-            ranked
+        ranked
             .into_iter()
             .map(|i| {
                 let idx = candidates[i].0;
@@ -3026,9 +3201,7 @@ impl App {
             CmdKind::Set => {
                 // Pick the option at option_cursor.
                 let opts = &item.options;
-                let idx = state
-                    .option_cursor
-                    .min(opts.len().saturating_sub(1));
+                let idx = state.option_cursor.min(opts.len().saturating_sub(1));
                 let value = opts.get(idx).map(|o| o.value.clone()).unwrap_or_default();
                 self.palette_state_mut().close();
                 match item.id.as_str() {
@@ -3041,11 +3214,8 @@ impl App {
                     None
                 } else {
                     let opts = &item.options;
-                    let idx = state
-                        .option_cursor
-                        .min(opts.len().saturating_sub(1));
-                    opts.get(idx)
-                        .map(|o| o.value.clone())
+                    let idx = state.option_cursor.min(opts.len().saturating_sub(1));
+                    opts.get(idx).map(|o| o.value.clone())
                 };
                 let ext_name = item.ext.clone().unwrap_or_default();
                 // Extract the command id (part after the first dot).
@@ -3130,7 +3300,8 @@ impl App {
     }
 
     pub fn drop_ext_commands(&mut self, ext_name: &str) {
-        self.ext_commands.retain(|i| i.ext.as_deref() != Some(ext_name));
+        self.ext_commands
+            .retain(|i| i.ext.as_deref() != Some(ext_name));
     }
 
     pub fn set_effort_current(&mut self, effort: String) {
@@ -3167,12 +3338,12 @@ impl App {
         };
         let token = &query[..space_pos];
         let items = crate::palette::items::builtins(&self.effort_current);
-        let is_tree = items
-            .iter()
-            .any(|i| i.kind == crate::palette::items::CmdKind::Goto && i.label == token && i.id == "tree");
-        let is_goto = items.iter().any(|i| {
-            i.kind == crate::palette::items::CmdKind::Goto && i.label == token
+        let is_tree = items.iter().any(|i| {
+            i.kind == crate::palette::items::CmdKind::Goto && i.label == token && i.id == "tree"
         });
+        let is_goto = items
+            .iter()
+            .any(|i| i.kind == crate::palette::items::CmdKind::Goto && i.label == token);
         if is_tree {
             self.palette_state_mut().goto_tree_list();
         } else if is_goto {
@@ -3214,9 +3385,7 @@ impl App {
         ed.row = last_row;
         ed.col = ed.lines[last_row].chars().count();
         ed.mode = crate::vim_editor::Mode::Insert;
-        self.flash(format!(
-            "recalled {n} queued message(s) into the editor"
-        ));
+        self.flash(format!("recalled {n} queued message(s) into the editor"));
         pending.into_iter().filter_map(|(_, _, id)| id).collect()
     }
 
@@ -3360,7 +3529,9 @@ impl App {
             .iter()
             .filter(|e| {
                 e.kind() == EventKind::UserMessage
-                    && e.get_str("id").map(|id| !retracted.contains(id)).unwrap_or(true)
+                    && e.get_str("id")
+                        .map(|id| !retracted.contains(id))
+                        .unwrap_or(true)
             })
             .collect()
     }
@@ -3607,12 +3778,7 @@ impl App {
                     return vec![Action::RunLoop];
                 }
                 // The unowned keys act in the browse state machine.
-                Key::Quit
-                | Key::CtrlO
-                | Key::CtrlT
-                | Key::CtrlX
-                | Key::CtrlF
-                | Key::CtrlL => {}
+                Key::Quit | Key::CtrlO | Key::CtrlT | Key::CtrlX | Key::CtrlF | Key::CtrlL => {}
                 _ => {
                     self.browse_key(key);
                     return Vec::new();
@@ -3623,7 +3789,9 @@ impl App {
         // (docs/tui-file-picker.md section 5). The host roles fall
         // through: Ctrl+C, Ctrl+R, and Tab.
         if self.picker.open {
-            let count = self.picker_matcher.as_ref()
+            let count = self
+                .picker_matcher
+                .as_ref()
                 .map(|m| m.snapshot().items.len())
                 .unwrap_or(0);
             match key {
@@ -3638,12 +3806,17 @@ impl App {
                     return Vec::new();
                 }
                 Key::CtrlJ | Key::CtrlK => {
-                    let _ = self.picker.press(
+                    let act = self.picker.press(
                         &key,
                         count,
                         crate::picker::render::PREVIEW_PAGE,
                         crate::picker::render::PREVIEW_CUTOFF,
                     );
+                    if matches!(act, crate::picker::state::PickAction::Move) {
+                        // Cursor moved: start the fresh read
+                        // (docs/tui-preview-pane-plan.md, layer 2).
+                        self.dispatch_preview_load();
+                    }
                     return Vec::new();
                 }
                 Key::Char(c) => {
@@ -3659,8 +3832,7 @@ impl App {
                 // crossterm parses as `KeyCode::Tab`), and the picker
                 // binds it to the file-scope cycle (docs/tui-file-picker.md
                 // P9), so it reaches the state machine below.
-                Key::Quit | Key::CtrlC | Key::CtrlR
-                | Key::BackTab => {}
+                Key::Quit | Key::CtrlC | Key::CtrlR | Key::BackTab => {}
                 // Esc, Enter, arrows, paging, preview keys: the state
                 // machine decides (docs/tui-file-picker.md section 5).
                 _ => {
@@ -3687,9 +3859,16 @@ impl App {
                             if let Some(m) = &self.picker_matcher {
                                 m.query(&self.picker.query);
                             }
+                            // The query owns a new ranking; the next
+                            // settled snapshot dispatches the read.
+                            self.dispatch_preview_load();
                         }
-                        crate::picker::state::PickAction::Move
-                        | crate::picker::state::PickAction::ScrollPreview
+                        crate::picker::state::PickAction::Move => {
+                            // Cursor moved: dispatch the fresh read
+                            // (docs/tui-preview-pane-plan.md, layer 2).
+                            self.dispatch_preview_load();
+                        }
+                        crate::picker::state::PickAction::ScrollPreview
                         | crate::picker::state::PickAction::TogglePreview
                         | crate::picker::state::PickAction::Nothing => {}
                         crate::picker::state::PickAction::Recollect => {
@@ -3710,7 +3889,9 @@ impl App {
         // (docs/tui-command-palette.md).
         if self.palette_state.open {
             let items = self.palette_ranked();
-            let highlighted = if items.is_empty() { 0 } else {
+            let highlighted = if items.is_empty() {
+                0
+            } else {
                 let cursor = self.palette_state.cursor().min(items.len() - 1);
                 items[cursor].options.len()
             };
@@ -3776,9 +3957,7 @@ impl App {
                 }
                 Key::Esc => {
                     self.pending_name = None;
-                    self.flash(
-                        "name input cancelled — pass a session argument",
-                    );
+                    self.flash("name input cancelled — pass a session argument");
                     return Vec::new();
                 }
                 Key::Enter => {
@@ -4030,7 +4209,9 @@ impl App {
                 // Preview pane toggle for the @ picker
                 // (docs/tui-file-picker.md section 4.4).
                 // No-op when the picker is closed.
-                let _ = self.picker.toggle_preview(0, crate::picker::render::PREVIEW_CUTOFF);
+                let _ = self
+                    .picker
+                    .toggle_preview(0, crate::picker::render::PREVIEW_CUTOFF);
                 Vec::new()
             }
             Key::AltUp => {
@@ -4111,10 +4292,7 @@ impl App {
                 // `:` opens the command palette (docs/tui-command-palette.md).
                 // Only in normal mode; in insert mode `:` is a regular
                 // character typed into the draft.
-                if c == ':'
-                    && self.editor.mode() == Mode::Normal
-                    && self.pending_name.is_none()
-                {
+                if c == ':' && self.editor.mode() == Mode::Normal && self.pending_name.is_none() {
                     self.open_palette();
                     return Vec::new();
                 }
@@ -4125,10 +4303,7 @@ impl App {
                 // position (start of line or preceded only by
                 // whitespace). A stale `@` left in the draft after a
                 // previous pick or dismiss does not re-trigger it.
-                if c == '@'
-                    && !self.picker.open
-                    && self.editor().at_token_info().is_some()
-                {
+                if c == '@' && !self.picker.open && self.editor().at_token_info().is_some() {
                     self.open_picker();
                 }
                 // Sync the picker after any editor mutation so the
@@ -4142,7 +4317,6 @@ impl App {
     pub fn should_quit(&self) -> bool {
         self.quitting
     }
-
 }
 
 /// The one-line tree row for an event (docs/tree-ui-design-from-human.md):
@@ -4191,10 +4365,7 @@ fn tree_event_preview(e: &Event) -> String {
             .get("arguments")
             .map(|v| v.to_string())
             .unwrap_or_default(),
-        EventKind::ToolResult => e
-            .get("value")
-            .map(|v| v.to_string())
-            .unwrap_or_default(),
+        EventKind::ToolResult => e.get("value").map(|v| v.to_string()).unwrap_or_default(),
         EventKind::Rewind => format!(
             "rewound to seq {} ({})",
             e.get("target_seq")
@@ -4221,10 +4392,7 @@ fn tree_event_body(e: &Event) -> String {
             .get("arguments")
             .map(|v| v.to_string())
             .unwrap_or_default(),
-        EventKind::ToolResult => e
-            .get("value")
-            .map(|v| v.to_string())
-            .unwrap_or_default(),
+        EventKind::ToolResult => e.get("value").map(|v| v.to_string()).unwrap_or_default(),
         EventKind::Rewind => format!(
             "rewound to seq {} ({})",
             e.get("target_seq")
@@ -4266,7 +4434,10 @@ fn apply_paced(buf: &mut StreamBuf, kind: &StreamDeltaKind, payload: &str) {
             buf.text.push_str(payload);
         }
         StreamDeltaKind::Reasoning(id) => {
-            buf.reasoning.entry(id.clone()).or_default().push_str(payload);
+            buf.reasoning
+                .entry(id.clone())
+                .or_default()
+                .push_str(payload);
         }
         StreamDeltaKind::ToolArgs(call_id, name) => {
             let entry = buf
@@ -4372,7 +4543,9 @@ mod full_history_tests {
         let labels: Vec<String> = items.iter().map(|it| it.label.clone()).collect();
         let ranked = rank_fuzzy(&labels, "rewound to seq 2");
         assert!(
-            ranked.iter().any(|&i| labels[i].contains("rewound to seq 2 (before)")),
+            ranked
+                .iter()
+                .any(|&i| labels[i].contains("rewound to seq 2 (before)")),
             "the fuzzy box finds the marker from the transcript wording"
         );
     }
@@ -4412,7 +4585,10 @@ mod full_history_tests {
         // A session switch resets the baseline, so a fresh session
         // with no stream reports no phantom change.
         app.set_active(SessionId::new("s2"), Vec::new(), 0);
-        assert!(!app.note_stream_changed(0), "fresh session baseline is zero");
+        assert!(
+            !app.note_stream_changed(0),
+            "fresh session baseline is zero"
+        );
     }
 
     /// Load the real session log when it exists. The `sessions/`
@@ -4459,9 +4635,7 @@ mod full_history_tests {
         // The transcript head must show the first event's content, so
         // `gg` in browse lands on the session start. The user message
         // renders in its bordered panel with the body at the left edge.
-        let content = events[first_idx]
-            .get_str("content")
-            .unwrap_or("");
+        let content = events[first_idx].get_str("content").unwrap_or("");
         let marker: String = content.chars().take(12).collect();
         let head: String = lines.iter().take(12).map(|l| l.to_string()).collect();
         assert!(
@@ -4479,11 +4653,9 @@ mod background_build_tests {
     use std::time::{Duration, Instant};
 
     fn user_event(i: u32) -> Event {
-        Event::parse_line(
-            &format!(
-                r#"{{"v":1,"type":"user_message","ts":"t","id":"u{i}","content":"line {i}"}}"#
-            ),
-        )
+        Event::parse_line(&format!(
+            r#"{{"v":1,"type":"user_message","ts":"t","id":"u{i}","content":"line {i}"}}"#
+        ))
         .unwrap()
     }
 
@@ -4534,18 +4706,11 @@ mod background_build_tests {
         let mut app = App::new();
         app.attach_transcript_worker();
         app.set_viewport_height(200);
-        app.set_active(
-            SessionId::new("s1"),
-            make_events(3000),
-            3000,
-        );
+        app.set_active(SessionId::new("s1"), make_events(3000), 3000);
         let first = app.transcript_lines(100, None).to_vec();
         assert!(app.transcript_partial(), "a truncated tail is partial");
         let stale = app.transcript_lines(120, None).to_vec();
-        assert_eq!(
-            stale, first,
-            "the miss returns the last good cache"
-        );
+        assert_eq!(stale, first, "the miss returns the last good cache");
         let stale_text = stale
             .iter()
             .map(|l| l.to_string())
@@ -4566,7 +4731,10 @@ mod background_build_tests {
         );
         settle(&mut app);
         assert!(!app.transcript_rebuilding());
-        assert!(!app.transcript_partial(), "the full build replaced the tail");
+        assert!(
+            !app.transcript_partial(),
+            "the full build replaced the tail"
+        );
         let full_text = joined_text(&mut app, 120);
         assert!(
             full_text.contains("line 0"),
@@ -4579,11 +4747,7 @@ mod background_build_tests {
         let mut app = App::new();
         app.attach_transcript_worker();
         app.set_viewport_height(200);
-        app.set_active(
-            SessionId::new("s1"),
-            make_events(2000),
-            2000,
-        );
+        app.set_active(SessionId::new("s1"), make_events(2000), 2000);
         let _ = app.transcript_lines(80, None);
         let _ = app.transcript_lines(90, None);
         let _ = app.transcript_lines(100, None);
@@ -4600,10 +4764,7 @@ mod background_build_tests {
             "a second dispatch is a no-op while in flight"
         );
         settle(&mut app);
-        assert!(
-            !app.transcript_rebuilding(),
-            "the settled key is a hit"
-        );
+        assert!(!app.transcript_rebuilding(), "the settled key is a hit");
         let _ = app.transcript_lines(100, None);
         assert!(!app.transcript_rebuilding());
         let _ = app.transcript_lines(90, None);
@@ -4618,11 +4779,7 @@ mod background_build_tests {
         let mut app = App::new();
         app.attach_transcript_worker();
         app.set_viewport_height(5);
-        app.set_active(
-            SessionId::new("s1"),
-            make_events(50),
-            50,
-        );
+        app.set_active(SessionId::new("s1"), make_events(50), 50);
         let text = joined_text(&mut app, 120);
         assert!(app.transcript_partial());
         assert!(
@@ -4643,11 +4800,7 @@ mod background_build_tests {
         app.browse().enter();
         app.set_browse_layout(total, 5, texts, raw);
         app.browse_key(Key::Char('j'));
-        assert_eq!(
-            app.browse_ref().line_col().0,
-            1,
-            "the cursor moves down"
-        );
+        assert_eq!(app.browse_ref().line_col().0, 1, "the cursor moves down");
         app.browse_key(Key::Char('y'));
         assert_eq!(
             app.browse_ref().line_col().0,
@@ -4684,11 +4837,7 @@ mod background_build_tests {
     fn first_build_without_a_worker_builds_sync() {
         let mut app = App::new();
         app.set_viewport_height(5);
-        app.set_active(
-            SessionId::new("s1"),
-            make_events(50),
-            50,
-        );
+        app.set_active(SessionId::new("s1"), make_events(50), 50);
         let text = joined_text(&mut app, 120);
         assert!(
             !app.transcript_partial(),
@@ -4706,11 +4855,7 @@ mod background_build_tests {
         let mut app = App::new();
         app.attach_transcript_worker();
         app.set_viewport_height(200);
-        app.set_active(
-            SessionId::new("s1"),
-            make_events(2000),
-            2000,
-        );
+        app.set_active(SessionId::new("s1"), make_events(2000), 2000);
         // Establish a last-built cache at width 80.
         let _ = app.transcript_lines(80, None);
         assert!(app.dispatch_transcript_build(None));
@@ -4811,11 +4956,7 @@ mod background_build_tests {
         let mut app = App::new();
         app.attach_transcript_worker();
         app.set_viewport_height(200);
-        app.set_active(
-            SessionId::new("s1"),
-            make_events(500),
-            500,
-        );
+        app.set_active(SessionId::new("s1"), make_events(500), 500);
         let _ = app.transcript_lines(80, None);
         assert!(app.dispatch_transcript_build(None));
         settle(&mut app);
@@ -4858,11 +4999,7 @@ mod background_build_tests {
         let mut app = App::new();
         app.attach_transcript_worker();
         app.set_viewport_height(200);
-        app.set_active(
-            SessionId::new("s1"),
-            make_events(500),
-            500,
-        );
+        app.set_active(SessionId::new("s1"), make_events(500), 500);
         let _ = app.transcript_lines(80, None);
         assert!(app.dispatch_transcript_build(None));
         settle(&mut app);
@@ -5023,10 +5160,7 @@ mod perf_bgbuild_tests {
              snapshot+dispatch={} ms, background_full_build={} ms",
             frame_ms, miss_ms, dispatch_ms, build_ms
         );
-        assert!(
-            !app.transcript_rebuilding(),
-            "the background build settles"
-        );
+        assert!(!app.transcript_rebuilding(), "the background build settles");
     }
 
     /// A width miss renders the stale cache through the 75 ms
@@ -5116,10 +5250,7 @@ mod perf_bgbuild_tests {
             "the tail-window first build took {tail_ms} ms on the main \
              thread (budget {FRAME_BUDGET_MS} ms)"
         );
-        assert!(
-            n_lines > 0,
-            "the tail window produced rendered lines"
-        );
+        assert!(n_lines > 0, "the tail window produced rendered lines");
         assert!(
             app.transcript_rebuilding(),
             "the full build is owed and in flight after the tail window"
@@ -5160,8 +5291,10 @@ mod perf_bgbuild_tests {
             let Ok(text) = std::fs::read_to_string(&p) else {
                 continue;
             };
-            let evts: Vec<Event> =
-                text.lines().filter_map(|l| Event::parse_line(l.trim())).collect();
+            let evts: Vec<Event> = text
+                .lines()
+                .filter_map(|l| Event::parse_line(l.trim()))
+                .collect();
             if !evts.is_empty() {
                 return Some((p, evts));
             }
@@ -5230,10 +5363,7 @@ mod perf_bgbuild_tests {
              frame path was {frame_ms} ms",
         );
         assert!(!app.transcript_partial());
-        assert!(
-            !app.transcript_rebuilding(),
-            "the real-log build settles"
-        );
+        assert!(!app.transcript_rebuilding(), "the real-log build settles");
     }
 }
 
@@ -5250,10 +5380,7 @@ mod browse_gate_tests {
         app.set_draft("compose a message".into());
         let _ = app.press(Key::Esc); // insert -> normal, the gate state
         let _ = app.press(Key::Char('s'));
-        assert!(
-            !app.browse.active(),
-            "the first s only arms the gate"
-        );
+        assert!(!app.browse.active(), "the first s only arms the gate");
         assert_eq!(
             app.editor.text(),
             "compose a message",

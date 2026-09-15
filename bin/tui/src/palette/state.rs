@@ -265,7 +265,8 @@ impl PaletteState {
         if self.stage == PaletteStage::TreeOptions {
             return PaletteAction::Nothing;
         }
-        let is_goto = self.stage == PaletteStage::SessionList || self.stage == PaletteStage::TreeList;
+        let is_goto =
+            self.stage == PaletteStage::SessionList || self.stage == PaletteStage::TreeList;
         if is_goto && self.query.len() <= self.goto_prefix_len {
             self.drop_sub_stage();
             return PaletteAction::DropSubStage;
@@ -459,27 +460,19 @@ impl PaletteState {
         }
         use crate::app::Key;
         match key {
-            Key::Esc => {
-                match self.stage {
-                    PaletteStage::Root => {
-                        self.close();
-                        PaletteAction::Closed
-                    }
-                    PaletteStage::SessionList | PaletteStage::TreeList | PaletteStage::TreeOptions => {
-                        self.drop_sub_stage();
-                        PaletteAction::DropSubStage
-                    }
+            Key::Esc => match self.stage {
+                PaletteStage::Root => {
+                    self.close();
+                    PaletteAction::Closed
                 }
-            }
-            Key::Enter => {
-                PaletteAction::Commit
-            }
-            Key::Char('j') | Key::CtrlJ | Key::Down => {
-                self.move_down(count, highlighted_options)
-            }
-            Key::Char('k') | Key::CtrlK | Key::Up => {
-                self.move_up(highlighted_options)
-            }
+                PaletteStage::SessionList | PaletteStage::TreeList | PaletteStage::TreeOptions => {
+                    self.drop_sub_stage();
+                    PaletteAction::DropSubStage
+                }
+            },
+            Key::Enter => PaletteAction::Commit,
+            Key::Char('j') | Key::CtrlJ | Key::Down => self.move_down(count, highlighted_options),
+            Key::Char('k') | Key::CtrlK | Key::Up => self.move_up(highlighted_options),
             Key::PgDn => self.page_down(count),
             Key::PgUp => self.page_up(count),
             Key::Home => self.go_home(),
@@ -495,4 +488,3 @@ impl PaletteState {
 }
 
 // ── tests ───────────────────────────────────────────────────────────
-
