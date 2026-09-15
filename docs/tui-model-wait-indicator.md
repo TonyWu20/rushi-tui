@@ -3,8 +3,9 @@
 Status: shipped (2026-09-01). The feature request lives in
 `docs/tui_feature_requests_from_human.md` (2026-09-01 item),
 closed with a Shipped note. This doc is the plan and spec;
-sections 2 and 4 are the contract. Open request (2026-09-16):
-the TUI-derived `working` status, section 13.
+sections 2 and 4 are the contract. Open follow-up: the TUI-
+derived `working` status, `docs/tui-working-status.md`
+(2026-09-16).
 
 Revision (2026-09-01, same day): the value `model` renamed to
 `wait`. The timer moved from the built-in statusline row to a
@@ -26,7 +27,7 @@ splits the `wait` phase into two: the request pending on the
 server, and the response streaming back. The state is TUI-
 derived from the session's `.model-stream` side channel. The
 kernel emits no new marker. The `ext_status` vocabulary is
-unchanged. Detail: section 13.
+unchanged. Detail: `docs/tui-working-status.md`.
 
 ## 1. Purpose and justification
 
@@ -52,8 +53,8 @@ Justification, by criterion 1 of `docs/spec-review-criteria.md`:
 ## 2. Contract
 
 The contract is additive. It reuses the `ext_status` event. No
-new event type. No schema change. The schema is
-`schemas/events/v1/ext_status.json`. Its `value` field allows
+new event type. No schema change. The event is the typed
+`ext_status` variant of `rushi-common`. Its `value` field allows
 any JSON. This contract fixes one id and two values on that
 field:
 
@@ -69,19 +70,24 @@ The event envelope follows the event contract (architecture.md
 section 5.2). One event per line. Version 1. One `ts` in RFC3339
 UTC. No embedded newlines.
 
-### Publish rules (loop side, `scripts/step.sh`)
+### Publish rules (loop side, the `rushi` loop)
+
+The loop is the `rushi` binary in the harness repo
+(`../rust-unix-harness/bin/rushi`). The step logic lives in
+`bin/rushi/src/step.rs`. There is no bash loop script.
 
 - Given the step state is `awaiting_model`, the step appends one
-  `ext_status` event with value `wait` before the `assemble`
-  call. The marker covers assemble, the model call, the parse,
-  and the retry loop.
+  `ext_status` event with value `wait` before the model
+  pipeline. The marker covers assemble, the model call, the
+  parse, and the retry loop.
 - Given the step routes tool calls, it appends one `ext_status`
   event with value `tools` before the routing. Two routing
   sites: the crash-recovery path and the post-parse path.
 - The loop appends no `done` or `idle` marker.
-- The marker appends through `bin/log` with schema validation.
-  A failed append aborts the step. This matches every other
-  append in the script.
+- The marker appends through `append_event`
+  (`bin/rushi/src/step.rs`). It validates with `parse_event`
+  and commits through `LogLine`. A failed append aborts the
+  step. This matches every other append in the loop.
 
 ### Render rules (TUI side, `bin/tui`)
 
@@ -187,7 +193,7 @@ Every row is a check. The mutation gate is the last row.
 | Session switch | Two sessions hold different markers. The user tabs between them. | Each session shows its own last value. |
 | Cap drop | 129 distinct ids precede a fresh `loop_phase` marker. | The marker survives. An older id drops. |
 | e2e marker | `scripts/cache-e2e.sh` runs one step for a session. | The session log holds a `loop_phase` event. |
-| Mutation gate | The emit helper is removed from `step.sh`. | The e2e marker test fails. |
+| Mutation gate | The `publish_loop_phase` helper is removed from `step.rs`. | The e2e marker test fails. |
 
 Unit tests live in `bin/tui/src/app.rs` (state derivation, cap,
 restart rebuild, session switch) and `bin/tui/src/render.rs`
@@ -216,9 +222,10 @@ backend. The manual pass covers a live session.
 
 ## 7. Impact
 
-Affected: `scripts/step.sh`, `bin/tui` (`app.rs`, `render.rs`),
-the optional statusline extensions, `scripts/cache-e2e.sh`, and
-the doc updates named in section 11.
+Affected: the `rushi` loop (`../rust-unix-harness/bin/rushi/`
+`src/step.rs`), `bin/tui` (`app.rs`, `render.rs`), the optional
+statusline extensions, `scripts/cache-e2e.sh`, and the doc
+updates named in section 11.
 
 Unaffected: `bin/claim`, `bin/assemble`, `bin/model`,
 `bin/parse`, `bin/route`, `bin/log`, every schema, and the
@@ -245,7 +252,7 @@ duplicate any existing id. The id registry entry lands in
 
 - The marker append is fatal. A failed append aborts the turn,
   not just the indicator. This matches every other append in
-  `step.sh`.
+  the loop.
 - The channel allows any JSON value. A garbage value falls back
   to `running-unknown`. No enum validation.
 - The indicator covers the active session only.
@@ -273,15 +280,23 @@ approximates the wait time.
 
 This section is non-normative. The contract is sections 2 and 4.
 
-Loop side:
+Loop side (as shipped 2026-09-01, the loop was the bash script
+`scripts/step.sh`):
 
-- One helper in `scripts/step.sh`. It builds the event with
-  `jq -cn` and appends it through `bin/log` with the schema dir.
-  The `ts` comes from `date -u +%Y-%m-%dT%H:%M:%SZ`, the same
-  form every other event in the script uses.
+- One helper. It built the event with `jq -cn` and appended it
+  through `bin/log` with the schema dir. The `ts` came from
+  `date -u +%Y-%m-%dT%H:%M:%SZ`.
 - Three call sites: the `awaiting_model` branch before
   `assemble`, the crash-recovery routing, and the post-parse
   routing.
+
+Current: the loop is the `rushi` binary in the harness repo.
+The helper is `publish_loop_phase` in `bin/rushi/src/step.rs`.
+It builds the event in memory and appends it through
+`append_event`, which validates with `parse_event` and commits
+through `LogLine`. The `ts` is `chrono` RFC3339 at one-second
+resolution, the same form every other event uses. The same
+three call sites.
 
 TUI side:
 
@@ -316,92 +331,6 @@ The request item closes with a `Shipped` note.
 - A TUI restart mid-call restores the indicator.
 - The request item in `docs/tui_feature_requests_from_human.md`
   shows the `Shipped` note.
-
-## 13. Open request: the `working` status (2026-09-16)
-
-Request: `docs/tui_feature_requests_from_human.md` (2026-09-16
-item). Status: open. This section is the design. Sections 2 and 4
-are extended on ship.
-
-The `wait` state covers two sub-phases of a model call. The TUI
-shows `waiting for model · Ns` for both. The first is the sent
-request pending on the server, with no response data yet. The
-second is the response streaming back, with deltas arriving
-through the session's `.model-stream`. The request adds a
-`working` state: `wait` is the request pending, and `working` is
-the response streaming.
-
-### 13.1 Marker source (decision 2026-09-16)
-
-No kernel change. The `ext_status` marker vocabulary stays
-`wait`/`tools`. The kernel emits no `working` marker. Per the
-refinement policy (`docs/refinement-policy.md`, P1a condition 3
-and the P4 pre-test), a TUI-only effect gets a rendering rule
-instead of a protocol change. The TUI already observes both
-inputs: the last `loop_phase` value (the log) and the session's
-`.model-stream` (`docs/tui-streaming-response.md`). The `working`
-state is derived, not emitted.
-
-### 13.2 Rendering rule
-
-One new row in the section 2 state table, derived at draw time:
-
-| State | Condition | Title bit | Working row |
-|---|---|---|---|
-| `working` | loop running, last marker `wait`, and the session stream buffer is open (`App::stream_buf()` is `Some`: at least one `.model-stream` delta line was read) | `[working]` | `model working · Ns` |
-
-- The derivation applies only inside `wait`. A missing marker, or
-  a value outside `wait`/`tools`, stays `running-unknown`
-  regardless of the stream buffer.
-- `working` persists for the whole in-flight window: from the
-  first delta to settle. It includes the window after the `done`
-  line where the stream is complete but the `assistant_message`
-  has not landed. It ends when `clear_stream` runs (the settle
-  event, the file deletion, or the error/cancel path).
-- The timer keeps the `wait` marker timestamp: `N` counts the
-  whole model call from the marker, not from the first delta. The
-  P5 span-format rules apply unchanged. The number never resets
-  at the `wait` → `working` transition.
-- The stale-file case is safe: the derivation needs the running
-  bit plus the `wait` marker. A dead loop with an undeleted
-  stream file is `idle`.
-
-### 13.3 Label (decision 2026-09-16)
-
-The state is named `working` as proposed. The earlier collision
-note is withdrawn: `running-unknown` is the internal
-`PhaseState::RunningUnknown` name only. Its user-visible strings
-are `[running]` and `Working...`, and the loop emits
-`wait`/`tools` markers in practice, so that fallback has never
-surfaced for the user.
-
-### 13.4 Open point
-
-- Row label: `model working · Ns` is proposed, to pair with
-  `waiting for model · Ns`. The one-word alternative is
-  `working · Ns`.
-
-### 13.5 Tests
-
-- running + marker `wait` + open stream buffer: bit `[working]`,
-  row `model working · Ns`.
-- running + marker `wait` + no stream file: the `wait` row is
-  unchanged.
-- The `done` line is read but not settled: still `working`.
-- Settle (`assistant_message`) clears the buffer: the state falls
-  back to the marker-derived one (`wait` until the next marker,
-  `tools`, or `idle`).
-- running + no marker + open stream buffer: `running-unknown`.
-- Running bit clear + a stale stream file: `idle`.
-- A restart onto a running session with a non-empty stream file:
-  `working` on the first draw.
-- Timer continuity: `N` during `working` counts from the `wait`
-  marker. The P5 format holds.
-
-On ship: section 2 gains the `working` row. `PhaseState` gains
-the variant. `phase_state`, `phase_bit`, and `working_row_text`
-in `bin/tui/src/render.rs` gain the arm. The property table gains
-P9. No kernel diff. The e2e marker test is unchanged.
 
 ## Properties
 

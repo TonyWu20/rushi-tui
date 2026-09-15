@@ -49,7 +49,8 @@ Method and conventions: `tui-insta-snapshot-testing.md`.
 | `tui-color-tones.md` | Implemented | 2026-09-07 | Text-tone roles and the gray-abuse fix. |
 | `tui-color-pi-alignment.md` | Implemented | 2026-09-07 | Case-by-case colour alignment with the pi TUI. |
 | `tui-streaming-response.md` | Implemented | 2026-09-07 | Live model-response streaming into the TUI transcript. |
-| `tui-model-wait-indicator.md` | Implemented | 2026-09-16 | Working-row spinner and timer during model wait. Open request (2026-09-16): TUI-derived `working` status, section 13. |
+| `tui-model-wait-indicator.md` | Implemented | 2026-09-16 | Working-row spinner and timer during model wait. Open follow-up: the `working` status, now in `tui-working-status.md`. |
+| `tui-working-status.md` | Spec | 2026-09-16 | The TUI-derived `working` loop-phase status: request pending vs. response streaming. Not yet built. |
 | `tui-thinking-block.md` | Implemented | 2026-09-07 | Reasoning/thinking block capture and display. |
 | `tui-thinking-level-input-box.md` | Implemented | 2026-09-07 | Thinking-level control in the input-box border. |
 | `tui-pending-user-messages.md` | Implemented | 2026-09-07 | Queued user messages rendered while the loop is busy. |

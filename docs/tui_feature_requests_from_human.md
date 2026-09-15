@@ -554,5 +554,6 @@ macchiato` as the first internal color scheme. Shipped in
       internal state name (`PhaseState::RunningUnknown`, `bin/tui/
       src/render.rs`), shown as `[running]` / `Working...`, and the
       user has never seen it surface (2026-09-16). Detail:
-      `docs/tui-model-wait-indicator.md` (section 13, the
-      open-request design), `docs/tui-streaming-response.md`.
+      `docs/tui-working-status.md` (the open-request design),
+      `docs/tui-model-wait-indicator.md` (the base contract),
+      `docs/tui-streaming-response.md`.
