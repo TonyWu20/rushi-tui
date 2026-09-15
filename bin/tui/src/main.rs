@@ -59,9 +59,12 @@ struct Args {
     session: Option<String>,
 
     /// Path to the harness config file. Relative paths resolve against
-    /// the current directory.
-    #[arg(long, default_value = "config.toml")]
-    config: String,
+    /// the current directory. When omitted, the path is resolved
+    /// through [`resolve_config_path`]: the `$CONFIG` env var, then
+    /// the side-by-side `<exe_dir>/../config.toml` (the Nix package
+    /// layout), then `config.toml` in the CWD (issue #11).
+    #[arg(long)]
+    config: Option<String>,
 }
 
 /// Terminal state restoration that must survive a panic: raw mode,
@@ -360,9 +363,63 @@ fn cycle_reasoning_effort(config_path: &std::path::Path, active: &str) -> Result
     set_effort(config_path, active, next)
 }
 
+/// Resolve the config path the TUI loads, extending the CWD default
+/// with the `rushi` kernel's resolution steps (issue #11).
+///
+/// Priority (highest to lowest):
+/// 1. The `--config` CLI flag — an explicit user path, unchanged from
+///    the previous behavior. The `rushi` kernel always passes it, so
+///    the kernel's own config choice always wins.
+/// 2. `$CONFIG` env var — the user/system override, matching the
+///    kernel convention.
+/// 3. Side-by-side `<exe_dir>/../config.toml` — the Nix package
+///    layout (`$out/bin/tui` finds `$out/config.toml`). This is the
+///    new step that makes a store-installed layout self-contained:
+///    the bundled `ui_extensions/` layer next to the config loads
+///    with no wrapper script.
+/// 4. `config.toml` in the CWD — the dev-checkout default, so a
+///    checkout keeps working from its own directory.
+fn resolve_config_path(args: &Args) -> String {
+    let exe = std::env::current_exe().ok();
+    resolve_config_path_for_exe(args, exe.as_deref())
+}
+
+/// The config-resolution core with the executable location injected
+/// so the side-by-side step is testable (issue #11).
+fn resolve_config_path_for_exe(args: &Args, exe: Option<&std::path::Path>) -> String {
+    // 1. Explicit --config flag (always present from the kernel)
+    if let Some(ref p) = args.config {
+        if !p.is_empty() {
+            return p.clone();
+        }
+    }
+
+    // 2. $CONFIG env var (set by the `user` binary, or by the user)
+    if let Ok(p) = std::env::var("CONFIG") {
+        if !p.is_empty() {
+            return p;
+        }
+    }
+
+    // 3. Side-by-side: <exe_dir>/../config.toml (Nix: $out/config.toml)
+    if let Some(exe) = exe {
+        if let Some(bin_dir) = exe.parent() {
+            if let Some(candidate) = bin_dir.parent().map(|p| p.join("config.toml")) {
+                if candidate.exists() {
+                    return candidate.to_string_lossy().into_owned();
+                }
+            }
+        }
+    }
+
+    // 4. CWD fallback (dev checkout)
+    "config.toml".into()
+}
+
 fn main() {
     let args = Args::parse();
-    let cfg = match TuiConfig::load(&args.config) {
+    let config_path = resolve_config_path(&args);
+    let cfg = match TuiConfig::load(&config_path) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("tui: {e}");
@@ -1611,10 +1668,7 @@ mod key_input_tests {
     #[test]
     fn tab_maps_to_key_tab() {
         assert_eq!(
-            key_input(&key(
-                cevent::KeyCode::Tab,
-                cevent::KeyModifiers::NONE
-            )),
+            key_input(&key(cevent::KeyCode::Tab, cevent::KeyModifiers::NONE)),
             Some(Key::Tab)
         );
     }
@@ -1688,11 +1742,78 @@ mod key_input_tests {
     #[test]
     fn back_tab_maps_to_key_back_tab() {
         assert_eq!(
-            key_input(&key(
-                cevent::KeyCode::BackTab,
-                cevent::KeyModifiers::NONE
-            )),
+            key_input(&key(cevent::KeyCode::BackTab, cevent::KeyModifiers::NONE)),
             Some(Key::BackTab)
         );
+    }
+}
+
+#[cfg(test)]
+mod resolve_config_path_tests {
+    //! The config-path resolution ladder (issue #11): the `--config`
+    //! flag, the `$CONFIG` env var, the side-by-side
+    //! `<exe_dir>/../config.toml` (the Nix package layout), and the
+    //! CWD `config.toml` fallback, in that priority order.
+
+    use super::{resolve_config_path_for_exe, Args};
+
+    fn args(config: Option<&str>) -> Args {
+        Args {
+            session: None,
+            config: config.map(str::to_string),
+        }
+    }
+
+    /// The full ladder, run in one test because the process-global
+    /// `CONFIG` env var makes parallel env assertions race.
+    #[test]
+    fn precedence_flag_config_env_side_by_side_cwd() {
+        let root = std::env::temp_dir().join(format!("tui-cfg-test-{}", std::process::id()));
+        let pkg = root.join("pkg");
+        let bin = pkg.join("bin");
+        std::fs::create_dir_all(&bin).expect("mkdir pkg/bin");
+        std::fs::write(bin.join("tui"), "#!/bin/sh\n").expect("write fake exe");
+        let side_by_side = pkg.join("config.toml");
+        std::fs::write(&side_by_side, "[paths]\n").expect("write side-by-side config");
+
+        // 1. The flag beats the $CONFIG env var and the side-by-side
+        //    file (the kernel always passes --config, so its choice
+        //    wins over any inherited CONFIG).
+        std::env::set_var("CONFIG", "/x/env-config.toml");
+        assert_eq!(
+            resolve_config_path_for_exe(&args(Some("/flag.toml")), Some(&bin.join("tui"))),
+            "/flag.toml"
+        );
+
+        // 2. $CONFIG beats the side-by-side layout.
+        assert_eq!(
+            resolve_config_path_for_exe(&args(None), Some(&bin.join("tui"))),
+            "/x/env-config.toml"
+        );
+
+        // 3. Side-by-side: `<exe_dir>/../config.toml` (the Nix
+        //    layout) beats the CWD fallback.
+        std::env::remove_var("CONFIG");
+        assert_eq!(
+            resolve_config_path_for_exe(&args(None), Some(&bin.join("tui"))),
+            side_by_side.to_string_lossy().into_owned()
+        );
+
+        // 4. No side-by-side file: fall back to the CWD `config.toml`.
+        let bare = root.join("bare").join("bin");
+        std::fs::create_dir_all(&bare).expect("mkdir bare/bin");
+        assert_eq!(
+            resolve_config_path_for_exe(&args(None), Some(&bare.join("tui"))),
+            "config.toml"
+        );
+
+        // No exe location at all (current_exe failed): still the CWD
+        // fallback.
+        assert_eq!(
+            resolve_config_path_for_exe(&args(None), None),
+            "config.toml"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
