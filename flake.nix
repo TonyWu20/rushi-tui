@@ -55,7 +55,10 @@
             nativeBuildInputs = [ rustToolchain ];
             cargoLock = {
               lockFile = ./Cargo.lock;
-              outputHashes = { "ratatui-markdown-0.3.6" = "sha256-++qk2uLCBvak22vQf2OmGta5YaLtHCKiKAx4wLVg7yk="; "rushi-common-0.1.0" = "sha256-g7irE4aywgvvae/E14W4kjhX/RFuRpHeqCp1l+HsvlU="; };
+              outputHashes = {
+                "ratatui-markdown-0.3.6" = "sha256-++qk2uLCBvak22vQf2OmGta5YaLtHCKiKAx4wLVg7yk=";
+                "rushi-common-0.1.0" = "sha256-9kuoIBa0cUFffakBssfqGD4bq0VQE8IUI7hpykW9buc=";
+              };
             };
             # Build only the `tui` binary (and its path-dep
             # `tui-highlight`); skip the standalone `tui-stream-drt`
