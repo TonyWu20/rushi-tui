@@ -387,7 +387,7 @@ macchiato` as the first internal color scheme. Shipped in
       cursorline position. Not work for that session. Detail:
       `docs/tui-streaming-simplify.md`.
 
-## New requests (2026-09-24)
+## New requests (2026-09-12)
 
 - [x] Restore markdown rendering in the thinking block. After the
       `ratatui-markdown` migration the body used plain word-wrap.
@@ -402,7 +402,7 @@ macchiato` as the first internal color scheme. Shipped in
       `Level::thinking` fallback, the macchiato scheme, and the
       color alignment doc.
 
-- [ ] Observation (2026-09-24): the text inside a markdown table
+- [ ] Observation (2026-09-14): the text inside a markdown table
       renders as raw text, with no syntax highlighting. The grid
       itself (the fixed-width `table_grid` pass) draws, but each
       cell's content passes through unprocessed — `table_cells`
@@ -413,7 +413,7 @@ macchiato` as the first internal color scheme. Shipped in
       the user while reading a rendered reply; unrelated to the
       streaming-perf work tracked elsewhere. Open.
 
-- [ ] Observation (2026-09-24): the picker preview pane truncates
+- [ ] Observation (2026-09-14): the picker preview pane truncates
       file content to 50 lines (`FilePreviewer::new(50)` in
       `bin/tui/src/render.rs`). The user wants no truncation — the
       full file should be scrollable. Design: "no truncation" does

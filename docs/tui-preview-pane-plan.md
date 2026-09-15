@@ -2,10 +2,10 @@
 
 Status: Spec (approved for build).
 
-Last updated: 2026-09-24.
+Last updated: 2026-09-14.
 
 Linked from: `docs/tui_feature_requests_from_human.md` (New requests
-2026-09-24, the "picker preview pane truncates file content to 50
+2026-09-12, the "picker preview pane truncates file content to 50
 lines" entry).
 
 Scope: remove the 50-line truncation of the picker preview pane and

@@ -5044,7 +5044,7 @@ mod cursor_span_tests {
     }
 
     /// Markdown markup in the thinking block is rendered, not shown raw.
-    /// The 2026-09-24 user request: markdown in thinking is not lost.
+    /// The 2026-09-12 user request: markdown in thinking is not lost.
     #[test]
     fn thinking_block_renders_markdown() {
         let palette = crate::color::Palette::builtin(crate::color::Level::Rgb);
