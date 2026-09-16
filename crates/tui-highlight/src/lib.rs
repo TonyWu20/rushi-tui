@@ -39,6 +39,11 @@ struct LangDef {
     /// tokens, so the type table cannot see them; the text check
     /// covers that case.
     keywords: &'static [&'static str],
+    /// Named-token texts that get a fixed role regardless of node
+    /// kind. Some grammars (nix) leave constants and builtins as
+    /// plain `identifier` nodes, which the type table cannot
+    /// distinguish from ordinary names; the text check covers them.
+    named_text_roles: &'static [(&'static str, HlRole)],
 }
 
 /// Resolve a language token (a `language_from_path` result or a fence
@@ -60,6 +65,7 @@ pub fn resolve_lang(lang: &str) -> Option<&'static str> {
         "markdown" | "md" | "mdx" => "markdown",
         "html" | "htm" | "xml" => "html",
         "css" | "scss" | "sass" => "css",
+        "nix" | "nixos" => "nix",
         "lua" => "lua",
         "ruby" | "rb" | "rake" => "ruby",
         "scala" | "sc" => "scala",
@@ -87,6 +93,7 @@ fn lang_defs() -> &'static [LangDef] {
                 "ref", "self", "Self", "super", "dyn", "box", "move", "yield", "true", "false",
                 "Some", "None", "Ok", "Err",
             ],
+            named_text_roles: &[],
         },
         LangDef {
             name: "python",
@@ -97,6 +104,7 @@ fn lang_defs() -> &'static [LangDef] {
                 "except", "finally", "raise", "lambda", "yield", "pass", "break", "continue",
                 "global", "nonlocal", "assert", "del", "async", "await", "print",
             ],
+            named_text_roles: &[],
         },
         LangDef {
             name: "c",
@@ -107,6 +115,7 @@ fn lang_defs() -> &'static [LangDef] {
                 "static", "extern", "volatile", "inline", "void", "int", "char", "float", "double",
                 "bool", "auto", "short", "long", "unsigned", "signed",
             ],
+            named_text_roles: &[],
         },
         LangDef {
             name: "cpp",
@@ -162,6 +171,7 @@ fn lang_defs() -> &'static [LangDef] {
                 "unsigned",
                 "signed",
             ],
+            named_text_roles: &[],
         },
         LangDef {
             name: "go",
@@ -203,6 +213,7 @@ fn lang_defs() -> &'static [LangDef] {
                 "panic",
                 "recover",
             ],
+            named_text_roles: &[],
         },
         LangDef {
             name: "java",
@@ -253,6 +264,7 @@ fn lang_defs() -> &'static [LangDef] {
                 "false",
                 "instanceof",
             ],
+            named_text_roles: &[],
         },
         LangDef {
             name: "javascript",
@@ -300,6 +312,7 @@ fn lang_defs() -> &'static [LangDef] {
                 "false",
                 "this",
             ],
+            named_text_roles: &[],
         },
         LangDef {
             name: "typescript",
@@ -352,6 +365,7 @@ fn lang_defs() -> &'static [LangDef] {
                 "readonly",
                 "namespace",
             ],
+            named_text_roles: &[],
         },
         LangDef {
             name: "bash",
@@ -361,21 +375,44 @@ fn lang_defs() -> &'static [LangDef] {
                 "esac", "function", "in", "return", "exit", "local", "export", "break", "continue",
                 "select", "time",
             ],
+            named_text_roles: &[],
         },
         LangDef {
             name: "json",
             lang: tree_sitter_json::LANGUAGE,
             keywords: &["true", "false", "null"],
+            named_text_roles: &[],
         },
         LangDef {
             name: "html",
             lang: tree_sitter_html::LANGUAGE,
             keywords: &[],
+            named_text_roles: &[],
         },
         LangDef {
             name: "css",
             lang: tree_sitter_css::LANGUAGE,
             keywords: &[],
+            named_text_roles: &[],
+        },
+        LangDef {
+            name: "nix",
+            lang: tree_sitter_nix::LANGUAGE,
+            keywords: &[
+                "if", "then", "else", "let", "inherit", "in", "rec", "with", "assert", "or",
+            ],
+            named_text_roles: &[
+                // Nix leaves its constants and top-level builtins as
+                // plain `identifier` nodes, so color them by text. The
+                // upstream query guards these with `is-not? local` (a
+                // flat table cannot), so keep the set small and
+                // high-signal.
+                ("null", HlRole::Constant),
+                ("true", HlRole::Constant),
+                ("false", HlRole::Constant),
+                ("import", HlRole::Function),
+                ("builtins", HlRole::Function),
+            ],
         },
     ];
     DEFS
@@ -569,7 +606,12 @@ fn node_role(kind: &str) -> HlRole {
         | "interpreted_string_literal"
         | "interpreted_string_body"
         | "raw_string_body"
-        | "escape_sequence" => StringLit,
+        | "escape_sequence"
+        | "dollar_escape"
+        // Nix: path and URI literals (the upstream query colors both as
+        // string.special.*).
+        | "path_fragment"
+        | "uri_expression" => StringLit,
         "number"
         | "number_literal"
         | "integer"
@@ -591,7 +633,10 @@ fn node_role(kind: &str) -> HlRole {
         | "numeric"
         | "numeric_literal"
         | "float_number"
-        | "integer_value" => Number,
+        | "integer_value"
+        // Nix numeric literals.
+        | "integer_expression"
+        | "float_expression" => Number,
         "constant_value" | "boolean" | "boolean_value" | "null_value" | "null" | "constant"
         | "true" | "false" => Constant,
         "keyword"
@@ -830,14 +875,29 @@ fn highlight_range(
         }
         if node.child_count() == 0 {
             let text = node.utf8_text(src.as_bytes()).ok();
+            // Named leaves normally take their role from the type table.
+            // Some grammars (nix) keep constants and builtins as plain
+            // `identifier` nodes, so also try the per-language
+            // named-text override table; the type table result wins when
+            // it is not Plain.
             let role = if node.is_named() {
-                node_role(node.kind())
+                let base = node_role(node.kind());
+                if base == HlRole::Plain {
+                    def.named_text_roles
+                        .iter()
+                        .find(|(t, _)| text == Some(t))
+                        .map(|(_, r)| *r)
+                        .unwrap_or(HlRole::Plain)
+                } else {
+                    base
+                }
             } else if text.is_some_and(|t| kw.contains(t)) {
                 HlRole::Keyword
-            } else if matches!(text, Some("\"") | Some("'")) {
+            } else if matches!(text, Some("\"") | Some("'") | Some("''")) {
                 // Anonymous string delimiters: the grammars split a
                 // literal into quote / content / quote tokens, so the
-                // quote tokens join the string run.
+                // quote tokens join the string run. Nix indented strings
+                // are delimited by two-char `''` tokens.
                 HlRole::StringLit
             } else {
                 HlRole::Plain
@@ -940,6 +1000,72 @@ mod tests {
         assert_eq!(num.0.fg, Some(Color::Rgb(0xf5, 0xa9, 0x7f)));
     }
 
+    /// Nix source: keywords, numeric literals, the `''` indented-string
+    /// delimiters, path literals and the identifier-based builtins
+    /// (`null`, `import`) all land on their roles, text stays lossless.
+    #[test]
+    fn nix_line_gets_colored_tokens() {
+        let src = "let x = 1; in builtins.import ./lib\n";
+        let segs = highlight_lines(src, Some("nix"));
+        let joined = segs[0].iter().map(|(_, t)| t.as_str()).collect::<String>();
+        assert_eq!(joined, src.trim_end_matches('\n'));
+        let find = |t: &str| {
+            segs[0]
+                .iter()
+                .find(|(_, s)| s.as_str() == t)
+                .unwrap_or_else(|| panic!("token {t:?} missing: {segs:?}"))
+        };
+        let keyword = role_style(HlRole::Keyword);
+        let number = role_style(HlRole::Number);
+        let func = role_style(HlRole::Function);
+        assert_eq!(find("let").0, keyword);
+        assert_eq!(find("in").0, keyword);
+        assert_eq!(find("1").0, number);
+        // Nix leaves `true` / `false` / `null` and builtins as
+        // plain `identifier` tokens; the named-text table colors them.
+        assert_eq!(find("import").0, func);
+        assert_eq!(find("builtins").0, func);
+    }
+
+    /// Nix indented strings: the two-char `''` delimiters join the
+    /// string-colored run across lines, like the C block-comment test.
+    #[test]
+    fn nix_indented_string_stays_coherent() {
+        let src = concat!(
+            "# comment\n",
+            "text = ''\n",
+            "  hello ${name}\n",
+            "'';\n",
+        );
+        let segs = highlight_lines(src, Some("nix"));
+        assert_eq!(segs.len(), 4);
+        let green = role_style(HlRole::StringLit);
+        let gray = role_style(HlRole::Comment);
+        // Line 1: the comment and the `''` opener are colored.
+        assert!(
+            segs[0]
+                .iter()
+                .any(|(s, t)| s.fg == gray.fg && t.contains("comment")),
+            "line 1 comment not colored: {:?}",
+            segs[0]
+        );
+        assert!(
+            segs[1]
+                .iter()
+                .any(|(s, t)| s.fg == green.fg && t.contains("''")),
+            "line 2 `''` opener not string-colored: {:?}",
+            segs[1]
+        );
+        // Line 3: the interpolated fragment is string-colored.
+        assert!(
+            segs[2]
+                .iter()
+                .any(|(s, t)| s.fg == green.fg && t.contains("hello")),
+            "line 3 string fragment not string-colored: {:?}",
+            segs[2]
+        );
+    }
+
     /// A string literal keeps its quotes in one string-colored run.
     #[test]
     fn string_literal_is_a_single_token() {
@@ -979,6 +1105,7 @@ mod tests {
             ("json", r#"{"a": 1}"#),
             ("html", "<div>ok</div>"),
             ("css", "a { color: red; }"),
+            ("nix", "let x = 1; in x + 1"),
         ];
         for (lang, snippet) in cases {
             let segs = highlight_lines(snippet, Some(lang));
@@ -1008,7 +1135,9 @@ mod tests {
         assert_eq!(resolve_lang("python"), Some("python"));
         assert_eq!(resolve_lang("JavaScript"), Some("javascript"));
         assert_eq!(resolve_lang("shell"), Some("bash"));
-        assert_eq!(resolve_lang("yaml"), Some("yaml"));
+        assert_eq!(resolve_lang("css"), Some("css"));
+        assert_eq!(resolve_lang("nix"), Some("nix"));
+        assert_eq!(resolve_lang("nixos"), Some("nix"));
         assert_eq!(resolve_lang("no-such-language"), None);
         assert_eq!(resolve_lang("sql"), None);
         assert_eq!(resolve_lang("gleam"), None);
