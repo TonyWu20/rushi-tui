@@ -57,7 +57,6 @@
               lockFile = ./Cargo.lock;
               outputHashes = {
                 "ratatui-markdown-0.3.6" = "sha256-++qk2uLCBvak22vQf2OmGta5YaLtHCKiKAx4wLVg7yk=";
-                "rushi-common-0.1.0" = "sha256-jgY9n0lowKe1voG53cSdu0foDy54+X3r0WL2cBKWFEo=";
               };
             };
             # Build only the `tui` binary (and its path-dep

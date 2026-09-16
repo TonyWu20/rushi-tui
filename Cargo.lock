@@ -981,12 +981,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "glob"
-version = "0.3.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
-
-[[package]]
 name = "half"
 version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2389,10 +2383,10 @@ checksum = "47b34b781b31e5d73e9fbc8689c70551fd1ade9a19e3e28cfec8580a79290cc4"
 
 [[package]]
 name = "rushi-common"
-version = "0.1.0"
-source = "git+https://github.com/TonyWu20/rushi?branch=main#d493148ad081c227cbb6529b31fbf775a098cfd4"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0e4d36d2d4ab4330c975f1116e6dd94181234f898eb34556f8730fd52edd6d6"
 dependencies = [
- "glob",
  "libc",
  "serde",
  "serde_json",

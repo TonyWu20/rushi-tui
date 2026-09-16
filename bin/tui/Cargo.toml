@@ -8,46 +8,24 @@ name = "tui"
 path = "src/main.rs"
 
 [dependencies]
-ratatui = "0.30"
-crossterm = { version = "0.29", features = ["use-dev-tty"] }
-tokio = { version = "1.53", features = ["process", "time", "rt-multi-thread", "macros", "sync", "io-util"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-clap = { version = "4.6", features = ["derive"] }
-chrono = "0.4"
-regex = "1.13"
-toml = "1.1"
-libc = "0.2"
-bon = { workspace = true }
-frizbee = "0.13"
-uuid = { version = "1", features = ["v4"] }
+ansi-to-tui = "8.0.1"
 # The OSC 52 host-clipboard write of the browse `y` (docs/tui-
 # conversation-browsing.md section 11.3): the payload base64.
 # Already in the dependency tree transitively (termwiz); a direct
 # dep of `bin/tui` only, so no new transitive crate (section 11.6).
 base64 = "0.22"
-# Grammar-based syntax highlighting (docs/tui-tool-display-fancy.md
-# section 4). The tree-sitter engine lives in its own crate so TUI
-# source changes never trigger grammar rebuilds and vice versa.
-tui-highlight = { path = "../../crates/tui-highlight" }
-# Markdown rendering for transcript content (docs/NEW-refactor.md,
-# recommended core library #1). Uses the git branch tracking the ratatui
-# 0.30 compatibility update; the published 0.3.6 still targets ^0.29.
-# Only the `markdown` feature is enabled — no tree/mermaid/image/viewer.
-ratatui-markdown = { git = "https://github.com/celestia-island/ratatui-markdown", rev = "3a8bcbe605613dfad3f9c9714a749ab1d9666410", default-features = false, features = ["markdown"] }
-# Image rendering via the Kitty/Sixel graphics protocol
-# (docs/NEW-refactor.md must-do 3). The `image` crate decodes
-# base64 payloads the kernel sends in tool-result `details`.
-ratatui-image = { version = "11", default-features = false, features = ["crossterm", "image-defaults"] }
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
-# Kernel dep (docs/tui-ext-repo-split.md section 4, item A1):
-# `rushi-common` is the kernel crate `crates/rushi` in the public kernel
-# repo. The exact kernel rev is pinned in Cargo.lock. To move the TUI to a
-# newer kernel, run `cargo update -p rushi-common` and re-run all gates.
-rushi-common = { git = "https://github.com/TonyWu20/rushi", branch = "main" }
-notify = "8.2.0"
-notify-debouncer-mini = "0.7"
-ansi-to-tui = "8.0.1"
+bon = { workspace = true }
+chrono = "0.4"
+clap = { version = "4.6", features = ["derive"] }
+crossterm = { version = "0.29", features = ["use-dev-tty"] }
+frizbee = "0.13"
+image = { version = "0.25", default-features = false, features = [
+  "bmp",
+  "gif",
+  "jpeg",
+  "png",
+  "webp",
+] }
 # Tree-pane preview pipeline (docs/tree-ui-design-from-human-phase-2.md
 # item 2): parse tool-call/tool-result JSON and pretty-print it.
 # `jaq` is the CLI crate and is NOT the dependency. `jaq-core` is the
@@ -56,6 +34,46 @@ ansi-to-tui = "8.0.1"
 # (crates.io-verified 2026-09-15).
 jaq-core = "3.1.1"
 jaq-json = "2.0.3"
+libc = "0.2"
+notify = "8.2.0"
+notify-debouncer-mini = "0.7"
+ratatui = "0.30"
+# Image rendering via the Kitty/Sixel graphics protocol
+# (docs/NEW-refactor.md must-do 3). The `image` crate decodes
+# base64 payloads the kernel sends in tool-result `details`.
+ratatui-image = { version = "11", default-features = false, features = [
+  "image-defaults",
+  "crossterm",
+] }
+# Markdown rendering for transcript content (docs/NEW-refactor.md,
+# recommended core library #1). Uses the git branch tracking the ratatui
+# 0.30 compatibility update; the published 0.3.6 still targets ^0.29.
+# Only the `markdown` feature is enabled — no tree/mermaid/image/viewer.
+ratatui-markdown = { git = "https://github.com/celestia-island/ratatui-markdown", rev = "3a8bcbe605613dfad3f9c9714a749ab1d9666410", default-features = false, features = [
+  "markdown",
+] }
+regex = "1.13"
+# Kernel dep (docs/tui-ext-repo-split.md section 4, item A1):
+# `rushi-common` is the kernel crate `crates/rushi` in the public kernel
+# repo. The exact kernel rev is pinned in Cargo.lock. To move the TUI to a
+# newer kernel, run `cargo update -p rushi-common` and re-run all gates.
+rushi-common = "0.1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.53", features = [
+  "io-util",
+  "macros",
+  "process",
+  "rt-multi-thread",
+  "sync",
+  "time",
+] }
+toml = "1.1"
+# Grammar-based syntax highlighting (docs/tui-tool-display-fancy.md
+# section 4). The tree-sitter engine lives in its own crate so TUI
+# source changes never trigger grammar rebuilds and vice versa.
+tui-highlight = { path = "../../crates/tui-highlight" }
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 insta = "1.48.0"
