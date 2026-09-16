@@ -10,7 +10,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 use ratatui::Frame;
 
-use crate::float::{Focus, FloatLayout};
+use crate::float::{FloatLayout, Focus};
 use crate::palette::items::PaletteItem;
 use crate::palette::preview::{footer_for_stage, render_preview};
 use crate::palette::state::PaletteState;
@@ -19,7 +19,10 @@ use crate::palette::state::PaletteState;
 ///
 /// Takes the full ranked item list, the palette state machine, and a
 /// palette for colors. The hardware cursor is placed on the input bar.
-/// Eight parameters, so a `bon` builder (docs/coding-conventions.md).
+/// The `tool_display` config drives the `Tool` preview pipeline
+/// (docs/tree-ui-design-from-human-phase-2.md item 2, 2026-07-09
+/// refinement). Seven parameters, so a `bon` builder
+/// (docs/coding-conventions.md).
 #[builder]
 pub fn render_palette<'frame>(
     f: &mut Frame<'frame>,
@@ -28,6 +31,7 @@ pub fn render_palette<'frame>(
     layout: &FloatLayout,
     palette: &crate::color::Palette,
     cursor: &mut Option<(u16, u16)>,
+    tool_display: &crate::tool_display::ToolDisplay,
 ) {
     // Clamp the cursor and window to the item count.
     state.sync(items.len());
@@ -64,7 +68,7 @@ pub fn render_palette<'frame>(
     // The preview pane, if present.
     if let Some(preview_rect) = layout.preview {
         if let Some(item) = items.get(state.cursor()) {
-            render_preview_pane(f, item, state, &preview_rect, palette);
+            render_preview_pane(f, item, state, &preview_rect, palette, tool_display);
         }
     }
 
@@ -231,6 +235,7 @@ fn render_preview_pane(
     state: &mut PaletteState,
     preview_rect: &ratatui::layout::Rect,
     palette: &crate::color::Palette,
+    tool_display: &crate::tool_display::ToolDisplay,
 ) {
     let header = if item.ext.is_some() {
         format!("{} (ext)", item.label)
@@ -242,16 +247,25 @@ fn render_preview_pane(
     // suffix as a plain line after the highlighted body
     // (docs/tree-ui-design-from-human-phase-2.md item 2).
     let footer = footer_for_stage(&state.stage);
-    // The highlighted body is cached per event seq in the state's
-    // LRU bound (docs/tui-preview-pane-plan.md, windowed
-    // highlighting).
-    let content =
-        render_preview(item, state.option_cursor, palette, footer, &mut state.tree_preview_cache);
     let pane_h = preview_rect.height as usize;
     // The block border consumes 2 rows (top + bottom) and 2 columns
     // (left + right).
     let visible_h = pane_h.saturating_sub(2).max(1);
     let inner_w = (preview_rect.width as usize).saturating_sub(2).max(1);
+    // The highlighted body is cached per event seq in the state's
+    // LRU bound (docs/tui-preview-pane-plan.md, windowed
+    // highlighting). The Tool pipeline keys the cache by pane
+    // width: its body layout is width-dependent (item 2,
+    // 2026-07-09 refinement).
+    let content = render_preview(
+        item,
+        state.option_cursor,
+        palette,
+        footer,
+        &mut state.tree_preview_cache,
+        tool_display,
+        inner_w,
+    );
     let plain_base = palette.style(crate::color::Role::PlainText, Modifier::empty());
     // Plain (default-style) segments get the pane's plain-text tone;
     // highlighted segments keep their palette styles.

@@ -403,6 +403,56 @@ pub fn body_rows(
     }
 }
 
+/// The argument listing of a `tool_call` tree event
+/// (docs/tree-ui-design-from-human-phase-2.md item 2, 2026-07-09
+/// refinement). One `key: value` row per argument, in the
+/// `ToolOutput` and `Hint` tones. A multi-line string value
+/// (the `content` of a write, the `old_string` / `new_string` of an
+/// edit) shows as an indented block so the text stays real lines
+/// instead of `\n` escapes. `None` or a non-object argument list
+/// shows one dim `(no arguments)` row. The pane's word-wrap pass
+/// reflows long rows, so no width is needed here.
+pub fn call_args_rows(
+    args: Option<&serde_json::Value>,
+    palette: &crate::color::Palette,
+) -> Vec<BodyRow> {
+    let out = Style::default().fg(palette.color(crate::color::Role::ToolOutput));
+    let hint = Style::default()
+        .fg(palette.color(crate::color::Role::Hint))
+        .add_modifier(Modifier::DIM);
+    let obj = match args {
+        Some(v) => v.as_object(),
+        None => None,
+    };
+    let Some(obj) = obj else {
+        return vec![vec![(hint, "(no arguments)".to_string())]];
+    };
+    let mut rows: Vec<BodyRow> = Vec::with_capacity(obj.len());
+    for (k, v) in obj {
+        match v {
+            // Multi-line string: show as an indented block of real lines.
+            serde_json::Value::String(s) if s.contains('\n') => {
+                rows.push(vec![(hint, format!("{k}:"))]);
+                for line in s.lines() {
+                    rows.push(vec![(out, format!("  {line}"))]);
+                }
+            }
+            // Single-line string: show the raw value without JSON quoting.
+            serde_json::Value::String(s) => {
+                rows.push(vec![(hint, format!("{k}: ")), (out, s.clone())]);
+            }
+            // Numbers, bools, null, nested objects/arrays: compact form.
+            other => {
+                rows.push(vec![(hint, format!("{k}: ")), (out, other.to_string())]);
+            }
+        }
+    }
+    if rows.is_empty() {
+        rows.push(vec![(hint, "(no arguments)".to_string())]);
+    }
+    rows
+}
+
 /// The body content plan of one output mode at the fold state.
 /// The global expand (the `Ctrl+O` key) overrides every mode
 /// (the port spec of the module header): a hidden or summary block

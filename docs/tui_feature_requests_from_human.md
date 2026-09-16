@@ -566,6 +566,32 @@ macchiato` as the first internal color scheme. Shipped in
       body cache is `TreePreviewCache` (LRU). The 600-char cap is
       dropped; the pane scrolls. Tests: `palette::preview::tests`
       (parse, fallback, cache) and `snap_tree_event_pane_lines`.
+      Refined 2026-07-09: tool events no longer re-serialize JSON
+      (the `\n`-escaped-text complaint). The pane now renders them
+      through the transcript's tool display: results via
+      `tool_display.rs::body_rows`, calls via the new
+      `tool_display.rs::call_args_rows` (readable argument
+      listing, multi-line values as indented blocks). Custom
+      results without a `text` field fall back to the pretty-JSON
+      pipeline. `PaletteItem` gained `tool_payload` plus
+      `PreviewKind::Tool`; the cache key gained the pane width.
+      Detail: `docs/tree-ui-design-from-human-phase-2.md`
+      (item 2 refinement). Tests: `a_bash_result_renders_real_
+      lines_not_escaped_json`, `a_tool_call_renders_its_
+      arguments_as_real_lines`,
+      `a_custom_result_without_text_falls_back_to_pretty_json`,
+      `the_tool_cache_keys_by_event_seq_and_width`, plus the
+      updated `snap_tree_event_pane_lines`.
+      Also: pure-thinking assistant events (empty content, a
+      `reasoning` array with text) now show the thinking block in
+      the preview pane instead of an empty body — `tree_event_body`
+      falls back to `render::thinking_text`. The tree row itself
+      shows a `thinking: <first line>` one-liner under the
+      `<assistant>` tag (`tree_event_preview`); content-bearing
+      rows are unchanged. Tests:
+      `a_pure_thinking_assistant_event_shows_its_thinking_block`,
+      `a_pure_thinking_assistant_row_shows_a_thinking_one_liner`,
+      `an_assistant_row_with_content_keeps_the_content_preview`.
 
 ## New requests (2026-09-16)
 

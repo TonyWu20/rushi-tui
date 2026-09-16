@@ -3007,6 +3007,7 @@ impl App {
                             ext: None,
                             preview_kind: crate::palette::items::PreviewKind::Plain,
                             tag_fg: None,
+                            tool_payload: None,
                         }
                     })
                     .collect();
@@ -3056,11 +3057,13 @@ impl App {
         // The transcript has no render cap, so every in-memory event
         // maps to a rendered line and the whole history is reachable.
         let start = 0;
-        // Call-id to tool-name map for the result-row name slot
-        // (docs/tree-ui-design-from-human-phase-2.md item 1). The
-        // label build never deep-clones the call argument JSON, so
-        // this is the name-only half of the `call_details` pattern.
+        // Call-id maps. `call_names` (the name-only half) feeds the
+        // row labels; `call_details` (id → name + argument JSON)
+        // feeds the tool payload of the preview pane
+        // (docs/tree-ui-design-from-human-phase-2.md items 1, 2,
+        // 2026-07-09 refinement).
         let call_names = self.call_names();
+        let call_details = self.call_details();
         let mut candidates: Vec<(usize, String)> = Vec::new();
         for (i, e) in events[start..].iter().enumerate() {
             let i = start + i;
@@ -3082,12 +3085,21 @@ impl App {
                 let label = labels[i].clone();
                 let seq = base + idx;
                 let picked = &events[idx];
-                // The full body, uncapped (docs/tree-ui-design-from-
-                // human-phase-2.md item 2). The pane scrolls it; the
-                // "Enter offers the four options" suffix renders as a
-                // plain line after the highlighted body, not inside
-                // `help`.
-                let help = tree_event_body(picked);
+                let kind = tree_preview_kind(picked);
+                // Tool events carry a decoded payload that the pane
+                // renders through the transcript's tool display
+                // (docs/tree-ui-design-from-human-phase-2.md item 2,
+                // 2026-07-09 refinement); every other event keeps
+                // its plain source text. The full body is uncapped
+                // (item 2); the pane scrolls it, and the "Enter
+                // offers the four options" suffix renders as a plain
+                // line after the body, not inside `help`.
+                let (help, tool_payload) = match kind {
+                    crate::palette::items::PreviewKind::Tool => {
+                        (String::new(), tool_payload_for(picked, &call_details))
+                    }
+                    _ => (tree_event_body(picked), None),
+                };
                 PaletteItem {
                     id: seq.to_string(),
                     label,
@@ -3096,8 +3108,9 @@ impl App {
                     help,
                     options: Vec::new(),
                     ext: None,
-                    preview_kind: tree_preview_kind(picked),
+                    preview_kind: kind,
                     tag_fg: tree_tag_fg(picked),
+                    tool_payload,
                 }
             })
             .collect()
@@ -3120,6 +3133,7 @@ impl App {
                 ext: None,
                 preview_kind: crate::palette::items::PreviewKind::Plain,
                 tag_fg: None,
+                tool_payload: None,
             },
             PaletteItem {
                 id: "rewind-no-summary".into(),
@@ -3131,6 +3145,7 @@ impl App {
                 ext: None,
                 preview_kind: crate::palette::items::PreviewKind::Plain,
                 tag_fg: None,
+                tool_payload: None,
             },
             PaletteItem {
                 id: "summarize-branch".into(),
@@ -3142,6 +3157,7 @@ impl App {
                 ext: None,
                 preview_kind: crate::palette::items::PreviewKind::Plain,
                 tag_fg: None,
+                tool_payload: None,
             },
             PaletteItem {
                 id: "summarize-custom".into(),
@@ -3153,6 +3169,7 @@ impl App {
                 ext: None,
                 preview_kind: crate::palette::items::PreviewKind::Plain,
                 tag_fg: None,
+                tool_payload: None,
             },
         ]
     }
@@ -3896,8 +3913,7 @@ impl App {
                             // `@<path>` in the draft and the picker
                             // stays open (docs/tree-ui-design-from-
                             // human-phase-2.md item 5).
-                            let idx =
-                                self.picker.cursor().min(count.saturating_sub(1));
+                            let idx = self.picker.cursor().min(count.saturating_sub(1));
                             if let Some(m) = &self.picker_matcher {
                                 if let Some(item) = m.snapshot().items.get(idx) {
                                     if let Some((_, at_col)) = self.picker_at {
@@ -3905,10 +3921,7 @@ impl App {
                                         // receives an unambiguous file-
                                         // reference marker.
                                         self.editor()
-                                            .replace_at_token(
-                                                at_col,
-                                                &format!("@{}", item.value),
-                                            );
+                                            .replace_at_token(at_col, &format!("@{}", item.value));
                                     }
                                 }
                             }
@@ -4437,9 +4450,7 @@ fn is_builtin_tree_tool(name: &str) -> bool {
 /// phase-2.md item 1).
 fn is_bare_tool_row(e: &Event, call_names: &HashMap<String, String>) -> bool {
     match e.kind() {
-        EventKind::ToolCall => {
-            e.get_str("name").is_some_and(is_builtin_tree_tool)
-        }
+        EventKind::ToolCall => e.get_str("name").is_some_and(is_builtin_tree_tool),
         EventKind::ToolResult => {
             // A resolved custom tool keeps the raw row. A built-in
             // result and an unknown id take the bare tag.
@@ -4543,8 +4554,22 @@ fn tree_event_tag(e: &Event, call_names: &HashMap<String, String>) -> String {
 /// The one-line preview of an event's content for the tree row.
 fn tree_event_preview(e: &Event, call_names: &HashMap<String, String>) -> String {
     let raw = match e.kind() {
-        EventKind::UserMessage | EventKind::AssistantMessage => {
-            e.get_str("content").unwrap_or("").to_string()
+        EventKind::UserMessage => e.get_str("content").unwrap_or("").to_string(),
+        // A pure-thinking assistant event (empty `content`) shows
+        // its thinking text under a `thinking:` marker so the row
+        // is not a bare `<assistant>` (docs/tree-ui-design-from-
+        // human-phase-2.md, 2026-07-09). `truncate_one_line` below
+        // keeps just the first line at 120 chars.
+        EventKind::AssistantMessage => {
+            let content = e.get_str("content").unwrap_or("").to_string();
+            if !content.is_empty() {
+                content
+            } else {
+                match crate::render::thinking_text(e.get("reasoning").and_then(|v| v.as_array())) {
+                    Some(t) => format!("thinking: {t}"),
+                    None => String::new(),
+                }
+            }
         }
         EventKind::ToolCall => match e.get_str("name") {
             // `bash <arguments.command>` (docs/tree-ui-design-from-
@@ -4576,16 +4601,18 @@ fn tree_event_preview(e: &Event, call_names: &HashMap<String, String>) -> String
             match name {
                 // A custom tool keeps today's raw row: the compact
                 // JSON of the result value.
-                Some(n) if !is_builtin_tree_tool(n) => e
-                    .get("value")
-                    .map(|v| v.to_string())
-                    .unwrap_or_default(),
+                Some(n) if !is_builtin_tree_tool(n) => {
+                    e.get("value").map(|v| v.to_string()).unwrap_or_default()
+                }
                 // Built-in, or an unknown call id (the tag falls
                 // back to the bare `tool`): `<name> <status>
                 // <first result line>` (item 1).
                 _ => {
-                    let status =
-                        if e.get_bool("is_error").unwrap_or(false) { "err" } else { "ok" };
+                    let status = if e.get_bool("is_error").unwrap_or(false) {
+                        "err"
+                    } else {
+                        "ok"
+                    };
                     // The first result line: the `text` field of the
                     // result value when it is a string, else the
                     // compact value JSON.
@@ -4622,9 +4649,22 @@ fn tree_event_preview(e: &Event, call_names: &HashMap<String, String>) -> String
 /// scrolls the full content, clamped to the content length.
 fn tree_event_body(e: &Event) -> String {
     let raw = match e.kind() {
-        EventKind::UserMessage | EventKind::AssistantMessage => {
-            e.get_str("content").unwrap_or("").to_string()
+        EventKind::UserMessage => e.get_str("content").unwrap_or("").to_string(),
+        // A pure-thinking assistant event (empty `content`, a
+        // `reasoning` array that carries text) falls back to the
+        // thinking block so the tree pane shows the model's between-
+        // tool reasoning instead of an empty body
+        // (docs/tree-ui-design-from-human-phase-2.md, 2026-07-09).
+        EventKind::AssistantMessage => {
+            let content = e.get_str("content").unwrap_or("").to_string();
+            if !content.is_empty() {
+                content
+            } else {
+                let reasoning = e.get("reasoning").and_then(|v| v.as_array());
+                crate::render::thinking_text(reasoning).unwrap_or_default()
+            }
         }
+        EventKind::UserMessageRetract => e.get_str("content").unwrap_or("").to_string(),
         EventKind::ToolCall => e
             .get("arguments")
             .map(|v| v.to_string())
@@ -4645,16 +4685,52 @@ fn tree_event_body(e: &Event) -> String {
 
 /// The preview-pane pipeline of a tree item
 /// (docs/tree-ui-design-from-human-phase-2.md item 2). Tool calls
-/// and results carry JSON, so they parse and highlight as JSON.
-/// Messages use the markdown pass.
+/// and results use the transcript's tool display (`PreviewKind::Tool`,
+/// 2026-07-09 refinement). Messages use the markdown pass.
 fn tree_preview_kind(e: &Event) -> crate::palette::items::PreviewKind {
     use crate::palette::items::PreviewKind;
     match e.kind() {
-        EventKind::ToolCall | EventKind::ToolResult => PreviewKind::Json,
-        EventKind::UserMessage
-        | EventKind::AssistantMessage
-        | EventKind::UserMessageRetract => PreviewKind::Markdown,
+        EventKind::ToolCall | EventKind::ToolResult => PreviewKind::Tool,
+        EventKind::UserMessage | EventKind::AssistantMessage | EventKind::UserMessageRetract => {
+            PreviewKind::Markdown
+        }
         _ => PreviewKind::Plain,
+    }
+}
+
+/// The decoded tool payload of one tree tool event
+/// (docs/tree-ui-design-from-human-phase-2.md item 2, 2026-07-09
+/// refinement). A call carries its own arguments; a result resolves
+/// its tool name and call arguments through the call `id`
+/// (`App::call_details`).
+fn tool_payload_for(
+    e: &Event,
+    call_details: &HashMap<String, (String, Value)>,
+) -> Option<crate::palette::items::ToolPayload> {
+    use crate::palette::items::ToolPayload;
+    match e.kind() {
+        EventKind::ToolCall => Some(ToolPayload {
+            name: e.get_str("name").unwrap_or("tool").to_string(),
+            is_call: true,
+            value: Value::Null,
+            call_args: e.get("arguments").cloned().unwrap_or(Value::Null),
+            err: false,
+        }),
+        EventKind::ToolResult => {
+            let id = e.get_str("id").unwrap_or("");
+            let (name, args) = call_details
+                .get(id)
+                .cloned()
+                .unwrap_or_else(|| ("tool".to_string(), Value::Null));
+            Some(ToolPayload {
+                name,
+                is_call: false,
+                value: e.get("value").cloned().unwrap_or(Value::Null),
+                call_args: args,
+                err: e.get_bool("is_error").unwrap_or(false),
+            })
+        }
+        _ => None,
     }
 }
 
@@ -4865,8 +4941,7 @@ mod full_history_tests {
             events.clone(),
             events.len() as u64,
         );
-        let items =
-            app.tree_event_items("", &crate::palette::state::TreeFilter::default());
+        let items = app.tree_event_items("", &crate::palette::state::TreeFilter::default());
         let first_idx = events
             .iter()
             .position(|e| e.kind() != EventKind::ExtStatus)
@@ -5833,13 +5908,18 @@ mod tree_prettify_tests {
         let tool = rows(&app, &TreeFilter::Tool);
         assert_eq!(tool.len(), 2, "the tool filter keeps both tool kinds");
         assert!(
-            tool.iter().all(|i| i.label.starts_with('b') || i.label.starts_with('<')),
+            tool.iter()
+                .all(|i| i.label.starts_with('b') || i.label.starts_with('<')),
             "only the tool rows survive: {:?}",
             tool.iter().map(|i| i.label.clone()).collect::<Vec<_>>()
         );
 
         let user = rows(&app, &TreeFilter::User);
-        assert_eq!(user.len(), 2, "the user filter keeps user_message and the retract");
+        assert_eq!(
+            user.len(),
+            2,
+            "the user filter keeps user_message and the retract"
+        );
 
         let assistant = rows(&app, &TreeFilter::Assistant);
         assert_eq!(assistant.len(), 1, "the assistant filter keeps one row");
@@ -5857,12 +5937,10 @@ mod tree_prettify_tests {
     #[test]
     fn the_event_body_has_no_cap() {
         let long = "x".repeat(700);
-        let events = vec![
-            Event::parse_line(
-                &format!(r#"{{"v":1,"type":"user_message","ts":"t","id":"u1","content":"{long}"}}"#),
-            )
-            .unwrap(),
-        ];
+        let events = vec![Event::parse_line(&format!(
+            r#"{{"v":1,"type":"user_message","ts":"t","id":"u1","content":"{long}"}}"#
+        ))
+        .unwrap()];
         let app = app_with(events);
         let item = &rows(&app, &TreeFilter::default())[0];
         assert_eq!(item.help.len(), 700, "the body is the full source text");
@@ -5899,18 +5977,105 @@ mod tree_prettify_tests {
         );
         assert_eq!(
             items[1].preview_kind,
-            PreviewKind::Json,
-            "tool calls parse as JSON"
+            PreviewKind::Tool,
+            "tool calls use the tool pipeline"
         );
         assert_eq!(
             items[2].preview_kind,
-            PreviewKind::Json,
-            "tool results parse as JSON"
+            PreviewKind::Tool,
+            "tool results use the tool pipeline"
         );
+        // The tool payload is set for both tool events: the call
+        // carries its arguments, the result resolves the call args
+        // through the call id.
+        let call = items[1].tool_payload.as_ref().expect("the call payload");
+        assert!(call.is_call);
+        assert_eq!(call.name, "bash");
+        assert_eq!(call.call_args.get("command").unwrap(), "make");
+        let res = items[2].tool_payload.as_ref().expect("the result payload");
+        assert!(!res.is_call);
+        assert_eq!(res.name, "bash", "the name resolves from the call id");
+        assert_eq!(res.call_args.get("command").unwrap(), "make");
+        assert_eq!(res.value.get("text").unwrap(), "done");
+        assert!(!res.err);
         assert_eq!(
             items[3].preview_kind,
             PreviewKind::Plain,
             "every other event stays plain"
+        );
+    }
+
+    /// A pure-thinking assistant event (empty `content`, a `reasoning`
+    /// array that carries text) shows its thinking block in the
+    /// preview body instead of an empty pane
+    /// (docs/tree-ui-design-from-human-phase-2.md, 2026-07-09).
+    #[test]
+    fn a_pure_thinking_assistant_event_shows_its_thinking_block() {
+        use crate::palette::items::PreviewKind;
+        let events = vec![
+            Event::parse_line(
+                r#"{"v":1,"type":"assistant_message","ts":"t","id":"a1","content":"","tool_calls":[],"stop_reason":"stop","reasoning":[{"type":"reasoning","id":"rs_1","status":"completed","content":[{"type":"reasoning_text","text":"plan the build"}],"summary":[]}]}"#,
+            )
+            .unwrap(),
+        ];
+        let app = app_with(events);
+        let item = &rows(&app, &TreeFilter::default())[0];
+        assert_eq!(
+            item.help, "plan the build",
+            "the thinking text fills the body"
+        );
+        assert_eq!(item.preview_kind, PreviewKind::Markdown);
+    }
+
+    /// An assistant event with neither content nor thinking stays empty.
+    #[test]
+    fn an_assistant_event_without_content_or_thinking_stays_empty() {
+        let events = vec![
+            Event::parse_line(
+                r#"{"v":1,"type":"assistant_message","ts":"t","id":"a1","content":"","tool_calls":[],"stop_reason":"stop","reasoning":{}}"#,
+            )
+            .unwrap(),
+        ];
+        let app = app_with(events);
+        let item = &rows(&app, &TreeFilter::default())[0];
+        assert!(item.help.is_empty(), "no content, no thinking: empty body");
+    }
+
+    /// The tree row of a pure-thinking assistant event carries the
+    /// thinking text as a one-line preview under a `thinking:`
+    /// marker, so the row is not a bare `<assistant>`
+    /// (docs/tree-ui-design-from-human-phase-2.md, 2026-07-09).
+    #[test]
+    fn a_pure_thinking_assistant_row_shows_a_thinking_one_liner() {
+        let events = vec![
+            Event::parse_line(
+                r#"{"v":1,"type":"assistant_message","ts":"t","id":"a1","content":"","tool_calls":[],"stop_reason":"stop","reasoning":[{"type":"reasoning","id":"rs_1","status":"completed","content":[{"type":"reasoning_text","text":"plan the build"}],"summary":[]}]}"#,
+            )
+            .unwrap(),
+        ];
+        let app = app_with(events);
+        assert_eq!(
+            row(&app, "1", &TreeFilter::default()),
+            "<assistant> thinking: plan the build",
+            "the row carries the thinking one-liner"
+        );
+    }
+
+    /// An assistant row with real content shows the content, not the
+    /// thinking marker, even when both are present.
+    #[test]
+    fn an_assistant_row_with_content_keeps_the_content_preview() {
+        let events = vec![
+            Event::parse_line(
+                r#"{"v":1,"type":"assistant_message","ts":"t","id":"a1","content":"Done.","tool_calls":[],"stop_reason":"stop","reasoning":[{"type":"reasoning","id":"rs_1","status":"completed","content":[{"type":"reasoning_text","text":"planned it"}],"summary":[]}]}"#,
+            )
+            .unwrap(),
+        ];
+        let app = app_with(events);
+        assert_eq!(
+            row(&app, "1", &TreeFilter::default()),
+            "<assistant> Done.",
+            "content wins over the thinking marker"
         );
     }
 
@@ -5940,9 +6105,21 @@ mod tree_prettify_tests {
         ];
         let app = app_with(events);
         let items = rows(&app, &TreeFilter::default());
-        assert_eq!(items[0].tag_fg, Some(Role::Accent), "user rows take the Accent tone");
-        assert_eq!(items[1].tag_fg, Some(Role::Report), "assistant rows take the Report tone");
-        assert_eq!(items[2].tag_fg, Some(Role::ToolName), "tool rows take the ToolName tone");
+        assert_eq!(
+            items[0].tag_fg,
+            Some(Role::Accent),
+            "user rows take the Accent tone"
+        );
+        assert_eq!(
+            items[1].tag_fg,
+            Some(Role::Report),
+            "assistant rows take the Report tone"
+        );
+        assert_eq!(
+            items[2].tag_fg,
+            Some(Role::ToolName),
+            "tool rows take the ToolName tone"
+        );
         assert_eq!(items[3].tag_fg, None, "unclassed rows stay uncolored");
     }
 }

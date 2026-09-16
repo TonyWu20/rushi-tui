@@ -920,6 +920,7 @@ fn palette_preview_wide_help_line_wraps() {
         ext: None,
         preview_kind: PreviewKind::Plain,
         tag_fg: None,
+        tool_payload: None,
     };
     let items = vec![item];
     let mut state = PaletteState::new();
@@ -940,6 +941,9 @@ fn palette_preview_wide_help_line_wraps() {
             .layout(&layout)
             .palette(&palette)
             .cursor(&mut cursor)
+            .tool_display(&crate::tool_display::ToolDisplay::preset(
+                crate::tool_display::Preset::OpenCode,
+            ))
             .call();
     })
     .unwrap();
@@ -1269,9 +1273,15 @@ fn cached_transcript_drops_offpath_after_live_marker() {
 fn tree_phase2_events() -> Vec<Event> {
     vec![
         ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u1","content":"build the project"}"#),
-        ev(r#"{"v":1,"type":"tool_call","ts":"t","id":"c1","name":"bash","arguments":{"command":"make -j4"}}"#),
-        ev(r#"{"v":1,"type":"tool_result","ts":"t","id":"c1","value":{"text":"All targets up to date"},"is_error":false}"#),
-        ev(r#"{"v":1,"type":"assistant_message","ts":"t","id":"a1","content":"Done.","tool_calls":[],"stop_reason":"stop","usage":{"input_tokens":1,"output_tokens":1},"reasoning":{}}"#),
+        ev(
+            r#"{"v":1,"type":"tool_call","ts":"t","id":"c1","name":"bash","arguments":{"command":"make -j4"}}"#,
+        ),
+        ev(
+            r#"{"v":1,"type":"tool_result","ts":"t","id":"c1","value":{"text":"All targets up to date"},"is_error":false}"#,
+        ),
+        ev(
+            r#"{"v":1,"type":"assistant_message","ts":"t","id":"a1","content":"Done.","tool_calls":[],"stop_reason":"stop","usage":{"input_tokens":1,"output_tokens":1},"reasoning":{}}"#,
+        ),
     ]
 }
 
@@ -1298,7 +1308,11 @@ fn render_buffer(app: &mut App, host: &ExtHost, w: u16, h: u16) -> ratatui::buff
 
 /// The fg colors of the preview pane's border cells, from the
 /// float layout's preview rect.
-fn preview_border_fg(buffer: &ratatui::buffer::Buffer, w: u16, h: u16) -> Vec<ratatui::style::Color> {
+fn preview_border_fg(
+    buffer: &ratatui::buffer::Buffer,
+    w: u16,
+    h: u16,
+) -> Vec<ratatui::style::Color> {
     use ratatui::layout::Rect;
     let layout = crate::float::compute_float_layout(Rect::new(0, 0, w, h), true);
     let p = layout
@@ -1316,12 +1330,16 @@ fn preview_border_fg(buffer: &ratatui::buffer::Buffer, w: u16, h: u16) -> Vec<ra
     out
 }
 
-/// Item 2: the tree stage's preview pane shows the highlighted JSON
-/// body plus the plain option-hint suffix.
+/// Item 2 (2026-07-09 refinement): the tree stage's preview pane
+/// renders a tool event through the transcript's tool display — a
+/// `bash` call shows its arguments (`command: …`) as readable text
+/// instead of escaped compact JSON — plus the plain option-hint
+/// suffix.
 #[test]
 fn snap_tree_event_pane_lines() {
     let mut app = tree_stage_app(tree_phase2_events());
-    // Highlight the `bash` call: the pane runs the JSON pipeline.
+    // Highlight the `bash` call: the pane runs the tool-display
+    // pipeline (args listing for calls, result body for results).
     app.palette_state_mut().move_down(4, 0);
     let (host, _tmp) = empty_host();
     let out = render(&mut app, &host, 100, 30);
@@ -1400,14 +1418,30 @@ fn tree_row_tags_carry_the_class_fg_color() {
     // Row 0 is the cursor row: the whole row keeps the accent
     // highlight, so the user tag cell is the highlight fg (black),
     // not the `Accent` tone.
-    assert_ne!(buf[(tag_x, list.y + 1)].fg, accent, "the cursor row keeps the accent highlight");
+    assert_ne!(
+        buf[(tag_x, list.y + 1)].fg,
+        accent,
+        "the cursor row keeps the accent highlight"
+    );
     // Row 1: the `bash` call. Row 2: its result. Both tool rows
     // take the `ToolName` tone.
-    assert_eq!(buf[(tag_x, list.y + 2)].fg, tool, "the tool call row tag is the ToolName tone");
-    assert_eq!(buf[(tag_x, list.y + 3)].fg, tool, "the tool result row tag is the ToolName tone");
+    assert_eq!(
+        buf[(tag_x, list.y + 2)].fg,
+        tool,
+        "the tool call row tag is the ToolName tone"
+    );
+    assert_eq!(
+        buf[(tag_x, list.y + 3)].fg,
+        tool,
+        "the tool result row tag is the ToolName tone"
+    );
     // Row 3: the assistant row takes the `Report` tone; its preview
     // text stays plain.
-    assert_eq!(buf[(tag_x, list.y + 4)].fg, report, "the assistant row tag is the Report tone");
+    assert_eq!(
+        buf[(tag_x, list.y + 4)].fg,
+        report,
+        "the assistant row tag is the Report tone"
+    );
     assert_eq!(
         buf[(tag_x + 12, list.y + 4)].fg,
         plain,

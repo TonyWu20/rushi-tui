@@ -1,6 +1,6 @@
 # Tree UI phase 2: navigation, filter, rows, pane
 
-Status: Implemented. Approved and shipped 2026-09-15. Refined 2026-09-25: tag colors (item 1), the kitty protocol enables `Ctrl+Shift+P` (item 4), and `Tab` replaces the typed text (item 5).
+Status: Implemented. Approved and shipped 2026-09-15. Refined 2026-09-25: tag colors (item 1), the kitty protocol enables `Ctrl+Shift+P` (item 4), and `Tab` replaces the typed text (item 5). Refined 2026-07-09: the tree-pane preview renders tool events through the transcript's tool display instead of `\n`-escaped JSON (item 2, below).
 Parent: `docs/tree-ui-design-from-human.md` ("Follow-up spec decisions
 (2026-09-15)"). Its open points are all resolved in this doc.
 Related: `docs/tui-preview-pane-plan.md` (the windowed pane model),
@@ -159,6 +159,39 @@ Functions to change:
 - The "Enter offers the four options" suffix that
   `tree_event_items` appends to the help stays as a plain line
   after the highlighted body.
+
+- Refinement (2026-07-09): tool-call / tool-result tree events no
+  longer re-serialize their JSON. The original pipeline re-serialized
+  the compact record through `jaq_json::write::Pp`. That escapes
+  string values, so result text showed as raw `\n`-escaped JSON.
+  The pane now reuses the transcript's tool display
+  (`tool_display.rs::body_rows`). This surfaces the pretty tool
+  result even when the transcript folds tool calls (`fold.rs`).
+
+  Concretely:
+  - `PaletteItem` gains `tool_payload: Option<ToolPayload>`
+    (`{ name, is_call, value, call_args, err }`). A new
+    `PreviewKind::Tool` routes tool events to the tool pipeline.
+  - `tool_call` events render their arguments as a readable listing
+    (`tool_display.rs::call_args_rows`). Scalar args show as
+    `key: value` rows. Multi-line string values (`content`,
+    `old_string`, `new_string`) show as indented blocks.
+  - `tool_result` events render through `body_rows`, with the call's
+    arguments resolved through the call `id`
+    (`App::call_details`). They use `expanded = true` (the pane
+    scrolls); per-tool caps still apply.
+  - A custom / unknown result with no `text` field falls back to the
+    pretty-JSON pipeline so the pane is never empty.
+  - Pure-thinking assistant events (empty `content`, a `reasoning`
+    array that carries text) now show the thinking block in the
+    preview pane instead of an empty body. `tree_event_body`
+    falls back to `render::thinking_text` when `content` is empty.
+    The tree row also gains a one-line preview: `thinking: <first
+    line>` under the usual `<assistant>` tag, so a thinking-only
+    entry is no longer a bare `<assistant>` row. An assistant event
+    with real content still previews the content, never the marker.
+  - The `TreePreviewCache` key gains the pane width
+    (`"<seq>:<width>"`). The tool body layout is width-dependent.
 
 ## 3. Event-type filter
 

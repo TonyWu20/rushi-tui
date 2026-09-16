@@ -34,6 +34,14 @@ pub enum PreviewKind {
     /// `help` is markdown source. The tree-pane pipeline highlights
     /// it with the tree-sitter markdown pass.
     Markdown,
+    /// Tool-call / tool-result tree events. The pane renders the
+    /// decoded payload in `tool_payload` through the transcript's
+    /// tool-result display (`crate::tool_display::body_rows`), so
+    /// result text shows as real lines instead of escaped JSON
+    /// (docs/tree-ui-design-from-human-phase-2.md item 2,
+    /// 2026-07-09 refinement). `tool_payload` is always `Some` for
+    /// this kind.
+    Tool,
 }
 
 /// One option of a `Set` or extension setting item.
@@ -43,6 +51,34 @@ pub struct CmdOption {
     /// Whether this is the currently active value (marked in the
     /// preview pane).
     pub current: bool,
+}
+
+/// The decoded payload of one tool tree event
+/// (docs/tree-ui-design-from-human-phase-2.md item 2, 2026-07-09
+/// refinement). The pane renders it through the transcript's
+/// tool-result display instead of re-serializing compact JSON, so
+/// string fields show as real lines instead of `\n`-escaped text.
+///
+/// A `tool_call` event carries `is_call = true`, its own
+/// `call_args`, and a `value` of `Value::Null`. A `tool_result`
+/// event carries `is_call = false`, the result `value`, and the
+/// call arguments resolved through the call `id`
+/// (`App::call_details`) so the read / write / edit bodies can
+/// reach their `content` / `old_string` / `new_string` sources.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolPayload {
+    /// The tool name. For results it resolves from the call `id`;
+    /// an unresolvable id falls back to `"tool"`.
+    pub name: String,
+    /// Whether the source event is a `tool_call` (no result yet).
+    pub is_call: bool,
+    /// The result value. `Value::Null` for calls.
+    pub value: serde_json::Value,
+    /// The call arguments, resolved for results through the call
+    /// `id`. `Value::Null` when the call is absent from the log.
+    pub call_args: serde_json::Value,
+    /// The result `is_error` flag. Always `false` for calls.
+    pub err: bool,
 }
 
 /// One palette entry.
@@ -69,6 +105,9 @@ pub struct PaletteItem {
     /// item 1). The list renderer colors the first label token with
     /// it. `None` for every other row kind.
     pub tag_fg: Option<crate::color::Role>,
+    /// The decoded tool payload, set only on tree tool events
+    /// (`PreviewKind::Tool`). `None` everywhere else.
+    pub tool_payload: Option<ToolPayload>,
 }
 
 /// The thinking-level values in cycle order
@@ -102,6 +141,7 @@ pub fn builtins(current_effort: &str) -> Vec<PaletteItem> {
             ext: None,
             preview_kind: PreviewKind::Plain,
             tag_fg: None,
+            tool_payload: None,
         },
         PaletteItem {
             id: "toggle-thinking".into(),
@@ -113,6 +153,7 @@ pub fn builtins(current_effort: &str) -> Vec<PaletteItem> {
             ext: None,
             preview_kind: PreviewKind::Plain,
             tag_fg: None,
+            tool_payload: None,
         },
         PaletteItem {
             id: "expand-thinking".into(),
@@ -124,6 +165,7 @@ pub fn builtins(current_effort: &str) -> Vec<PaletteItem> {
             ext: None,
             preview_kind: PreviewKind::Plain,
             tag_fg: None,
+            tool_payload: None,
         },
         PaletteItem {
             id: "thinking-level".into(),
@@ -137,6 +179,7 @@ pub fn builtins(current_effort: &str) -> Vec<PaletteItem> {
             ext: None,
             preview_kind: PreviewKind::Plain,
             tag_fg: None,
+            tool_payload: None,
         },
         PaletteItem {
             id: "b".into(),
@@ -148,6 +191,7 @@ pub fn builtins(current_effort: &str) -> Vec<PaletteItem> {
             ext: None,
             preview_kind: PreviewKind::Plain,
             tag_fg: None,
+            tool_payload: None,
         },
         PaletteItem {
             id: "tree".into(),
@@ -159,6 +203,7 @@ pub fn builtins(current_effort: &str) -> Vec<PaletteItem> {
             ext: None,
             preview_kind: PreviewKind::Plain,
             tag_fg: None,
+            tool_payload: None,
         },
         PaletteItem {
             id: "bn".into(),
@@ -170,6 +215,7 @@ pub fn builtins(current_effort: &str) -> Vec<PaletteItem> {
             ext: None,
             preview_kind: PreviewKind::Plain,
             tag_fg: None,
+            tool_payload: None,
         },
         PaletteItem {
             id: "bp".into(),
@@ -181,6 +227,7 @@ pub fn builtins(current_effort: &str) -> Vec<PaletteItem> {
             ext: None,
             preview_kind: PreviewKind::Plain,
             tag_fg: None,
+            tool_payload: None,
         },
         PaletteItem {
             id: "new-session".into(),
@@ -192,6 +239,7 @@ pub fn builtins(current_effort: &str) -> Vec<PaletteItem> {
             ext: None,
             preview_kind: PreviewKind::Plain,
             tag_fg: None,
+            tool_payload: None,
         },
         PaletteItem {
             id: "edit-queue".into(),
@@ -203,6 +251,7 @@ pub fn builtins(current_effort: &str) -> Vec<PaletteItem> {
             ext: None,
             preview_kind: PreviewKind::Plain,
             tag_fg: None,
+            tool_payload: None,
         },
         PaletteItem {
             id: "e".into(),
@@ -214,6 +263,7 @@ pub fn builtins(current_effort: &str) -> Vec<PaletteItem> {
             ext: None,
             preview_kind: PreviewKind::Plain,
             tag_fg: None,
+            tool_payload: None,
         },
         PaletteItem {
             id: "q".into(),
@@ -225,6 +275,7 @@ pub fn builtins(current_effort: &str) -> Vec<PaletteItem> {
             ext: None,
             preview_kind: PreviewKind::Plain,
             tag_fg: None,
+            tool_payload: None,
         },
     ]
 }
@@ -257,6 +308,7 @@ pub fn from_extension(ext_name: &str, cmds: &[ExtCommand]) -> Vec<PaletteItem> {
             ext: Some(ext_name.to_string()),
             preview_kind: PreviewKind::Plain,
             tag_fg: None,
+            tool_payload: None,
         })
         .collect()
 }

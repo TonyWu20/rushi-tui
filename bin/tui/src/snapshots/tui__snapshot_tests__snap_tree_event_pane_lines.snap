@@ -1,5 +1,6 @@
 ---
 source: bin/tui/src/snapshot_tests.rs
+assertion_line: 1332
 expression: out
 ---
 " Session: s1─────────────────────────────────────────────────────────────────────────────── [idle]  "
@@ -17,12 +18,12 @@ expression: out
 "                    │╰────────────────────────────────────────────────────────╯│                    "
 "                    │                                                          │                    "
 "                    │╭bash make -j4───────────────────────────────────────────╮│                    "
-"                    ││{                                                       ││                    "
-"                    ││  "command":"make -j4"                                  ││                    "
-"                    ││}                                                       ││                    "
+"                    ││command: make -j4                                       ││                    "
 "                    ││                                                        ││                    "
 "                    ││Enter offers the four options (View-only, Rewind        ││                    "
 "                    ││without summary, Summarize the branch, Summarize with   ││                    "
+"                    ││custom prompt).                                         ││                    "
+"                    ││                                                        ││                    "
 "                    │╰────────────────────────────────────────────────────────╯│                    "
 "                    │:  [f: full] · enter ok · esc close · ctrl-j/k move · ctrl│                    "
 "                    ╰──────────────────────────────────────────────────────────╯                    "

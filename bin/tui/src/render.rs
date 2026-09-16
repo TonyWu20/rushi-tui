@@ -1448,8 +1448,10 @@ fn wrap_markdown_p_provenance(
 /// (docs/tui-thinking-block.md section 4): the item `summary` texts
 /// first (the provider's own summary), the `content` reasoning-text
 /// entries when the summary is empty. Malformed items drop; the
-/// rest ride on, like the capture in commit `61cde02`.
-fn thinking_text(reasoning: Option<&Vec<serde_json::Value>>) -> Option<String> {
+/// rest ride on, like the capture in commit `61cde02`. Also feeds
+/// the tree preview pane for pure-thinking assistant events
+/// (docs/tree-ui-design-from-human-phase-2.md, 2026-07-09).
+pub(crate) fn thinking_text(reasoning: Option<&Vec<serde_json::Value>>) -> Option<String> {
     let items = reasoning?;
     let mut parts: Vec<String> = Vec::new();
     for item in items.iter().filter(|i| i.is_object()) {
@@ -4834,6 +4836,10 @@ pub fn draw(
         let layout = crate::float::compute_float_layout(f.area(), show_preview);
         let rows = layout.list.height.saturating_sub(2).max(1) as usize;
         let palette = app.palette().clone();
+        // Clone the tool-display config so the mutable palette-state
+        // borrow below does not overlap an immutable borrow of the
+        // same app.
+        let tool_display = app.tool_display().clone();
         let pstate = app.palette_state_mut();
         pstate.visible = rows;
         pstate.sync(items.len());
@@ -4844,6 +4850,7 @@ pub fn draw(
             .layout(&layout)
             .palette(&palette)
             .cursor(cursor)
+            .tool_display(&tool_display)
             .call();
     }
 }
@@ -6851,7 +6858,10 @@ mod working_status_tests {
         let mut app = App::new();
         let now = now_fixed();
         watch(&mut app, marker_event("wait", &marker_ts(&now, 30)));
-        assert!(app.stream_buf().is_none(), "no delta read: the buffer is closed");
+        assert!(
+            app.stream_buf().is_none(),
+            "no delta read: the buffer is closed"
+        );
 
         let state = phase_state(&app, true);
         assert!(
@@ -6859,8 +6869,8 @@ mod working_status_tests {
             "a closed buffer under wait stays wait, got {state:?}"
         );
         assert_eq!(phase_bit(state), " [wait] ");
-        let row = working_row_text(state, app.loop_phase_ts(), &now)
-            .expect("the wait row has text");
+        let row =
+            working_row_text(state, app.loop_phase_ts(), &now).expect("the wait row has text");
         assert_eq!(row, "waiting for model · 30s");
     }
 
@@ -7050,6 +7060,9 @@ mod working_status_tests {
         // The base contract's P5 format at 60 s and above: `Mm SSs`.
         watch(&mut app, marker_event("wait", &marker_ts(&now, 90)));
         let row = working_row_text(PhaseState::Working, app.loop_phase_ts(), &now).unwrap();
-        assert_eq!(row, "model working · 1m 30s", "the P5 format holds for working");
+        assert_eq!(
+            row, "model working · 1m 30s",
+            "the P5 format holds for working"
+        );
     }
 }

@@ -21,11 +21,18 @@
 //! shows the raw text and never crashes. The highlighted body is
 //! cached per event seq in an LRU bound
 //! (docs/tui-preview-pane-plan.md, windowed highlighting).
+//!
+//! Tool tree events (`PreviewKind::Tool`, the 2026-07-09 item 2
+//! refinement) instead render their decoded `tool_payload` through
+//! the transcript's tool display: results through
+//! `tool_display::body_rows`, calls through
+//! `tool_display::call_args_rows`. That keeps the pane free of
+//! `\n`-escaped JSON.
 
 use crate::highlight::Seg;
 use crate::palette::items::{CmdKind, PaletteItem, PreviewKind};
 use crate::palette::state::PaletteStage;
-use ratatui::style::{Style, Modifier};
+use ratatui::style::{Modifier, Style};
 
 /// The plain-line suffix shown after a tree event's highlighted body
 /// in the `TreeList` stage (docs/tree-ui-design-from-human.md
@@ -52,17 +59,23 @@ pub fn footer_for_stage(stage: &PaletteStage) -> Option<&'static str> {
 /// The tree stage passes the "Enter offers the four options" suffix
 /// (docs/tree-ui-design-from-human-phase-2.md item 2). `cache` is
 /// the LRU bound of highlighted tree-pane bodies. The key is the
-/// item id, the event's 1-based log seq.
+/// item id, the event's 1-based log seq. `tool_display` and
+/// `width` drive the `Tool` pipeline (item 2, 2026-07-09
+/// refinement): the body layout is width-dependent, and the user's
+/// `[tui] tool_display` config governs the per-tool treatment.
 pub fn render_preview(
     item: &PaletteItem,
     option_cursor: usize,
     palette: &crate::color::Palette,
     footer: Option<&str>,
     cache: &mut TreePreviewCache,
+    tool_display: &crate::tool_display::ToolDisplay,
+    width: usize,
 ) -> Vec<Vec<Seg>> {
     match item.preview_kind {
         PreviewKind::Json => tree_pane_lines(item, "json", palette, footer, cache),
         PreviewKind::Markdown => tree_pane_lines(item, "markdown", palette, footer, cache),
+        PreviewKind::Tool => tool_pane_lines(item, palette, footer, cache, tool_display, width),
         PreviewKind::Plain => {
             match item.kind {
                 CmdKind::Set | CmdKind::Ext if !item.options.is_empty() => {
@@ -114,6 +127,75 @@ fn tree_pane_lines(
     out
 }
 
+/// The tool-event pane pipeline
+/// (docs/tree-ui-design-from-human-phase-2.md item 2, 2026-07-09
+/// refinement). Result events render through the transcript's
+/// tool-result display (`tool_display::body_rows`), so result text
+/// shows as real lines with the transcript's per-tool treatment
+/// (read preview, edit diff, ANSI-aware bash output) instead of
+/// `\n`-escaped JSON. Call events render their arguments through
+/// `tool_display::call_args_rows`. A result without a `text` field
+/// (a raw-JSON custom result) falls back to the pretty-JSON
+/// pipeline rather than an empty pane.
+///
+/// The body is cached per (event seq, pane width) — the body
+/// layout is width-dependent (diff split/unified, command-line
+/// wrapping, fold hints), so the width joins the cache key.
+fn tool_pane_lines(
+    item: &PaletteItem,
+    palette: &crate::color::Palette,
+    footer: Option<&str>,
+    cache: &mut TreePreviewCache,
+    tool_display: &crate::tool_display::ToolDisplay,
+    width: usize,
+) -> Vec<Vec<Seg>> {
+    let Some(payload) = item.tool_payload.as_ref() else {
+        // Defensive: the `Tool` kind is always built with a
+        // payload. Fall back to the plain help text.
+        return help_lines(item, palette, footer);
+    };
+    let key = format!("{}:{width}", item.id);
+    let cached = cache.get(&key).cloned();
+    let body = match cached {
+        Some(cached) => cached,
+        None => {
+            let builtin = matches!(payload.name.as_str(), "bash" | "read" | "edit" | "write");
+            let has_text = payload.value.get("text").and_then(|t| t.as_str()).is_some();
+            let lines = if payload.is_call {
+                crate::tool_display::call_args_rows(Some(&payload.call_args), palette)
+            } else if builtin || has_text {
+                crate::tool_display::body_rows()
+                    .tool(&payload.name)
+                    .value(&payload.value)
+                    .call_args(&payload.call_args)
+                    .err(payload.err)
+                    .cfg(tool_display)
+                    .palette(palette)
+                    .expanded(true)
+                    .width(width)
+                    .call()
+            } else {
+                // A custom / unknown result without a `text` field:
+                // keep the pretty-JSON pipeline instead of an empty
+                // pane.
+                let raw = serde_json::to_string(&payload.value).unwrap_or_default();
+                match prettify_json(&raw) {
+                    Ok(pretty) => highlight_body(&pretty, "json", palette),
+                    Err(fallback) => highlight_body(&fallback, "json", palette),
+                }
+            };
+            cache.insert(&key, lines.clone());
+            lines
+        }
+    };
+    let mut out = body;
+    if let Some(text) = footer {
+        out.push(Vec::new());
+        out.push(vec![(Style::default(), text.to_string())]);
+    }
+    out
+}
+
 /// Parse `raw` as a single JSON value with `jaq-json` and pretty-
 /// print it with a two-space indent
 /// (docs/tree-ui-design-from-human-phase-2.md item 2). `Ok` is the
@@ -138,9 +220,7 @@ fn highlight_body(text: &str, lang: &str, palette: &crate::color::Palette) -> Ve
         .into_iter()
         .map(|segs| {
             segs.into_iter()
-                .map(|(style, text)| {
-                    (crate::color::lower_style(style, palette.level()), text)
-                })
+                .map(|(style, text)| (crate::color::lower_style(style, palette.level()), text))
                 .collect()
         })
         .collect()
@@ -280,10 +360,7 @@ mod tests {
     #[test]
     fn valid_json_parses_and_pretty_prints() {
         let out = prettify_json(r#"{"command":"make","exit_code":0}"#).unwrap();
-        assert!(
-            out.contains("  "),
-            "two-space indent, got:\n{out}"
-        );
+        assert!(out.contains("  "), "two-space indent, got:\n{out}");
         assert!(
             out.starts_with('{') && out.ends_with('}'),
             "object shape, got:\n{out}"
@@ -341,5 +418,192 @@ mod tests {
         c.insert("7", vec![vec![(Style::default(), "body".to_string())]]);
         let hit = c.get("7").cloned().unwrap();
         assert_eq!(hit[0][0].1, "body");
+    }
+
+    /// The Tool pipeline's cache key is `(event seq, pane width)`:
+    /// a width change is a miss, a repeat at the same width is a hit.
+    #[test]
+    fn the_tool_cache_keys_by_event_seq_and_width() {
+        let mut c = TreePreviewCache::new();
+        let line = |n: u32| vec![vec![(Style::default(), n.to_string())]];
+        c.insert("42:80", line(1));
+        assert!(c.get("42:80").is_some(), "a repeat at the same width hits");
+        assert!(
+            c.get("42:100").is_none(),
+            "a different width is a different key"
+        );
+        assert!(
+            c.get("43:80").is_none(),
+            "a different event seq is a different key"
+        );
+    }
+
+    /// A helper: flatten rendered pane lines to one string per row.
+    fn rows_to_text(lines: &[Vec<Seg>]) -> String {
+        lines
+            .iter()
+            .map(|segs| segs.iter().map(|(_, t)| t.as_str()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The tool result renders through the transcript's display:
+    /// the result `text` shows as real lines, never as `\n`-escaped
+    /// JSON (docs/tree-ui-design-from-human-phase-2.md item 2,
+    /// 2026-07-09 refinement).
+    #[test]
+    fn a_bash_result_renders_real_lines_not_escaped_json() {
+        use crate::palette::items::{CmdKind, PreviewKind, ToolPayload};
+        let item = PaletteItem {
+            id: "42".into(),
+            label: "bash ls -la".into(),
+            kind: CmdKind::Goto,
+            hint: String::new(),
+            help: String::new(),
+            options: Vec::new(),
+            ext: None,
+            preview_kind: PreviewKind::Tool,
+            tag_fg: None,
+            tool_payload: Some(ToolPayload {
+                name: "bash".into(),
+                is_call: false,
+                value: serde_json::json!({"text": "total 3\nfile_a\nfile_b\n"}),
+                call_args: serde_json::json!({"command": "ls -la"}),
+                err: false,
+            }),
+        };
+        let mut cache = TreePreviewCache::new();
+        let cfg = crate::tool_display::ToolDisplay::preset(crate::tool_display::Preset::OpenCode);
+        let palette = crate::color::Palette::builtin(crate::color::Level::Rgb);
+        let lines = render_preview(&item, 0, &palette, None, &mut cache, &cfg, 80);
+        let flat = rows_to_text(&lines);
+        assert!(
+            flat.contains("file_a"),
+            "the first result line shows: {flat}"
+        );
+        assert!(
+            flat.contains("file_b"),
+            "the second result line shows: {flat}"
+        );
+        assert!(
+            !flat.contains("\\n"),
+            "no JSON-escaped newlines in the pane: {flat}"
+        );
+    }
+
+    /// A tool call renders its arguments as a readable listing;
+    /// multi-line string values show as indented blocks instead of
+    /// `\n` escapes.
+    #[test]
+    fn a_tool_call_renders_its_arguments_as_real_lines() {
+        use crate::palette::items::{CmdKind, PreviewKind, ToolPayload};
+        let item = PaletteItem {
+            id: "43".into(),
+            label: "write /tmp/x.rs".into(),
+            kind: CmdKind::Goto,
+            hint: String::new(),
+            help: String::new(),
+            options: Vec::new(),
+            ext: None,
+            preview_kind: PreviewKind::Tool,
+            tag_fg: None,
+            tool_payload: Some(ToolPayload {
+                name: "write".into(),
+                is_call: true,
+                value: serde_json::Value::Null,
+                call_args: serde_json::json!({
+                    "file_path": "/tmp/x.rs",
+                    "content": "line_one\nline_two\n",
+                }),
+                err: false,
+            }),
+        };
+        let mut cache = TreePreviewCache::new();
+        let cfg = crate::tool_display::ToolDisplay::preset(crate::tool_display::Preset::OpenCode);
+        let palette = crate::color::Palette::builtin(crate::color::Level::Rgb);
+        let lines = render_preview(&item, 0, &palette, None, &mut cache, &cfg, 80);
+        let flat = rows_to_text(&lines);
+        assert!(
+            flat.contains("file_path: /tmp/x.rs"),
+            "scalar arguments show as `key: value`: {flat}"
+        );
+        assert!(
+            flat.contains("  line_one"),
+            "multi-line values indent: {flat}"
+        );
+        assert!(
+            flat.contains("  line_two"),
+            "each content line is its own row: {flat}"
+        );
+        assert!(
+            !flat.contains("\\n"),
+            "no JSON-escaped newlines in the pane: {flat}"
+        );
+    }
+
+    /// A custom result without a `text` field falls back to the
+    /// pretty-JSON pipeline instead of an empty pane.
+    #[test]
+    fn a_custom_result_without_text_falls_back_to_pretty_json() {
+        use crate::palette::items::{CmdKind, PreviewKind, ToolPayload};
+        let item = PaletteItem {
+            id: "44".into(),
+            label: "tool:mymcp__ext ok {}.".into(),
+            kind: CmdKind::Goto,
+            hint: String::new(),
+            help: String::new(),
+            options: Vec::new(),
+            ext: None,
+            preview_kind: PreviewKind::Tool,
+            tag_fg: None,
+            tool_payload: Some(ToolPayload {
+                name: "mymcp__ext".into(),
+                is_call: false,
+                value: serde_json::json!({"data": {"k": 1}}),
+                call_args: serde_json::Value::Null,
+                err: false,
+            }),
+        };
+        let mut cache = TreePreviewCache::new();
+        let cfg = crate::tool_display::ToolDisplay::preset(crate::tool_display::Preset::OpenCode);
+        let palette = crate::color::Palette::builtin(crate::color::Level::Rgb);
+        let lines = render_preview(&item, 0, &palette, None, &mut cache, &cfg, 80);
+        let flat = rows_to_text(&lines);
+        assert!(
+            flat.contains("\"k\":1"),
+            "the nested value pretty-prints (jaq_json compact spacing): {flat}"
+        );
+        assert!(
+            flat.contains("\"data\""),
+            "the object key is shown, not a bare empty pane: {flat}"
+        );
+    }
+
+    /// A `Tool` item without a payload (defensive) falls back to the
+    /// plain help text.
+    #[test]
+    fn a_tool_item_without_payload_falls_back_to_help() {
+        use crate::palette::items::{CmdKind, PreviewKind};
+        let item = PaletteItem {
+            id: "45".into(),
+            label: "x".into(),
+            kind: CmdKind::Goto,
+            hint: String::new(),
+            help: "fallback text".into(),
+            options: Vec::new(),
+            ext: None,
+            preview_kind: PreviewKind::Tool,
+            tag_fg: None,
+            tool_payload: None,
+        };
+        let mut cache = TreePreviewCache::new();
+        let cfg = crate::tool_display::ToolDisplay::preset(crate::tool_display::Preset::OpenCode);
+        let palette = crate::color::Palette::builtin(crate::color::Level::Rgb);
+        let lines = render_preview(&item, 0, &palette, None, &mut cache, &cfg, 80);
+        let flat = rows_to_text(&lines);
+        assert!(
+            flat.contains("fallback text"),
+            "the help text shows: {flat}"
+        );
     }
 }
