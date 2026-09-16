@@ -416,6 +416,7 @@ pub fn language_from_path(path: &str) -> Option<&'static str> {
         "yaml" | "yml" | "toml" | "ini" | "cfg" | "conf" | "env" | "properties" => "config",
         "html" | "htm" | "xml" => "html",
         "css" | "scss" | "sass" => "css",
+        "nix" => "nix",
         "sql" => "sql",
         "lua" => "lua",
         "rb" | "rake" => "ruby",
