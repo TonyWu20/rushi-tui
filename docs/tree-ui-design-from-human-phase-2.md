@@ -1,6 +1,6 @@
 # Tree UI phase 2: navigation, filter, rows, pane
 
-Status: Implemented. Approved and shipped 2026-09-15. Refined 2026-09-25: tag colors (item 1), the kitty protocol enables `Ctrl+Shift+P` (item 4), and `Tab` replaces the typed text (item 5). Refined 2026-07-09: the tree-pane preview renders tool events through the transcript's tool display instead of `\n`-escaped JSON (item 2, below).
+Status: Implemented. Approved and shipped 2026-09-15. Refined 2026-09-16: tag colors (item 1), the kitty protocol enables `Ctrl+Shift+P` (item 4), and `Tab` replaces the typed text (item 5). Refined 2026-07-09: the tree-pane preview renders tool events through the transcript's tool display instead of `\n`-escaped JSON (item 2, below).
 Parent: `docs/tree-ui-design-from-human.md` ("Follow-up spec decisions
 (2026-09-15)"). Its open points are all resolved in this doc.
 Related: `docs/tui-preview-pane-plan.md` (the windowed pane model),
@@ -95,7 +95,7 @@ with compact JSON. The new rows:
 
 - Custom and unknown tools keep today's raw `<tool:name>` rows.
 
-- Row tags are classified and colored (human feedback 2026-09-25):
+- Row tags are classified and colored (human feedback 2026-09-16):
   `user` / `retract` rows take the `Accent` tone, `assistant` rows
   the `Report` tone, tool rows the `ToolName` tone. Every other
   class keeps the plain label. The cursor row keeps its accent
@@ -296,7 +296,7 @@ typing continues after the completion.
 
 - In a sub-stage the goto prefix is kept: the filter typed after
   the prefix is replaced, e.g. `tree sha` + Tab on `bash make -j4`
-  yields `tree bash make -j4` (human decision 2026-09-25).
+  yields `tree bash make -j4` (human decision 2026-09-16).
 - `Enter` still commits and closes, as today.
 - The picker's `press` splits the current `CtrlI | Tab` arm.
   `Tab` completes. `Ctrl+T` cycles the scope. `Ctrl+I` stays

@@ -626,11 +626,11 @@ macchiato` as the first internal color scheme. Shipped in
       row). No kernel change. Tests: `working_status_tests` in
       `bin/tui/src/render.rs`.
 
-## New feedback (2026-09-25)
+## New feedback (2026-09-16)
 
 - [x] Color the tree row tags by class: user, assistant, and
       tool rows each get a distinct fg color.
-      Shipped 2026-09-25: `PaletteItem.tag_fg` carries the role;
+      Shipped 2026-09-16: `PaletteItem.tag_fg` carries the role;
       user/retract rows take the `Accent` tone, assistant rows the
       `Report` tone, tool rows the `ToolName` tone (the same
       identity colors as the transcript panels). The cursor row
@@ -641,7 +641,7 @@ macchiato` as the first internal color scheme. Shipped in
 - [x] `Ctrl+Shift+P` must actually toggle list/preview focus; on a
       legacy terminal it arrived as plain `Ctrl+P` and toggled the
       preview pane instead.
-      Shipped 2026-09-25: `main.rs` now enables the kitty keyboard
+      Shipped 2026-09-16: `main.rs` now enables the kitty keyboard
       protocol (`PushKeyboardEnhancementFlags` with
       `DISAMBIGUATE_ESCAPE_CODES`, popped on exit) so capable
       terminals report the shift modifier, and `key_input` accepts
@@ -653,7 +653,7 @@ macchiato` as the first internal color scheme. Shipped in
 - [x] In the command palette, `Tab` should replace the typed
       query with the highlighted item, like the file picker does,
       not append to it.
-      Shipped 2026-09-25: `PaletteState::apply_complete` replaces
+      Shipped 2026-09-16: `PaletteState::apply_complete` replaces
       the typed filter portion (after the goto prefix in a
       sub-stage) with the item's text; the root stage replaces the
       whole query. Detail:
