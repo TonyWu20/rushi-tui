@@ -1197,6 +1197,11 @@ pub struct ExtHost {
     /// env var. They must not guess it from `CONFIG`. Under Nix that
     /// is a read-only store path, not the user project.
     working_dir: PathBuf,
+    /// Root of the session directories (`[paths] sessions_root`),
+    /// already resolved to an absolute path at config load. Session-
+    /// carrying ops hand exts the pre-resolved `session_dir` so they
+    /// do not re-derive it from `CONFIG` + `RUSHI_CWD` (issue #14).
+    sessions_root: PathBuf,
     out_rx: mpsc::Receiver<ExtItem>,
     stop_flag: Arc<AtomicBool>,
     /// Backoff between restart attempts. The spec values are 1 s /
@@ -1263,6 +1268,7 @@ impl ExtHost {
             disc: disc.clone(),
             config_path: cfg.config_path.clone(),
             working_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            sessions_root: cfg.sessions_root.clone(),
             out_rx,
             stop_flag: Arc::new(AtomicBool::new(false)),
             restart_delays: RESTART_DELAYS,
@@ -1359,9 +1365,23 @@ impl ExtHost {
         self.out_rx.try_recv().ok()
     }
 
+    /// Fill the host-owned context fields onto a session-carrying op.
+    /// `cwd` is always present (the host working directory, issue #14
+    /// host-cwd protocol). When a session is active, the session name
+    /// and the pre-resolved absolute `session_dir`
+    /// (`sessions_root.join(session)`) are added so extensions do not
+    /// re-derive the session dir from `CONFIG` + `RUSHI_CWD`.
+    fn fill_session_fields(&self, op: &mut Value, session: Option<&str>) {
+        op["cwd"] = json!(self.working_dir.to_string_lossy());
+        if let Some(ses) = session {
+            op["session"] = json!(ses);
+            op["session_dir"] = json!(self.sessions_root.join(ses).to_string_lossy());
+        }
+    }
+
     /// Forward one new log event to the extensions whose `kinds`
     /// list matches (an empty list means all).
-    pub fn forward_event(&self, id: u64, e: &Event, width: usize) {
+    pub fn forward_event(&self, id: u64, e: &Event, width: usize, session: Option<&str>) {
         let Some(obj) = e.obj() else {
             return;
         };
@@ -1380,10 +1400,9 @@ impl ExtHost {
                     continue;
                 }
             }
-            self.send_op(
-                i,
-                &json!({ "v": 1, "op": "event", "id": id, "event": obj, "width": width }),
-            );
+            let mut op = json!({ "v": 1, "op": "event", "id": id, "event": obj, "width": width });
+            self.fill_session_fields(&mut op, session);
+            self.send_op(i, &op);
         }
     }
 
@@ -1392,7 +1411,7 @@ impl ExtHost {
     /// transcript for their kinds. Status extensions see every
     /// `assistant_message` that carries `usage`, uncapped, so
     /// cumulative stats survive a restart from the log alone.
-    pub fn send_history(&self, events: &[Event], width: usize) {
+    pub fn send_history(&self, events: &[Event], width: usize, session: Option<&str>) {
         // No cap: the whole session history is replayed, so render
         // capable extensions see every event of their kinds.
         let base = 0;
@@ -1409,10 +1428,9 @@ impl ExtHost {
                         e.kind() == EventKind::CompactionSummary && e.get("usage").is_some();
                     if is_usage_msg || is_compaction {
                         if let Some(obj) = e.obj() {
-                            self.send_op(
-                                i,
-                                &json!({ "v": 1, "op": "event", "id": gi as u64, "event": obj, "width": width }),
-                            );
+                            let mut op = json!({ "v": 1, "op": "event", "id": gi as u64, "event": obj, "width": width });
+                            self.fill_session_fields(&mut op, session);
+                            self.send_op(i, &op);
                         }
                     }
                 }
@@ -1430,10 +1448,9 @@ impl ExtHost {
                         }
                     }
                     if let Some(obj) = e.obj() {
-                        self.send_op(
-                            i,
-                            &json!({ "v": 1, "op": "event", "id": gi as u64, "event": obj, "width": width }),
-                        );
+                        let mut op = json!({ "v": 1, "op": "event", "id": gi as u64, "event": obj, "width": width });
+                        self.fill_session_fields(&mut op, session);
+                        self.send_op(i, &op);
                     }
                 }
             }
@@ -1655,9 +1672,7 @@ impl ExtHost {
                 "op": "commands",
                 "loop_running": loop_running,
             });
-            if let Some(ses) = session {
-                obj["session"] = json!(ses);
-            }
+            self.fill_session_fields(&mut obj, session);
             self.send_op(i, &obj);
             // Track the pending request so poll_commands can time out.
             self.inner
@@ -1671,7 +1686,7 @@ impl ExtHost {
     /// Send an `invoke` op to the extension that owns the given
     /// command. Returns the request id, or `None` when no extension
     /// is alive.
-    pub fn request_invoke(&self, ext: &str, id: &str, value: Option<&str>) -> Option<u64> {
+    pub fn request_invoke(&self, ext: &str, id: &str, value: Option<&str>, session: Option<&str>) -> Option<u64> {
         let i = self.disc.index_by_name.get(ext)?;
         let s = &self.inner.slots[*i];
         if !matches!(
@@ -1701,6 +1716,7 @@ impl ExtHost {
         if let Some(v) = value {
             obj["value"] = json!(v);
         }
+        self.fill_session_fields(&mut obj, session);
         self.send_op(*i, &obj);
         Some(req)
     }
@@ -3687,6 +3703,7 @@ done
             )
             .unwrap()],
             80,
+            None,
         );
         assert!(
             wait_item(&host, "lines reply", |i| matches!(
@@ -4281,7 +4298,7 @@ done
         let user = produce::user_message("hi");
         // The status extension gets only the usage-bearing assistant
         // messages, not the user message.
-        host.send_history(&[user.clone(), usage.clone(), no_usage.clone()], 80);
+        host.send_history(&[user.clone(), usage.clone(), no_usage.clone()], 80, None);
         // A long deadline: the extension is a real bash process, and
         // the spawn can be slow under a loaded, parallel test suite.
         let deadline = Instant::now() + Duration::from_millis(15000);
@@ -4328,8 +4345,8 @@ done
         )
         .unwrap();
         let um = produce::user_message("no forward for me");
-        host.forward_event(5, &um, 80);
-        host.forward_event(6, &tr, 80);
+        host.forward_event(5, &um, 80, None);
+        host.forward_event(6, &tr, 80, None);
         // A long deadline: the extension is a real bash process, and
         // the spawn can be slow under a loaded, parallel test suite.
         let deadline = Instant::now() + Duration::from_millis(15000);
