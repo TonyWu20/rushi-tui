@@ -128,7 +128,7 @@ macchiato` as the first internal color scheme. Shipped in
       gutter, the counts, the `:N` goto, and the stage-2 regex
       search with the highlight and the `N` view restore. Detail:
       `docs/tui-conversation-browsing.md`.
-- [ ] Select-and-yank in the browse mode. The browse mode is
+- [x] Select-and-yank in the browse mode. The browse mode is
       the natural fit for vim `Visual` mode: select text on
       the rendered transcript and yank it to a register. The
       yanked text is pasteable into the draft (`p` in the
@@ -141,7 +141,12 @@ macchiato` as the first internal color scheme. Shipped in
       square brackets, braces, angle brackets). No new
       dependency: the `vim_editor.rs` motion and text-object
       primitives are reused. The register store is shared
-      between the editor and the browse overlay. Detail:
+      between the editor and the browse overlay. Shipped
+      2026-09-11 (commit `5c82155`): `VisualSel` state,
+      `yank_motion`, `yank_linewise`, `visual_yank_range`,
+      `raw_yank_text` in `bin/tui/src/browse.rs`; shared
+      `registers` on `App` (`bin/tui/src/app.rs`); OSC 52
+      host-clipboard write. Detail:
       `docs/tui-conversation-browsing.md` (section 11).
 - [x] A file picker on the `@` trigger. The user types `@` in
       the input box. A candidate file list opens. It re-ranks as
@@ -227,9 +232,14 @@ macchiato` as the first internal color scheme. Shipped in
       background jobs in the shell. Shipped: `Ctrl+Z` sends SIGTSTP,
       the shell backgrounds the TUI; `fg` resumes it. The terminal is
       restored before suspend and re-initialised on resume.
-- [ ] The current markdown table rendering of the messages cannot correctly
+- [x] The current markdown table rendering of the messages cannot correctly
       distinguish if `|` is used as the table column marker or written as part of the
-      text or code, e.g. the closure syntax in Rust `.map(|e| ...)`/`.unwrap_or(|e| ...)`
+      text or code, e.g. the closure syntax in Rust `.map(|e| ...)`/`.unwrap_or(|e| ...)`.
+      Shipped: `is_table_block_start` (`bin/tui/src/highlight.rs`) now requires the
+      `|---|` separator row below a `|`-prefixed line before treating it as a table;
+      a `|` line with no separator (a closure in code or prose) renders as plain
+      text. Pinned by the `snap_table_pipe_not_a_table` snapshot. Detail:
+      `docs/tui-ratatui-ecosystem-audit.md` section 4.1, bug 1.
 - [x] Stream rendering of the model response. Shipped 2026-09-13: the
       `harness` loop owns `sessions/<n>/.model-stream`, the `model` binary writes one
       JSON line per SSE delta, and the TUI polls the file each frame to render a live
@@ -312,10 +322,17 @@ macchiato` as the first internal color scheme. Shipped in
 
 ## New requests (2026-09-07)
 
-- [ ] Bug: `tool:edit` results always show `diff +0 -0`. Evidence session:
-      `sessions/goal-ux-impl`
-- [ ] `tool:edit` shows diff in vertical split when terminal is wide, horizontal
-      split when terminal is narrow.
+- [x] Bug: `tool:edit` results always show `diff +0 -0`. Evidence session:
+      `sessions/goal-ux-impl`. Fixed: the diff stat row now computes
+      `added`/`removed` from the positional diff of the `before` and
+      `after` line lists in `edit_body` (`bin/tui/src/tool_display.rs`),
+      so a changed file shows its real line counts instead of `+0 -0`.
+- [x] `tool:edit` shows diff in vertical split when terminal is wide, horizontal
+      split when terminal is narrow. Shipped: `DiffView::Auto` picks
+      `Split` (two-area, side-by-side) when the pane width is at least
+      `2 * DIFF_SPLIT_MIN_WIDTH` (60 cols) and falls back to `Unified`
+      (stacked) below that. The `DIFF_SPLIT_MIN_WIDTH` constant and
+      `diff_layout` live in `bin/tui/src/tool_display.rs`.
 - [ ] Bug: the input box does not highlight the whole visual
       selection. In `VISUAL` / `V-LINE` the draft shows only the
       inverted block on the cursor cell; the chars between the
@@ -382,13 +399,17 @@ macchiato` as the first internal color scheme. Shipped in
        path in the header; the `snap_pending_approval_banner` call line
        is now the bare `bash` name; the 31 layout snapshots were
        regenerated against the new top-only session frame.
-- [ ] Simplify the live stream: stream the model response into the
+- [x] Simplify the live stream: stream the model response into the
       main content area instead of a pinned block that grows and
       collapses. `Ctrl+T` should collapse and expand all thinking
-      blocks, including the live-streaming one. Open: the pinned
-      block cannot be scrolled and its grow/collapse drifts the
-      cursorline position. Not work for that session. Detail:
-      `docs/tui-streaming-simplify.md`.
+      blocks, including the live-streaming one. Shipped 2026-09-14:
+      the in-progress model response now renders inline in the
+      transcript tail instead of a pinned layout cell between the
+      transcript and the working row; no dedicated layout cell is
+      allocated, so the layout no longer shifts on start/complete.
+      The `Ctrl+T` toggle covers both settled and live-streaming
+      thinking blocks. Detail: `docs/tui-streaming-simplify.md`
+      (section 3).
 
 ## New requests (2026-09-12)
 
@@ -416,15 +437,15 @@ macchiato` as the first internal color scheme. Shipped in
       the user while reading a rendered reply; unrelated to the
       streaming-perf work tracked elsewhere. Open.
 
-- [ ] Observation (2026-09-14): the picker preview pane truncates
+- [x] Observation (2026-09-14): the picker preview pane truncates
       file content to 50 lines (`FilePreviewer::new(50)` in
-      `bin/tui/src/render.rs`). The user wants no truncation — the
-      full file should be scrollable. Design: "no truncation" does
-      not mean rendering the whole file at once; it means windowed
-      rendering (only the visible window is highlighted per frame)
-      plus a cancellable background load, so an accidental hover on
-      a huge ignored file never freezes the TUI. Detail:
-      `docs/tui-preview-pane-plan.md`.
+      `bin/tui/src/render.rs`). Shipped 2026-09-15: the 50-line cap
+      is gone. `FilePreviewer::new` now takes a shared
+      `Arc<Mutex<WindowCache>>` and renders only the visible window
+      (`bin/tui/src/picker/preview.rs`, commit `7fc8a54` "tui:
+      windowed, cancellable, size-guarded picker preview pane"); a
+      layer-1 byte cap guards against huge files, and the background
+      load is cancellable. Detail: `docs/tui-preview-pane-plan.md`.
 
 ## New requests (2026-09-13)
 
@@ -459,13 +480,21 @@ macchiato` as the first internal color scheme. Shipped in
       transcript renders every in-memory event. Detail:
       `docs/tui-conversation-browsing.md` section 4.6.
 
-- [ ] Yank returns the raw source (message bodies and thinking
+- [x] Yank returns the raw source (message bodies and thinking
       blocks) instead of the rendered text.
-      Decision 2026-09-13: not implemented. The user conceded
-      to rendered-text yank. The renderer exposes no line
-      level source mapping. Anchoring raw ownership at a
-      block's first line made sub-block yanks behave
-      unexpectedly. A raw export path may be explored later.
+      Superseded: the 2026-09-13 entry recorded "not implemented,
+      user conceded to rendered-text yank", but the line-level raw
+      source map (`line_raw`, `bin/tui/src/app.rs`) and the
+      browse-mode raw yank path (`browse.rs` `complete_yank` /
+      `raw_yank_text`) landed in commit `5c82155` + `0e1fa5f`
+      (2026-09-11), so the feature is in the tree. Shipped: the
+      transcript cache carries a per-line raw source map
+      (`line_raw`, `bin/tui/src/app.rs`), and the browse-mode yank
+      (`browse.rs` `complete_yank` / `raw_yank_text`) prefers the
+      raw source over the rendered text, falling back to the
+      rendered text when no raw mapping is available. The register
+      store is shared with the editor. Detail:
+      `docs/tui-conversation-browsing.md` (section 11.3).
 
 ## New requests (2026-09-15)
 
