@@ -22,7 +22,7 @@
 //! cached per event seq in an LRU bound
 //! (docs/tui-preview-pane-plan.md, windowed highlighting).
 //!
-//! Tool tree events (`PreviewKind::Tool`, the 2026-07-09 item 2
+//! Tool tree events (`PreviewKind::Tool`, the 2026-09-17 item 2
 //! refinement) instead render their decoded `tool_payload` through
 //! the transcript's tool display: results through
 //! `tool_display::body_rows`, calls through
@@ -60,7 +60,7 @@ pub fn footer_for_stage(stage: &PaletteStage) -> Option<&'static str> {
 /// (docs/tree-ui-design-from-human-phase-2.md item 2). `cache` is
 /// the LRU bound of highlighted tree-pane bodies. The key is the
 /// item id, the event's 1-based log seq. `tool_display` and
-/// `width` drive the `Tool` pipeline (item 2, 2026-07-09
+/// `width` drive the `Tool` pipeline (item 2, 2026-09-17
 /// refinement): the body layout is width-dependent, and the user's
 /// `[tui] tool_display` config governs the per-tool treatment.
 pub fn render_preview(
@@ -128,7 +128,7 @@ fn tree_pane_lines(
 }
 
 /// The tool-event pane pipeline
-/// (docs/tree-ui-design-from-human-phase-2.md item 2, 2026-07-09
+/// (docs/tree-ui-design-from-human-phase-2.md item 2, 2026-09-17
 /// refinement). Result events render through the transcript's
 /// tool-result display (`tool_display::body_rows`), so result text
 /// shows as real lines with the transcript's per-tool treatment
@@ -450,7 +450,7 @@ mod tests {
     /// The tool result renders through the transcript's display:
     /// the result `text` shows as real lines, never as `\n`-escaped
     /// JSON (docs/tree-ui-design-from-human-phase-2.md item 2,
-    /// 2026-07-09 refinement).
+    /// 2026-09-17 refinement).
     #[test]
     fn a_bash_result_renders_real_lines_not_escaped_json() {
         use crate::palette::items::{CmdKind, PreviewKind, ToolPayload};

@@ -1450,7 +1450,7 @@ fn wrap_markdown_p_provenance(
 /// entries when the summary is empty. Malformed items drop; the
 /// rest ride on, like the capture in commit `61cde02`. Also feeds
 /// the tree preview pane for pure-thinking assistant events
-/// (docs/tree-ui-design-from-human-phase-2.md, 2026-07-09).
+/// (docs/tree-ui-design-from-human-phase-2.md, 2026-09-17).
 pub(crate) fn thinking_text(reasoning: Option<&Vec<serde_json::Value>>) -> Option<String> {
     let items = reasoning?;
     let mut parts: Vec<String> = Vec::new();

@@ -20,7 +20,7 @@ use crate::palette::state::PaletteState;
 /// Takes the full ranked item list, the palette state machine, and a
 /// palette for colors. The hardware cursor is placed on the input bar.
 /// The `tool_display` config drives the `Tool` preview pipeline
-/// (docs/tree-ui-design-from-human-phase-2.md item 2, 2026-07-09
+/// (docs/tree-ui-design-from-human-phase-2.md item 2, 2026-09-17
 /// refinement). Seven parameters, so a `bon` builder
 /// (docs/coding-conventions.md).
 #[builder]
@@ -256,7 +256,7 @@ fn render_preview_pane(
     // LRU bound (docs/tui-preview-pane-plan.md, windowed
     // highlighting). The Tool pipeline keys the cache by pane
     // width: its body layout is width-dependent (item 2,
-    // 2026-07-09 refinement).
+    // 2026-09-17 refinement).
     let content = render_preview(
         item,
         state.option_cursor,

@@ -3061,7 +3061,7 @@ impl App {
         // row labels; `call_details` (id → name + argument JSON)
         // feeds the tool payload of the preview pane
         // (docs/tree-ui-design-from-human-phase-2.md items 1, 2,
-        // 2026-07-09 refinement).
+        // 2026-09-17 refinement).
         let call_names = self.call_names();
         let call_details = self.call_details();
         let mut candidates: Vec<(usize, String)> = Vec::new();
@@ -3089,7 +3089,7 @@ impl App {
                 // Tool events carry a decoded payload that the pane
                 // renders through the transcript's tool display
                 // (docs/tree-ui-design-from-human-phase-2.md item 2,
-                // 2026-07-09 refinement); every other event keeps
+                // 2026-09-17 refinement); every other event keeps
                 // its plain source text. The full body is uncapped
                 // (item 2); the pane scrolls it, and the "Enter
                 // offers the four options" suffix renders as a plain
@@ -4558,7 +4558,7 @@ fn tree_event_preview(e: &Event, call_names: &HashMap<String, String>) -> String
         // A pure-thinking assistant event (empty `content`) shows
         // its thinking text under a `thinking:` marker so the row
         // is not a bare `<assistant>` (docs/tree-ui-design-from-
-        // human-phase-2.md, 2026-07-09). `truncate_one_line` below
+        // human-phase-2.md, 2026-09-17). `truncate_one_line` below
         // keeps just the first line at 120 chars.
         EventKind::AssistantMessage => {
             let content = e.get_str("content").unwrap_or("").to_string();
@@ -4654,7 +4654,7 @@ fn tree_event_body(e: &Event) -> String {
         // `reasoning` array that carries text) falls back to the
         // thinking block so the tree pane shows the model's between-
         // tool reasoning instead of an empty body
-        // (docs/tree-ui-design-from-human-phase-2.md, 2026-07-09).
+        // (docs/tree-ui-design-from-human-phase-2.md, 2026-09-17).
         EventKind::AssistantMessage => {
             let content = e.get_str("content").unwrap_or("").to_string();
             if !content.is_empty() {
@@ -4686,7 +4686,7 @@ fn tree_event_body(e: &Event) -> String {
 /// The preview-pane pipeline of a tree item
 /// (docs/tree-ui-design-from-human-phase-2.md item 2). Tool calls
 /// and results use the transcript's tool display (`PreviewKind::Tool`,
-/// 2026-07-09 refinement). Messages use the markdown pass.
+/// 2026-09-17 refinement). Messages use the markdown pass.
 fn tree_preview_kind(e: &Event) -> crate::palette::items::PreviewKind {
     use crate::palette::items::PreviewKind;
     match e.kind() {
@@ -4699,7 +4699,7 @@ fn tree_preview_kind(e: &Event) -> crate::palette::items::PreviewKind {
 }
 
 /// The decoded tool payload of one tree tool event
-/// (docs/tree-ui-design-from-human-phase-2.md item 2, 2026-07-09
+/// (docs/tree-ui-design-from-human-phase-2.md item 2, 2026-09-17
 /// refinement). A call carries its own arguments; a result resolves
 /// its tool name and call arguments through the call `id`
 /// (`App::call_details`).
@@ -6008,7 +6008,7 @@ mod tree_prettify_tests {
     /// A pure-thinking assistant event (empty `content`, a `reasoning`
     /// array that carries text) shows its thinking block in the
     /// preview body instead of an empty pane
-    /// (docs/tree-ui-design-from-human-phase-2.md, 2026-07-09).
+    /// (docs/tree-ui-design-from-human-phase-2.md, 2026-09-17).
     #[test]
     fn a_pure_thinking_assistant_event_shows_its_thinking_block() {
         use crate::palette::items::PreviewKind;
@@ -6044,7 +6044,7 @@ mod tree_prettify_tests {
     /// The tree row of a pure-thinking assistant event carries the
     /// thinking text as a one-line preview under a `thinking:`
     /// marker, so the row is not a bare `<assistant>`
-    /// (docs/tree-ui-design-from-human-phase-2.md, 2026-07-09).
+    /// (docs/tree-ui-design-from-human-phase-2.md, 2026-09-17).
     #[test]
     fn a_pure_thinking_assistant_row_shows_a_thinking_one_liner() {
         let events = vec![

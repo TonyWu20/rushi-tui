@@ -39,7 +39,7 @@ pub enum PreviewKind {
     /// tool-result display (`crate::tool_display::body_rows`), so
     /// result text shows as real lines instead of escaped JSON
     /// (docs/tree-ui-design-from-human-phase-2.md item 2,
-    /// 2026-07-09 refinement). `tool_payload` is always `Some` for
+    /// 2026-09-17 refinement). `tool_payload` is always `Some` for
     /// this kind.
     Tool,
 }
@@ -54,7 +54,7 @@ pub struct CmdOption {
 }
 
 /// The decoded payload of one tool tree event
-/// (docs/tree-ui-design-from-human-phase-2.md item 2, 2026-07-09
+/// (docs/tree-ui-design-from-human-phase-2.md item 2, 2026-09-17
 /// refinement). The pane renders it through the transcript's
 /// tool-result display instead of re-serializing compact JSON, so
 /// string fields show as real lines instead of `\n`-escaped text.

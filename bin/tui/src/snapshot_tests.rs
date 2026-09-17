@@ -1330,7 +1330,7 @@ fn preview_border_fg(
     out
 }
 
-/// Item 2 (2026-07-09 refinement): the tree stage's preview pane
+/// Item 2 (2026-09-17 refinement): the tree stage's preview pane
 /// renders a tool event through the transcript's tool display — a
 /// `bash` call shows its arguments (`command: …`) as readable text
 /// instead of escaped compact JSON — plus the plain option-hint

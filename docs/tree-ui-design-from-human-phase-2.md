@@ -1,6 +1,6 @@
 # Tree UI phase 2: navigation, filter, rows, pane
 
-Status: Implemented. Approved and shipped 2026-09-15. Refined 2026-09-16: tag colors (item 1), the kitty protocol enables `Ctrl+Shift+P` (item 4), and `Tab` replaces the typed text (item 5). Refined 2026-07-09: the tree-pane preview renders tool events through the transcript's tool display instead of `\n`-escaped JSON (item 2, below).
+Status: Implemented. Approved and shipped 2026-09-15. Refined 2026-09-16: tag colors (item 1), the kitty protocol enables `Ctrl+Shift+P` (item 4), and `Tab` replaces the typed text (item 5). Refined 2026-09-17: the tree-pane preview renders tool events through the transcript's tool display instead of `\n`-escaped JSON (item 2, below).
 Parent: `docs/tree-ui-design-from-human.md` ("Follow-up spec decisions
 (2026-09-15)"). Its open points are all resolved in this doc.
 Related: `docs/tui-preview-pane-plan.md` (the windowed pane model),
@@ -160,7 +160,7 @@ Functions to change:
   `tree_event_items` appends to the help stays as a plain line
   after the highlighted body.
 
-- Refinement (2026-07-09): tool-call / tool-result tree events no
+- Refinement (2026-09-17): tool-call / tool-result tree events no
   longer re-serialize their JSON. The original pipeline re-serialized
   the compact record through `jaq_json::write::Pp`. That escapes
   string values, so result text showed as raw `\n`-escaped JSON.

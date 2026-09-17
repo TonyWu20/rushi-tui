@@ -566,7 +566,7 @@ macchiato` as the first internal color scheme. Shipped in
       body cache is `TreePreviewCache` (LRU). The 600-char cap is
       dropped; the pane scrolls. Tests: `palette::preview::tests`
       (parse, fallback, cache) and `snap_tree_event_pane_lines`.
-      Refined 2026-07-09: tool events no longer re-serialize JSON
+      Refined 2026-09-17: tool events no longer re-serialize JSON
       (the `\n`-escaped-text complaint). The pane now renders them
       through the transcript's tool display: results via
       `tool_display.rs::body_rows`, calls via the new

@@ -404,7 +404,7 @@ pub fn body_rows(
 }
 
 /// The argument listing of a `tool_call` tree event
-/// (docs/tree-ui-design-from-human-phase-2.md item 2, 2026-07-09
+/// (docs/tree-ui-design-from-human-phase-2.md item 2, 2026-09-17
 /// refinement). One `key: value` row per argument, in the
 /// `ToolOutput` and `Hint` tones. A multi-line string value
 /// (the `content` of a write, the `old_string` / `new_string` of an
