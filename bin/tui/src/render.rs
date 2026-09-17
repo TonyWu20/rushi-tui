@@ -4839,7 +4839,7 @@ pub fn draw(
         // Clone the tool-display config so the mutable palette-state
         // borrow below does not overlap an immutable borrow of the
         // same app.
-        let tool_display = app.tool_display().clone();
+        let tool_display = *app.tool_display();
         let pstate = app.palette_state_mut();
         pstate.visible = rows;
         pstate.sync(items.len());
