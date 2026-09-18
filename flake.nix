@@ -1,9 +1,8 @@
 {
-  description = "rushi-tui — the swappable TUI front-end (Tier-2, docs/tui-ext-repo-split.md)";
+  description = "rushi-tui — the terminal UI front-end for the rushi agent harness";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    flake-utils.url = "github:numtide/flake-utils";
     fenix = {
       url = "github:nix-community/fenix";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -16,12 +15,12 @@
     rushi-kernel = { url = "github:TonyWu20/rushi"; };
   };
 
-  outputs = { self, nixpkgs, flake-utils, fenix, rushi-kernel, ... }:
+  outputs = { self, nixpkgs, fenix, rushi-kernel, ... }:
     let
       # Explicit system list instead of eachDefaultSystem (same reason
       # as the kernel flake: eachDefaultSystem transposes the result and
       # breaks the standard packages.<system>.<name> shape).
-      supportedSystems = [ "x86_64-linux" "aarch64-linux" ];
+      supportedSystems = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" ];
       pkgLib = nixpkgs.lib;
 
       forSystem = system:
@@ -64,6 +63,15 @@
             # DRT mirror.
             cargoBuildFlags = [ "-p" "tui" ];
             doCheck = false;
+            # Without this, `nix search` / `nix path-info` show the
+            # package as "Undocumented". One attribute covers both
+            # packages.<system>.default and .tui (same derivation).
+            # MIT: repo-root LICENSE, mirroring the kernel repo
+            # (2026-09-18 decision).
+            meta = {
+              description = "Interactive terminal front-end for the rushi agent harness (the Ratatui TUI binary)";
+              license = pkgLib.licenses.mit;
+            };
             # No installPhase override: the default cargoInstallHook copies
             # the target-<triple>/release binaries into $out/bin (it knows
             # the target subdir). The kernel's side-by-side resolver

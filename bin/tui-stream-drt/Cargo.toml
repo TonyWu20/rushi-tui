@@ -2,6 +2,7 @@
 name = "tui-stream-drt"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 
 # The Rust mirror of lean/TuiStreamSpec.lean (the `lean-verify` op=drt
 # production executable). Std-only: the differential gate must stay
