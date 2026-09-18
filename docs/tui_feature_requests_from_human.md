@@ -690,3 +690,11 @@ macchiato` as the first internal color scheme. Shipped in
       Tests: `tab_replaces_the_typed_query_in_the_root_stage`,
       `tab_replaces_the_filter_after_the_goto_prefix`,
       `tab_replaces_the_tree_filter_with_the_row_label`.
+
+## New requests (2026-09-17)
+
+- [ ] A cross-session status dashboard: see `working` / `idle` /
+      `blocked` for all rushi sessions at a glance, across tmux panes
+      and projects. Open discussion of placement (TUI tab row vs
+      standalone monitor binary vs UI extension) and the blocked
+      detection rule. Detail: `docs/tui-session-monitor.md`.
