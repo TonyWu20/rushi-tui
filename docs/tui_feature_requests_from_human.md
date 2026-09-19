@@ -698,3 +698,36 @@ macchiato` as the first internal color scheme. Shipped in
       and projects. Open discussion of placement (TUI tab row vs
       standalone monitor binary vs UI extension) and the blocked
       detection rule. Detail: `docs/tui-session-monitor.md`.
+
+## New requests (2026-09-19)
+
+- [x] Add vim's `ge` motion (backward to the end of the previous
+      word) to both the input box (vim editor) and browse mode,
+      mirroring neovim's `ge`. In browse it is entered as `g` then
+      `e` (the `g` prefix is shared with `gg`), and a `yge` yank form
+      yanks through the previous word's end.
+      Shipped 2026-09-19: a shared `word_end_backward` primitive
+      (plus a `WORD_end_backward` variant for `gE`) in
+      `bin/tui/src/vim_editor.rs`; `ge` / `gE` wired into the
+      editor's normal-mode and visual-mode `g`-prefix blocks and the
+      operator-motion `g` block. Browse reuses the same primitive
+      under `WordClass::Browse` (the hyphen joins a word) through
+      `browse_ge_range` in `bin/tui/src/browse.rs`; plain `ge` is
+      wired into the browse key table and `yge` into the `y`
+      operator. The operator range is inclusive, like `e`. Detail:
+      `docs/vim-editor-design.md` (editor `ge` / `gE`),
+      `docs/tui-conversation-browsing.md` (browse `ge` / `yge`, the
+      section 4.4 key table and the section 11.4 yank table).
+      Tests: `word_class_tests` in `vim_editor.rs`
+      (`ge_lands_on_the_end_of_the_previous_word`,
+      `counted_ge_steps_word_by_word`, `ge_crosses_lines_backwards`,
+      `ge_stops_at_a_blank_line_boundary`,
+      `ge_word_classes_split_the_hyphen_differently`,
+      `ge_uppercase_lands_on_the_end_of_the_previous_word`) and
+      `word_motion_tests` in `browse.rs`
+      (`ge_lands_on_the_end_of_the_previous_word`,
+      `ge_folds_the_hyphenated_word_in_browse`,
+      `counted_ge_steps_word_by_word_in_browse`,
+      `stale_g_prefix_cancels_before_plain_e`,
+      `ge_crosses_lines_in_browse`,
+      `yge_yanks_through_the_previous_word_end`).

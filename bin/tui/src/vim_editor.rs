@@ -1141,6 +1141,11 @@ impl Editor {
         // --- pending `g` prefix ---
         if self.pending_g {
             self.pending_g = false;
+            let count = self.count.max(1);
+            let motion_count = match self.pending_operator {
+                Some(_) => self.pending_operator_count * count,
+                None => count,
+            };
             if key == Key::Char('g') {
                 let count_explicit = self.count_started;
                 let n = if count_explicit { self.count.max(1) } else { 1 };
@@ -1149,6 +1154,30 @@ impl Editor {
                     self.record_key('g');
                 }
                 let res = go_to_first_line(&self.lines, (self.row, self.col), n);
+                self.run_motion(res, registers);
+                if self.pending_operator.is_none() {
+                    self.reset_operator_state();
+                }
+                return None;
+            }
+            // `ge` / `gE`: the end of the previous word / WORD
+            // (the vim `ge` motion, inclusive, operator-aware).
+            if key == Key::Char('e') || key == Key::Char('E') {
+                let ge = key == Key::Char('e');
+                if self.is_recording() {
+                    self.record_key('g');
+                    self.record_key(if ge { 'e' } else { 'E' });
+                }
+                let res = if ge {
+                    word_end_backward(
+                        &self.lines,
+                        (self.row, self.col),
+                        motion_count,
+                        WordClass::Editor,
+                    )
+                } else {
+                    WORD_end_backward(&self.lines, (self.row, self.col), motion_count)
+                };
                 self.run_motion(res, registers);
                 if self.pending_operator.is_none() {
                     self.reset_operator_state();
@@ -2292,6 +2321,23 @@ impl Editor {
                 let res = go_to_first_line(&self.lines, (self.row, self.col), n);
                 self.go_to(res.pos);
             }
+            // `ge` / `gE`: extend the visual selection to the end of the
+            // previous word / WORD (the vim `ge` motion).
+            else if key == Key::Char('e') || key == Key::Char('E') {
+                let ge = key == Key::Char('e');
+                let n = self.count.max(1);
+                let res = if ge {
+                    word_end_backward(
+                        &self.lines,
+                        (self.row, self.col),
+                        n,
+                        WordClass::Editor,
+                    )
+                } else {
+                    WORD_end_backward(&self.lines, (self.row, self.col), n)
+                };
+                self.go_to(res.pos);
+            }
             self.reset_operator_state();
             return None;
         }
@@ -3018,6 +3064,85 @@ fn next_word_end(lines: &[String], line: usize, col: usize, cls: WordClass) -> (
     (line, col)
 }
 
+/// `ge` primitive — the end of the previous word (the vim `ge` motion).
+///
+/// The backward mirror of [`next_word_end`]: skip the word (or
+/// punctuation run) the cursor sits on, then skip blanks backwards
+/// (possibly across lines) and land on the last non-blank char, which
+/// is the end of the previous word run. A blank line is a word
+/// boundary: the motion stops at its first column rather than
+/// crossing it (the reference rule, the mirror of `next_word_end`).
+/// Reaching the start of the file leaves the cursor at `(0, 0)`.
+fn prev_word_end(lines: &[String], line: usize, col: usize, cls: WordClass) -> (usize, usize) {
+    if lines.is_empty() {
+        return (0, 0);
+    }
+    let mut line = line as i64;
+    let mut col = col as i64;
+    if col < 0 {
+        col = 0;
+    }
+
+    // Step 1: skip the word / punct run the cursor sits on, so the
+    // target is the word strictly to the left of the current one. A
+    // cursor on a blank or past the line end skips no run.
+    let text = chars_of(lines, line.max(0) as usize);
+    let ch = text.get(col as usize).copied();
+    if ch.is_some_and(|c| cls.is_word(c)) {
+        while col > 0 && cls.is_word(text[(col - 1) as usize]) {
+            col -= 1;
+        }
+    } else if ch.is_some_and(|c| cls.is_punct(c)) {
+        while col > 0 && cls.is_punct(text[(col - 1) as usize]) {
+            col -= 1;
+        }
+    }
+    // Step off: move to just before the start of that run.
+    col -= 1;
+
+    // Step 2: skip blanks backwards, possibly across lines.
+    loop {
+        let text = chars_of(lines, line.max(0) as usize);
+        while col >= 0 && (col as usize) < text.len() && is_blank_char(text[col as usize]) {
+            col -= 1;
+        }
+        if col >= 0 {
+            break;
+        }
+        line -= 1;
+        if line < 0 {
+            return (0, 0);
+        }
+        let t = chars_of(lines, line as usize);
+        // A blank line is a word boundary: stop at its first column.
+        if t.is_empty() {
+            return (line as usize, 0);
+        }
+        col = t.len() as i64 - 1;
+    }
+
+    // Step 3: the last non-blank char is the end of the previous word.
+    (line as usize, col as usize)
+}
+
+/// `ge` — the end of the previous word (inclusive motion).
+pub(crate) fn word_end_backward(
+    lines: &[String],
+    cursor: (usize, usize),
+    count: u32,
+    cls: WordClass,
+) -> MotionResult {
+    let mut pos = cursor;
+    for _ in 0..count.max(1) {
+        pos = prev_word_end(lines, pos.0, pos.1, cls);
+    }
+    MotionResult {
+        pos,
+        linewise: false,
+        inclusive: true,
+    }
+}
+
 #[allow(non_snake_case)]
 /// `W` — the start of the next WORD (blank-delimited).
 fn WORD_forward(lines: &[String], cursor: (usize, usize), count: u32) -> MotionResult {
@@ -3159,6 +3284,66 @@ fn next_WORD_end(lines: &[String], line: usize, col: usize) -> (usize, usize) {
         col += 1;
     }
     (line, col)
+}
+
+#[allow(non_snake_case)]
+/// `gE` primitive — the end of the previous WORD (blank-delimited).
+/// The mirror of [`next_WORD_end`]. A blank line is a boundary.
+fn prev_WORD_end(lines: &[String], line: usize, col: usize) -> (usize, usize) {
+    if lines.is_empty() {
+        return (0, 0);
+    }
+    let mut line = line as i64;
+    let mut col = col as i64;
+    if col < 0 {
+        col = 0;
+    }
+
+    // Step 1: skip the non-blank run the cursor sits on, then step off it.
+    let text = chars_of(lines, line.max(0) as usize);
+    let ch = text.get(col as usize).copied();
+    if ch.is_some_and(|c| !is_blank_char(c)) {
+        while col > 0 && !is_blank_char(text[(col - 1) as usize]) {
+            col -= 1;
+        }
+    }
+    col -= 1;
+
+    // Step 2: skip blanks backwards, possibly across lines.
+    loop {
+        let text = chars_of(lines, line.max(0) as usize);
+        while col >= 0 && (col as usize) < text.len() && is_blank_char(text[col as usize]) {
+            col -= 1;
+        }
+        if col >= 0 {
+            break;
+        }
+        line -= 1;
+        if line < 0 {
+            return (0, 0);
+        }
+        let t = chars_of(lines, line as usize);
+        if t.is_empty() {
+            return (line as usize, 0);
+        }
+        col = t.len() as i64 - 1;
+    }
+
+    (line as usize, col as usize)
+}
+
+#[allow(non_snake_case)]
+/// `gE` — the end of the previous WORD (inclusive motion).
+fn WORD_end_backward(lines: &[String], cursor: (usize, usize), count: u32) -> MotionResult {
+    let mut pos = cursor;
+    for _ in 0..count.max(1) {
+        pos = prev_WORD_end(lines, pos.0, pos.1);
+    }
+    MotionResult {
+        pos,
+        linewise: false,
+        inclusive: true,
+    }
 }
 
 /// `gg` — to the first line, or line N with a count (linewise).
@@ -4283,7 +4468,7 @@ fn find_next_match(
 
 #[cfg(test)]
 mod word_class_tests {
-    use super::{word_backward, word_end, word_forward, WordClass};
+    use super::{word_backward, word_end, word_end_backward, word_forward, WORD_end_backward, WordClass};
 
     fn lines() -> Vec<String> {
         vec!["foo-bar baz".to_string()]
@@ -4339,5 +4524,86 @@ mod word_class_tests {
         // On the last char of the last word, `e` does not move.
         let res = word_end(&lines(), (0, 10), 1, WordClass::Browse);
         assert_eq!(res.pos, (0, 10));
+    }
+
+    fn three_words() -> Vec<String> {
+        // "foo bar baz": f0 o1 o2 _3 b4 a5 r6 _7 b8 a9 z10
+        vec!["foo bar baz".to_string()]
+    }
+
+    #[test]
+    fn ge_lands_on_the_end_of_the_previous_word() {
+        // "foo bar baz": f0 o1 o2 sp3 b4 a5 r6 sp7 b8 a9 z10.
+        // From any char of `baz` (or the blank before it), `ge`
+        // lands on the `r` of `bar` (col 6).
+        for col in [8, 9, 10, 7] {
+            let res = word_end_backward(&three_words(), (0, col), 1, WordClass::Editor);
+            assert_eq!(res.pos, (0, 6), "ge from col {col}");
+            assert!(res.inclusive);
+        }
+        // From any char of `bar`, `ge` lands on the end of `foo`
+        // (col 2).
+        for col in [4, 5, 6] {
+            let res = word_end_backward(&three_words(), (0, col), 1, WordClass::Editor);
+            assert_eq!(res.pos, (0, 2), "ge from col {col}");
+        }
+        // No word before `foo`: the cursor stays.
+        let res = word_end_backward(&three_words(), (0, 0), 1, WordClass::Editor);
+        assert_eq!(res.pos, (0, 0));
+    }
+
+    #[test]
+    fn counted_ge_steps_word_by_word() {
+        // `2ge` from the last word steps back two word ends.
+        let res = word_end_backward(&three_words(), (0, 10), 2, WordClass::Editor);
+        assert_eq!(res.pos, (0, 2));
+    }
+
+    #[test]
+    fn ge_crosses_lines_backwards() {
+        let texts = vec!["foo bar".to_string(), "baz qux".to_string()];
+        // From the first word of line 2, `ge` lands on the end of the
+        // last word of line 1 (`r`, col 6).
+        let res = word_end_backward(&texts, (1, 0), 1, WordClass::Editor);
+        assert_eq!(res.pos, (0, 6));
+    }
+
+    #[test]
+    fn ge_stops_at_a_blank_line_boundary() {
+        // A blank line is a word boundary: `ge` parks at its first
+        // column instead of crossing it (the reference rule).
+        let texts = vec!["a b".to_string(), String::new(), "c d".to_string()];
+        let res = word_end_backward(&texts, (2, 0), 1, WordClass::Editor);
+        assert_eq!(res.pos, (1, 0));
+    }
+
+    #[test]
+    fn ge_word_classes_split_the_hyphen_differently() {
+        // "a-b c": a0 -1 b2 _3 c4
+        let texts = vec!["a-b c".to_string()];
+        // The editor class splits `a-b` into word / punct runs: from
+        // the `b`, `ge` lands on the end of the punct run, the
+        // hyphen at col 1.
+        let res = word_end_backward(&texts, (0, 2), 1, WordClass::Editor);
+        assert_eq!(res.pos, (0, 1));
+        // The browse class folds the hyphen into the word: from the
+        // `b`, `ge` skips the whole `a-b` run and parks at the line
+        // start (no word before it).
+        let res = word_end_backward(&texts, (0, 2), 1, WordClass::Browse);
+        assert_eq!(res.pos, (0, 0));
+    }
+
+    #[test]
+    fn ge_uppercase_lands_on_the_end_of_the_previous_word() {
+        // WORD motion (blank-delimited): `a-b` is one WORD.
+        let texts = vec!["a-b cd".to_string()];
+        // a0 -1 b2 _3 c4 d5
+        let res = WORD_end_backward(&texts, (0, 4), 1);
+        assert_eq!(res.pos, (0, 2));
+        assert!(res.inclusive);
+        // From inside `a-b`, `gE` skips the whole WORD; no previous
+        // WORD, so the cursor parks at the line start.
+        let res = WORD_end_backward(&texts, (0, 2), 1);
+        assert_eq!(res.pos, (0, 0));
     }
 }

@@ -60,7 +60,7 @@ and the vim state. The state fields mirror `state.ts`:
 - `register`: the active register char (`"` default, `"r` selection).
 - `visual_anchor`: the other end of the selection.
 - `pending_char_motion`: `f F t T r` await their character.
-- `pending_g`: the first `g` of `gg`.
+- `pending_g`: the first `g` of `gg` / `ge` / `gE`.
 - `pending_text_object_prefix`: `i` / `a` after an operator.
 - `pending_register`: the `"` selection awaiting a register name.
 - `open_line_repeat_count`: counted `O` repeats the inserted line.
@@ -86,11 +86,23 @@ and the vim state. The state fields mirror `state.ts`:
 - `p P`: paste (count = number of copies for linewise; char-wise
   pastes ignore the count, like the reference).
 - motions: `h j k l 0 $ ^ w b e W B E g g G { } % ; , f F t T`
-  (with their character), `n N * # / ?` (search).
+  (with their character), `n N * # / ?` (search). The `g` prefix
+  completes to `g g` (`gg`), `g e` (`ge`), or `g E` (`gE`).
 - `h` and `l` clamp inside the line (the compat fix; no wrap).
   `j k` move lines and clamp the column. `w b e` are word motions
   with vim's class rule (word char / punctuation / blank); `W B E`
   are the whitespace-delimited variants.
+- `ge` / `gE`: the end of the previous word / WORD, the vim `ge`
+  motion. Inclusive, like `e`. The motion skips the word or WORD
+  run the cursor sits on, then skips blanks backwards. A blank
+  line is a word boundary, so the motion stops at its first
+  column instead of crossing it. Reaching the top of the buffer
+  parks the cursor at the first character.
+- `<count>ge` repeats the step. With a pending operator the range
+  is the inclusive span between the cursor and the landing, as
+  with `e` (`dge`, `yge`).
+- `gg` still owns the `g` prefix. Any other `gX` cancels the
+  pending `g`, like the unrecognized key in the reference.
 - `w` on the last word of the buffer lands on the last character of
   that word (the reported bug: a single-word draft must move, not
   stay). Deviation from the pinned reference, aligned with neovim:
@@ -158,8 +170,8 @@ and the vim state. The state fields mirror `state.ts`:
   case in the selection; `p P` replace the selection with the
   register and leave normal mode.
 - `i a` + object key moves the selection onto the text object.
-- `f F t T ; , g G 0 $ ^ w b e W B E { } % n N * # / ?` move or
-  extend.
+- `f F t T ; , g G g e g E 0 $ ^ w b e W B E { } % n N * # / ?`
+  move or extend.
 - `Esc` exits to normal.
 
 ### Command-line (search input)

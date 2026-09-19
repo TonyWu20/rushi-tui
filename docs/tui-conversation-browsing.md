@@ -232,6 +232,7 @@ end, :N line, ss leave`.
 | `gg` | cursor to line `1`, view to the top | `gg` |
 | `G` | cursor to the last line, view to the tail (`scroll = 0`) | `G` |
 | `<count>gg` | cursor to line n | `5gg` |
+| `ge` | cursor to the end of the previous word (the vim `ge` motion), inclusive landing like `e` (section 11.4) | `ge` |
 | `Ctrl+U` | view half a page up; the cursor jumps to the new top line if the scroll strands it | `Ctrl-U` (the view scroll, cursor pulled when stranded) |
 | `Ctrl+D` | view half a page down; the cursor jumps to the new bottom line if stranded | `Ctrl-D` |
 | `:N` | the command line: cursor to line N, clamped `1..=total` | the ex-form goto-line |
@@ -655,7 +656,7 @@ section 4.4 roles. Stage 3 adds the visual state and the
 |---|---|
 | `v` | char-visual: the anchor sits at the cursor |
 | `V` | linewise visual: the anchor holds the cursor line |
-| a motion in visual (`j` `k` `h` `l` `w` `b` `e` `0` `^` `$` `G`) | extend the selection from the anchor to the motion target |
+| a motion in visual (`j` `k` `h` `l` `w` `b` `e` `ge` `0` `^` `$` `G`) | extend the selection from the anchor to the motion target |
 | `y` in visual | yank the selection; leave visual; the cursor moves to the selection end |
 | `Esc` in visual | cancel the selection; the cursor returns to the anchor |
 | `y` | open the yank operator: a motion or a text object follows |
@@ -667,6 +668,7 @@ section 4.4 roles. Stage 3 adds the visual state and the
 | `y^` | yank from the cursor to the first non-blank char |
 | `yb` | yank to the start of the previous word (the operator `b` rule) |
 | `ye` | yank to the end of the word under the cursor (the operator `e` rule, inclusive) |
+| `yge` | yank to the end of the previous word (the `ge` motion, inclusive; the browse word class, so a hyphenated word is one word) |
 | `yi"` / `ya"` | yank inside / around the double quotes |
 | `yi'` / `ya'` | yank inside / around the single quotes |
 | `yi(` / `ya(` | yank inside / around the parentheses |
@@ -684,15 +686,21 @@ Notes:
   pending operator keeps the section 4.4 role.
 - an unmatched text object is a no-op with a hint
   (section 11.8). The operator clears.
-- the word motions (`w` / `b` / `e` and their `y` forms)
+- `yge` parses as `y` + `g` + `e`: while the yank operator is
+  pending, a `g` opens the `g` prefix and the `e` completes the
+  `ge` motion. A different key after the `g` cancels the prefix
+  and keeps its own role (`ygw` is just `yw`).
+- the word motions (`w` / `b` / `e` / `ge` and their `y` forms)
   run under the browse word class. The hyphen joins the word
   run (the 2026-09-15 fix). A hyphenated word like `foo-bar`
-  is one word. The editor keeps the plain vim class.
+  is one word. `ge` mirrors `e`: the end of the previous word,
+  inclusive. The editor keeps the plain vim class, where the
+  hyphen is a word boundary.
 - the yank operator is not a change: no recording, no undo
   stack (the browse mode has neither; the editor keeps its
   own undo for the draft).
 - the status hint: `browse: v select, y yank, yy lines, yw
-  word, ye end, b back, ss leave`.
+  word, ye end, yge end-prev, b back, ss leave`.
 
 ### 11.5 The reuse plan
 

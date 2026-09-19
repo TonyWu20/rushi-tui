@@ -27,7 +27,7 @@ pub const COUNT_CAP: u32 = 99_999;
 /// The one-line status hint of the key table (section 4.4, the
 /// section 11.4 growth: the select-and-yank rows).
 pub const BROWSE_HINT: &str =
-    "browse: v select, y yank, yy lines, yw word, ye end, b back, ss leave";
+    "browse: v select, y yank, yy lines, yw word, ye end, yge end-prev, b back, ss leave";
 
 /// One search direction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -173,6 +173,9 @@ pub struct Browse {
     yank_op_count: u32,
     /// The pending text object prefix (`i` / `a` after `y`).
     obj_prefix: Option<char>,
+    /// Awaiting the `e` of the `g`-prefixed yank motion (`yge`,
+    /// the end of the previous word, section 11.4).
+    yank_g_pending: bool,
     /// The OSC 52 host-clipboard write of the last yank that reached
     /// the host clipboard (section 11.3): the full escape, drained
     /// by the host before the next frame.
@@ -204,6 +207,7 @@ impl Default for Browse {
             yank_pending: false,
             yank_op_count: 0,
             obj_prefix: None,
+            yank_g_pending: false,
             host_clipboard: None,
             clipboard_unnamed: false,
         }
@@ -354,6 +358,7 @@ impl Browse {
         self.yank_pending = false;
         self.yank_op_count = 0;
         self.obj_prefix = None;
+        self.yank_g_pending = false;
     }
 
     /// Leave browse mode: the view stays where browse put it
@@ -378,6 +383,7 @@ impl Browse {
         self.yank_pending = false;
         self.yank_op_count = 0;
         self.obj_prefix = None;
+        self.yank_g_pending = false;
     }
 
     /// A session switch resets the browse state with the scroll
@@ -663,6 +669,7 @@ impl Browse {
         self.yank_pending = false;
         self.yank_op_count = 0;
         self.obj_prefix = None;
+        self.yank_g_pending = false;
     }
 
     /// The completed yank: the range text to the target register
@@ -758,6 +765,31 @@ impl Browse {
         }
     }
 
+    /// The `yge` yank: the text between the cursor and the end of the
+    /// previous word (the vim `ge` motion, the browse word class).
+    fn yank_ge(
+        &mut self,
+        v: &View,
+        registers: &mut std::collections::HashMap<char, crate::vim_editor::RegContent>,
+    ) {
+        let count_explicit = self.has_count;
+        let motion_count = self.yank_op_count.saturating_mul(self.motion_count());
+        if motion_count == 0 {
+            // A typed count of 0 is a no-op (section 4.4).
+            self.cancel_yank();
+            return;
+        }
+        let cursor = (self.line.min(v.total.saturating_sub(1)), self.col);
+        let range = browse_ge_range(v.texts, cursor, motion_count, count_explicit);
+        if let Some(range) = range {
+            self.complete_yank(v, registers, &range);
+            // The cursor is the motion target (the range end, ordered
+            // start <= end), like the `yank_motion` cursor rule.
+            self.line = range.end.0;
+            self.col = range.end.1;
+        }
+    }
+
     /// The doubled operator (`yy` / `Y` / `<n>yy`): `n` whole lines
     /// from the cursor line (the editor's `applyLinewiseOperator`).
     fn yank_linewise(
@@ -833,6 +865,7 @@ impl Browse {
                 self.yank_pending = false;
                 self.yank_op_count = 0;
                 self.obj_prefix = None;
+                self.yank_g_pending = false;
                 self.reg_prefix = false;
                 self.search.active = false;
                 self.search.active_match = None;
@@ -941,13 +974,30 @@ impl Browse {
                 | m @ 'h'
                 | m @ 'l'
                 | m @ 'w'
-                | m @ 'e'
                 | m @ 'b'
                 | m @ '0'
                 | m @ '^'
                 | m @ '$'
                 | m @ 'G' => {
+                    // A different motion supersedes a pending `g`.
+                    self.yank_g_pending = false;
                     self.yank_motion(m, v, registers);
+                    return None;
+                }
+                'g' => {
+                    // The `g` prefix of the `ge` yank motion (`yge`,
+                    // the end of the previous word, the browse word
+                    // class).
+                    self.yank_g_pending = true;
+                    return None;
+                }
+                'e' => {
+                    if self.yank_g_pending {
+                        self.yank_g_pending = false;
+                        self.yank_ge(v, registers);
+                    } else {
+                        self.yank_motion('e', v, registers);
+                    }
                     return None;
                 }
                 _ => {
@@ -956,6 +1006,12 @@ impl Browse {
                     self.cancel_yank();
                 }
             }
+        }
+        // The `g` prefix is only completed by `g` (gg) or `e` (ge).
+        // Any other key (including count digits, which are not valid
+        // after `g` in vim) cancels it and keeps its browse role below.
+        if self.pending_g && c != 'g' && c != 'e' {
+            self.pending_g = false;
         }
         if c.is_ascii_digit() {
             // Counts prefix the motions, capped at 99999. A count of
@@ -1059,6 +1115,30 @@ impl Browse {
                 None
             }
             'e' => {
+                if self.pending_g {
+                    // `ge` (the vim `ge` motion): the end of the
+                    // previous word. The browse word class applies,
+                    // so a hyphenated word is one word.
+                    self.pending_g = false;
+                    let n = self.motion_count() as usize;
+                    if n > 0 && !v.texts.is_empty() {
+                        let cursor = (self.line.min(v.total - 1), self.col);
+                        let res = crate::vim_editor::word_end_backward(
+                            v.texts,
+                            cursor,
+                            n.max(1) as u32,
+                            crate::vim_editor::WordClass::Browse,
+                        );
+                        self.line = res.pos.0;
+                        self.col = res.pos.1;
+                        self.clamp_to_line(v);
+                        // Linewise visual parks at col 0 of the new line.
+                        if matches!(self.visual, Some(VisualSel { linewise: true, .. })) {
+                            self.col = 0;
+                        }
+                    }
+                    return None;
+                }
                 // The word-end motion (the vim `e`). The cursor
                 // lands on the last character of the word, or the
                 // next word when it already sits on the last
@@ -1565,6 +1645,24 @@ pub(crate) fn browse_motion_range(
     Some(range)
 }
 
+/// The `ge` operator range: the span between the cursor and the end
+/// of the previous word (the vim `ge` motion, the browse word class:
+/// the hyphen joins the word). The motion is inclusive, like `e`.
+pub(crate) fn browse_ge_range(
+    texts: &[String],
+    cursor: (usize, usize),
+    count: u32,
+    _count_explicit: bool,
+) -> Option<crate::vim_editor::OpRange> {
+    use crate::vim_editor as ve;
+    if texts.is_empty() {
+        return None;
+    }
+    let cursor = (cursor.0.min(texts.len() - 1), cursor.1);
+    let res = ve::word_end_backward(texts, cursor, count.max(1), ve::WordClass::Browse);
+    Some(ve::motion_to_range(cursor, &res))
+}
+
 /// The OSC 52 host-clipboard escape (section 11.3):
 /// `\x1b]52;c;<base64>\x07`. The payload is the yanked text
 /// base64-encoded with the `base64` crate (the `bin/tui` direct
@@ -2015,5 +2113,65 @@ mod word_motion_tests {
         let range = browse_motion_range(&texts, (0, 8), 'e', 1, false).unwrap();
         let got = crate::vim_editor::extract_text(&texts, &range);
         assert_eq!(got, "baz");
+    }
+
+    #[test]
+    fn ge_lands_on_the_end_of_the_previous_word() {
+        // `ge` in browse (the browse word class: the hyphen joins the
+        // word). "foo-bar baz": f0 o1 o2 -3 b4 a5 r6 sp7 b8 a9 z10.
+        // From `baz` (or its leading blank), `ge` lands on the end of
+        // the `foo-bar` run (col 6).
+        assert_eq!(drive(&hyphen(), 0, 8, &['g', 'e']), (0, 6));
+        assert_eq!(drive(&hyphen(), 0, 10, &['g', 'e']), (0, 6));
+        // No word before the first: the cursor stays.
+        assert_eq!(drive(&hyphen(), 0, 0, &['g', 'e']), (0, 0));
+    }
+
+    #[test]
+    fn ge_folds_the_hyphenated_word_in_browse() {
+        // From the middle of the `foo-bar` run, `ge` skips the whole
+        // run (the hyphen is a word char in the browse class) and
+        // parks at the line start.
+        assert_eq!(drive(&hyphen(), 0, 4, &['g', 'e']), (0, 0));
+        assert_eq!(drive(&hyphen(), 0, 3, &['g', 'e']), (0, 0));
+    }
+
+    #[test]
+    fn counted_ge_steps_word_by_word_in_browse() {
+        // `2ge` from the last word steps back two word ends to the
+        // line start.
+        assert_eq!(drive(&hyphen(), 0, 10, &['2', 'g', 'e']), (0, 0));
+    }
+
+    #[test]
+    fn stale_g_prefix_cancels_before_plain_e() {
+        // `g` then `j` clears the pending `g`; the following `e` is
+        // the plain word-end motion, not `ge`.
+        assert_eq!(drive(&hyphen(), 0, 0, &['g', 'j', 'e']), (0, 6));
+        // Whereas `ge` from the same position parks at the start.
+        assert_eq!(drive(&hyphen(), 0, 0, &['g', 'e']), (0, 0));
+    }
+
+    #[test]
+    fn ge_crosses_lines_in_browse() {
+        let texts = vec!["foo bar".to_string(), "baz qux".to_string()];
+        assert_eq!(drive(&texts, 1, 0, &['g', 'e']), (0, 6));
+    }
+
+    #[test]
+    fn yge_yanks_through_the_previous_word_end() {
+        // `yge`: the range spans the cursor back to the end of the
+        // previous word (inclusive), extracted in reading order.
+        let texts = hyphen();
+        // From the line start: no previous word, just the cursor char.
+        let range = browse_ge_range(&texts, (0, 0), 1, false).unwrap();
+        assert_eq!(crate::vim_editor::extract_text(&texts, &range), "f");
+        // From `baz`: yanks from the end of `foo-bar` through `baz`.
+        let range = browse_ge_range(&texts, (0, 8), 1, false).unwrap();
+        assert_eq!(crate::vim_editor::extract_text(&texts, &range), "r b");
+        // From the hyphen: the whole `foo-` prefix is included (the
+        // hyphen is a word char in the browse class).
+        let range = browse_ge_range(&texts, (0, 3), 1, false).unwrap();
+        assert_eq!(crate::vim_editor::extract_text(&texts, &range), "foo-");
     }
 }
