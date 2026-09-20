@@ -5731,6 +5731,35 @@ mod browse_gate_tests {
         let _ = app.press(Key::Char('s'));
         assert!(app.browse.active());
     }
+
+    #[test]
+    fn s_after_r_completes_the_replace_not_the_browse_gate() {
+        // The `r` motion gets its own pending mode (`[r-PENDING]`,
+        // like `[d-PENDING]` for a pending operator), so the
+        // double-`s` browse gate — which needs normal mode — stays
+        // closed. The `s` typed while `r` is pending is the
+        // replacement char, not the browse-arm key.
+        let mut app = App::new();
+        app.set_draft("abc".into());
+        let _ = app.press(Key::Esc); // insert -> normal, cursor on 'a'
+        let _ = app.press(Key::Char('r'));
+        assert_eq!(
+            app.editor_mode_label(),
+            "[r-PENDING]",
+            "the r motion shows its own pending label"
+        );
+        let _ = app.press(Key::Char('s'));
+        assert_eq!(app.editor().text(), "sbc", "s completes the r replace");
+        assert_eq!(app.editor_mode_label(), "[NORMAL]");
+        assert!(
+            !app.browse.active(),
+            "the s under r never armed the browse gate"
+        );
+        assert!(
+            app.status().is_none(),
+            "no double-s hint flashed for the replacement char"
+        );
+    }
 }
 
 #[cfg(test)]

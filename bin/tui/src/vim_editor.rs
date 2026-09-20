@@ -31,7 +31,14 @@ pub enum Mode {
     Normal,
     #[default]
     Insert,
+    /// Overtype mode entered by `R`: typed chars overwrite.
     Replace,
+    /// `r` is waiting for the char that will replace the char under
+    /// the cursor (the pi-vim `replaceChar`). A distinct state from
+    /// `Normal` so the box title shows `[r-PENDING]` and the double-
+    /// `s` browse gate stays closed while the replacement is
+    /// pending (docs/tui_feature_requests_from_human.md).
+    ReplaceChar,
     /// Char-wise visual (`v`).
     Visual,
     /// Line-wise visual (`V`).
@@ -48,6 +55,7 @@ impl Mode {
             Mode::Normal => "NORMAL",
             Mode::Insert => "INSERT",
             Mode::Replace => "REPLACE",
+            Mode::ReplaceChar => "r-PENDING",
             Mode::Visual => "VISUAL",
             Mode::VisualLine => "V-LINE",
             Mode::CommandLine => "COMMAND",
@@ -676,6 +684,20 @@ impl Editor {
         match self.mode {
             Mode::Insert => self.insert_press(key),
             Mode::Replace => self.replace_press(key),
+            // `r`-pending reuses the normal-mode pending-char block
+            // (the same path the dot-repeat replay drives), so the
+            // completion and cancel behavior stay in one place.
+            Mode::ReplaceChar => {
+                // Invariant: `ReplaceChar` only ever exists while the
+                // pending char motion is `r`. If an external reset
+                // (e.g. `set_text`) cleared the pending state without
+                // touching the mode, fall back to normal so the next
+                // key is not misread as the replacement char.
+                if self.pending_char_motion.is_none() {
+                    self.mode = Mode::Normal;
+                }
+                self.normal_press(key, registers)
+            }
             Mode::Visual | Mode::VisualLine => self.visual_press(key, registers),
             Mode::CommandLine => self.command_line_press(key),
             Mode::Normal => self.normal_press(key, registers),
@@ -1077,6 +1099,7 @@ impl Editor {
                                 self.replace_char(c, count as usize);
                                 self.finalize_change_recording();
                             }
+                            self.mode = Mode::Normal;
                             self.reset_operator_state();
                             return None;
                         }
@@ -1130,8 +1153,12 @@ impl Editor {
                     }
                     return None;
                 }
-                // A non-printable cancels the pending motion.
+                // A non-printable cancels the pending motion
+                // (Esc, Ctrl-C, ...). Any pending `r`-replace state
+                // (the only pending motion that leaves normal mode)
+                // goes back to normal; `f/F/t/T` never left it.
                 _ => {
+                    self.mode = Mode::Normal;
                     self.reset_operator_state();
                     return None;
                 }
@@ -1695,8 +1722,14 @@ impl Editor {
                 None
             }
             Some('r') => {
-                // Replace character: wait for the next char.
+                // Replace character: wait for the next char. The
+                // pending-replace state is a distinct mode: the box
+                // title shows `[r-PENDING]` (like `[d-PENDING]` for a
+                // pending operator) and the double-`s` browse gate
+                // stays closed, so the typed replacement char is
+                // never swallowed by the browse hint.
                 self.pending_char_motion = Some('r');
+                self.mode = Mode::ReplaceChar;
                 None
             }
             Some('R') => {
@@ -4605,5 +4638,139 @@ mod word_class_tests {
         // WORD, so the cursor parks at the line start.
         let res = WORD_end_backward(&texts, (0, 2), 1);
         assert_eq!(res.pos, (0, 0));
+    }
+}
+
+#[cfg(test)]
+mod replace_char_tests {
+    //! The `r` pending-replace state (the `Mode::ReplaceChar` mode):
+    //! the box title shows `[r-PENDING]`, the typed char completes
+    //! the replace, and the state is not `Normal` so the host's
+    //! double-`s` browse gate stays closed while a replacement is
+    //! pending (docs/tui_feature_requests_from_human.md).
+
+    use super::{Editor, Mode};
+    use crate::app::Key;
+
+    fn press(ed: &mut Editor, key: Key) {
+        let mut regs = std::collections::HashMap::new();
+        ed.press(key, &mut regs);
+    }
+
+    /// A fresh editor with one line, in normal mode, cursor on the
+    /// first char.
+    fn normal_ed() -> Editor {
+        let mut ed = Editor::new();
+        ed.set_text("hello");
+        press(&mut ed, Key::Esc); // insert -> normal
+        ed
+    }
+
+    #[test]
+    fn r_enters_replace_char_mode_with_the_r_pending_label() {
+        let mut ed = normal_ed();
+        assert_eq!(ed.mode(), Mode::Normal);
+        press(&mut ed, Key::Char('r'));
+        assert_eq!(ed.mode(), Mode::ReplaceChar);
+        // The box title is the mode label in brackets; `r` pending
+        // reads `[r-PENDING]`, like `[d-PENDING]` for an operator.
+        assert_eq!(Mode::ReplaceChar.label(), "r-PENDING");
+    }
+
+    #[test]
+    fn r_char_completes_the_replace_and_returns_to_normal() {
+        let mut ed = normal_ed();
+        press(&mut ed, Key::Char('r'));
+        press(&mut ed, Key::Char('X'));
+        assert_eq!(ed.text(), "Xello", "the char under the cursor is replaced");
+        assert_eq!(ed.mode(), Mode::Normal);
+        assert_eq!(ed.col, 0, "the cursor stays on the replaced char");
+    }
+
+    #[test]
+    fn r_char_s_is_a_replacement_char_not_a_command() {
+        // The conflict this request resolves: the `s` that completes
+        // an `r` must be taken as the replacement char, not swallowed
+        // by a host-level `s` hint. At the editor level the `s`
+        // completes the replace and the mode returns to normal.
+        let mut ed = normal_ed();
+        press(&mut ed, Key::Char('r'));
+        press(&mut ed, Key::Char('s'));
+        assert_eq!(ed.text(), "sello", "s replaces the first char");
+        assert_eq!(ed.mode(), Mode::Normal);
+    }
+
+    #[test]
+    fn r_pending_cancels_on_esc_without_editing() {
+        let mut ed = normal_ed();
+        press(&mut ed, Key::Char('r'));
+        assert_eq!(ed.mode(), Mode::ReplaceChar);
+        press(&mut ed, Key::Esc);
+        assert_eq!(ed.mode(), Mode::Normal);
+        assert_eq!(ed.text(), "hello", "the cancel edits nothing");
+    }
+
+    #[test]
+    fn r_pending_cancels_on_a_non_printable() {
+        let mut ed = normal_ed();
+        press(&mut ed, Key::Char('r'));
+        press(&mut ed, Key::CtrlC);
+        assert_eq!(ed.mode(), Mode::Normal);
+        assert_eq!(ed.text(), "hello");
+    }
+
+    #[test]
+    fn counted_r_replaces_that_many_chars() {
+        let mut ed = normal_ed();
+        press(&mut ed, Key::Char('2'));
+        press(&mut ed, Key::Char('r'));
+        press(&mut ed, Key::Char('X'));
+        assert_eq!(ed.text(), "XXllo");
+        assert_eq!(ed.col, 1, "the cursor rests on the last replaced char");
+        assert_eq!(ed.mode(), Mode::Normal);
+    }
+
+    #[test]
+    fn dot_repeat_replays_the_r_replace() {
+        // `2rX` then `.`: the replay drives the pending-`r` path
+        // through the same normal-mode completion, so the mode
+        // transition does not break dot-repeat.
+        let mut ed = normal_ed();
+        press(&mut ed, Key::Char('2'));
+        press(&mut ed, Key::Char('r'));
+        press(&mut ed, Key::Char('X'));
+        assert_eq!(ed.text(), "XXllo");
+        press(&mut ed, Key::Char('.'));
+        assert_eq!(
+            ed.text(),
+            "XXXlo",
+            "the replayed 2rX covers the next two chars"
+        );
+        assert_eq!(ed.mode(), Mode::Normal);
+    }
+
+    #[test]
+    fn r_after_a_pending_operator_stays_a_noop() {
+        // `dr` is not a valid operator-motion: the pending operator
+        // is still there, so the char after `r` cancels it instead of
+        // replacing. The distinct mode does not change that.
+        let mut ed = normal_ed();
+        press(&mut ed, Key::Char('d'));
+        press(&mut ed, Key::Char('r'));
+        press(&mut ed, Key::Char('x'));
+        assert_eq!(
+            ed.text(),
+            "hello",
+            "the pending d is cancelled, nothing edits"
+        );
+        assert_eq!(ed.mode(), Mode::Normal);
+    }
+
+    #[test]
+    fn replace_char_mode_covers_the_cursor_char() {
+        // Like `Normal`, the block cursor rests on the char being
+        // replaced (only `Insert` / `CommandLine` put the caret
+        // between chars).
+        assert!(Mode::ReplaceChar.cursor_on_char());
     }
 }
