@@ -762,3 +762,23 @@ macchiato` as the first internal color scheme. Shipped in
       `tally_fit_collapses_to_single_hook_field_when_over_budget`,
       `collapsed_summary_collapse_to_hook_total_when_over_budget`
       in `bin/tui/src/fold.rs`.
+- [x] The input box's `r` (replace one char) motion should get its
+      own mode: only `R` transit the input-box title to
+      `[REPLACE]`, while `r` still showed `[NORMAL]`; a more
+      suitable display is `[r-PENDING]`, like `[d-PENDING]` for a
+      pending operator. Related conflict: while `r` was pending, the
+      replacement char typed next (e.g. `s`) was caught by the
+      double-`s` browse-mode hint instead of completing the
+      replace. Shipped 2026-09-20: a new `Mode::ReplaceChar` state
+      (`bin/tui/src/vim_editor.rs`), entered when `r` is pressed in
+      normal mode; the box title shows `[r-PENDING]` through
+      `editor_mode_label`. Because the state is no longer
+      `Mode::Normal`, `browse_gate_open` (the double-`s` gate in
+      `app.rs`) stays closed while the replacement is pending, so
+      `s` (or any other char) reaches the editor and completes the
+      `r` replace instead of arming the browse hint. A non-printable
+      (Esc, Ctrl-C, ...) cancels back to normal. Detail:
+      `docs/vim-editor-design.md` (the `ReplaceChar` mode).
+      Tests: `replace_char_tests` in `vim_editor.rs` and
+      `s_after_r_completes_the_replace_not_the_browse_gate` in
+      `app.rs` (`browse_gate_tests`).

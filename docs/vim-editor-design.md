@@ -50,8 +50,11 @@ The engine files and their Rust counterparts:
 The editor owns one buffer (`Vec<String>`), a cursor `(row, col)`,
 and the vim state. The state fields mirror `state.ts`:
 
-- `mode`: Normal / Insert / Replace / Visual / VisualLine / CommandLine
-  (idle state is Insert: the composer starts in typing mode).
+- `mode`: Normal / Insert / Replace / ReplaceChar / Visual /
+  VisualLine / CommandLine (idle state is Insert: the composer
+  starts in typing mode). `ReplaceChar` is the pending state of the
+  `r` replace-char command (section 3): the char under the cursor
+  waits to be replaced, and the title shows `[r-PENDING]`.
 - `count` / `count_started`: the numeric prefix (capped at 99999).
   `0` extends an open count; a bare `0` is not a count start.
 - `pending_operator` / `pending_operator_count`: `d c y > <` await a
@@ -157,6 +160,25 @@ and the vim state. The state fields mirror `state.ts`:
 - `Backspace` restores the original char (the replace stack) and
   steps back. `Enter` splits the line. `Esc`: to normal, step back.
 
+### ReplaceChar (`r` pending)
+
+- `r` in normal mode opens this state. The next printable char
+  replaces up to `count` chars at the cursor, like the pi-vim
+  `replaceChar`. The cursor stays on the last replaced char, and
+  the state returns to normal.
+- A non-printable key (Esc, Ctrl-C, ...) cancels back to normal.
+  No edit happens.
+- It is a distinct `Mode`, not just a pending flag. The box title
+  shows `[r-PENDING]`, like `[d-PENDING]` for a pending operator.
+- The host double-`s` browse gate needs normal mode. It stays
+  closed while the replace is pending. The typed replacement char
+  (including `s`) therefore completes the replace. It no longer
+  arms the "press s again to browse" hint. See the 2026-09-20
+  entry in docs/tui_feature_requests_from_human.md.
+- `pending_char_motion` still records the pending `r`. The state
+  routes through the normal-mode pending-char block. The dot-repeat
+  replay path drives `normal_press` directly, so it keeps working.
+
 ### Visual / Visual-line
 
 - the anchor and the cursor bound the selection; line-wise `V`
@@ -250,7 +272,8 @@ Replay suppresses new recording.
     extension keeps its border, color, and height, and its label
     returns when the search ends.
 - The mode label in the border title mirrors `vim-modal.ts`
-  (`[NORMAL]`, `[d-PENDING]`, `[COMMAND]`).
+  (`[NORMAL]`, `[d-PENDING]`, `[r-PENDING]`, `[REPLACE]`,
+  `[COMMAND]`).
 - the visual selection keeps its highlight behavior.
 
 ## 8. Host routing (`app.rs`)
@@ -301,6 +324,10 @@ The suite in `vim_editor.rs` ports the reference behavior:
   text-object selection.
 - insert / replace: caret back on `Esc`, line join at column 0,
   replace restore on backspace, counted `O`.
+- replace-char pending (`ReplaceChar` mode): entry shows
+  `[r-PENDING]`, a typed char completes the replace, and a
+  non-printable cancels. Counted `2r` replaces two chars.
+  The dot-repeat replay still drives the pending path.
 - dot-repeat: `.` repeats an insert change, an operator change, and
   `2.` with a count; replace-mode replay overtypes.
 - undo / redo: `u` and `Ctrl+R` snapshots.
@@ -319,6 +346,7 @@ P3. count-cancel: given a typed count then a plain `Esc`, observe the count and 
 P4. dot-repeat: given a recorded change, observe `.` replay the recorded keys and type the recorded insert text once.
 P5. arrow-map: given arrow, home, end, and delete in normal mode, observe they map to the vim motions `j`, `k`, `h`, `l`, `0`, `$`, and `x`.
 P6. no-cursor-dup: given the cursor on a character in a char-wise mode, observe the covered character render exactly once, with no duplicate to the right.
+P7. r-pending-browse-safe: given a pending `r` replace state, observe the typed `s` replaces the cursor char with `s` and the browse gate stays closed.
 
 ## Verification
 
@@ -330,6 +358,7 @@ P6. no-cursor-dup: given the cursor on a character in a char-wise mode, observe 
 | P4 | dot-repeat | `dot_replays_the_recorded_keys`, `dot_repeats_insert_change` in `bin/tui/src/vim_editor.rs` | proven |
 | P5 | arrow-map | `arrows_map_to_vim_motions` in `bin/tui/src/vim_editor.rs` | proven |
 | P6 | no-cursor-dup | `on_char_cursor_does_not_duplicate_the_covered_char` in `bin/tui/src/render.rs` | proven |
+| P7 | r-pending-browse-safe | `replace_char_tests` in `bin/tui/src/vim_editor.rs`, `s_after_r_completes_the_replace_not_the_browse_gate` in `bin/tui/src/app.rs` | proven |
 
 ## Gate
 

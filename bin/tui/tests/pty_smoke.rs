@@ -983,3 +983,45 @@ fn csi_u_ctrl_shift_p_toggles_preview_focus() {
     }
     pty.reap();
 }
+
+#[test]
+fn r_pending_shows_label_and_s_completes_the_replace() {
+    // The `r` motion owns a distinct pending mode: the input box
+    // title shows `[r-PENDING]` (like `[d-PENDING]` for a pending
+    // operator), and the next char — including `s` — completes the
+    // replace instead of arming the double-`s` browse gate
+    // (docs/vim-editor-design.md, ReplaceChar section).
+    let mut pty = Pty::spawn(tui_bin(), "tui-test", &repo_cfg(), None);
+    pty.pump(1.5);
+    assert!(pty.alive(), "process died during startup");
+    // Boots in insert mode: type a draft, then drop to normal mode.
+    pty.write_input(b"hello");
+    pty.pump(0.3);
+    pty.write_input(b"\x1b");
+    pty.pump(0.5);
+    // `r` pending: cursor sits on the last char (`o`).
+    pty.write_input(b"r");
+    pty.pump(0.5);
+    let text = pty.screen.text();
+    assert!(
+        text.contains("[r-PENDING]"),
+        "the box title should show [r-PENDING] while r awaits a char:\n{text}"
+    );
+    pty.write_input(b"s");
+    pty.pump(0.5);
+    let text = pty.screen.text();
+    assert!(
+        text.contains("hells"),
+        "the s typed under a pending r replaces the char under the cursor:\n{text}"
+    );
+    assert!(
+        !text.contains("[r-PENDING]") && !text.contains("press s again"),
+        "the replace completed: no pending label, no browse hint:\n{text}"
+    );
+    pty.kill(libc::SIGTERM);
+    let end = Instant::now() + Duration::from_secs(10);
+    while pty.alive() && Instant::now() < end {
+        pty.pump(0.2);
+    }
+    pty.reap();
+}

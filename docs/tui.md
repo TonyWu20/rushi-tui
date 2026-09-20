@@ -260,8 +260,8 @@ the char-wise register after the cursor char, `P` before it; a
 linewise register pastes below / above the cursor line. The editor
 starts in insert mode (the composer's typing mode); `Esc` drops to
 normal for motions. The mode label shows in the frame title
-(`[NORMAL]`, `[INSERT]`, `[d-PENDING]`, ...), mirroring the pi
-`formatStatus` output.
+(`[NORMAL]`, `[INSERT]`, `[d-PENDING]`, `[r-PENDING]`, `[REPLACE]`,
+...), mirroring the pi `formatStatus` output.
 
 The cursor block: in normal, replace, and visual modes the inverted
 block covers the char under the caret, so the line renders that char
