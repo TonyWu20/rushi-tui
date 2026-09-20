@@ -3152,7 +3152,7 @@ impl App {
                 label: "Summarize the branch".into(),
                 kind: CmdKind::Run,
                 hint: "pending kernel".into(),
-                help: "Append the rewind marker and run bin/compact --up-to. Pending the kernel compact flag.".into(),
+                help: "Summarize the abandoned branch and append the summary as a new leaf. Spawns `bin/compact --branch`. Pending the kernel mode.".into(),
                 options: Vec::new(),
                 ext: None,
                 preview_kind: crate::palette::items::PreviewKind::Plain,
@@ -3164,7 +3164,7 @@ impl App {
                 label: "Summarize with custom prompt".into(),
                 kind: CmdKind::Run,
                 hint: "pending kernel".into(),
-                help: "Append the rewind marker and run bin/compact --up-to --prompt. Pending the kernel compact flag.".into(),
+                help: "Summarize the abandoned branch with a custom instruction. Spawns `bin/compact --branch --prompt`. Pending the kernel mode.".into(),
                 options: Vec::new(),
                 ext: None,
                 preview_kind: crate::palette::items::PreviewKind::Plain,
@@ -3291,7 +3291,8 @@ impl App {
     /// Commit a tree outcome option (docs/tree-ui-design-from-human.md).
     /// The picked event is remembered in the palette state as a 1-based
     /// log seq. View-only and Rewind without summary are wired; the two
-    /// summarize outcomes flash that the kernel compact flags are pending.
+    /// summarize outcomes flash that the kernel branch-summarize
+    /// primitive is pending.
     fn commit_tree_option(&mut self, id: &str) -> Vec<Action> {
         let seq = self.palette_state().tree_seq().unwrap_or(0);
         let base = self.events_base_seq();
@@ -3343,10 +3344,12 @@ impl App {
                 }]
             }
             "summarize-branch" | "summarize-custom" => {
-                // Not wired yet: the kernel bin/compact gains the
-                // --up-to / --prompt flags. Keep the options open so the
-                // user can fall back to View-only or Rewind without summary.
-                self.flash("summarize modes are pending the kernel compact flags");
+                // Not wired yet: the kernel gains the branch-summarize
+                // primitive (summary of the abandoned branch appended as
+                // a new leaf; docs/tree-ui-design-from-human.md). Keep
+                // the options open so the user can fall back to View-only
+                // or Rewind without summary.
+                self.flash("branch summarize is pending the kernel primitive");
                 Vec::new()
             }
             _ => Vec::new(),

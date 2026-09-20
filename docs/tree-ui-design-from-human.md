@@ -63,13 +63,24 @@ Target behaviors:
   show history up to the picked event. Off-path events are dropped from
   the main transcript. The rewind marker stays as the fork-boundary line.
   Branch visibility is owned by the `tree` palette and its preview.
-- `Summarize the branch`: Close the palette floating window, the TUI sends command to `rushi` kernel to compact the context up
-  to the selected event.
-- `Summarize with custom prompt`: Close the palette floating window, user write
-  prompt in the input box, press Enter to send. The `rushi` replaces the default
-  compact instruction with the user's prompt to compact the context up to the
-  selected event. (`rushi`'s `bin/compact` might need to add a CLI flag to accept
-  the custom prompt content)
+- `Summarize the branch`: Close the palette floating window. The TUI sends
+  the kernel the branch-summarize primitive (see `Kernel-side changes`). The
+  picked event must be on the active path.
+  - The kernel summarizes the **abandoned branch**, the events abandoned when
+    the fork was made.
+  - The summary is appended as a new leaf on the active path.
+  - The active-path events are NOT compacted. The abandoned branch stays in
+    the log.
+  - The summary carries what was done on the other branch and why it was
+    abandoned. The current branch's "why" gets context. See the
+    `pi-alignment correction` decision at the end of this doc.
+- `Summarize with custom prompt`: Close the palette floating window. The user
+  writes a prompt in the input box and presses Enter to send it. The prompt
+  replaces the default branch-summarize instruction. The user's text is the
+  entire instruction.
+  - The kernel summarizes the abandoned branch with the user's prompt.
+  - The summary is appended as a new leaf on the active path. This is the
+    same flow as `Summarize the branch`, with a custom instruction.
 
 ## Spec decisions (from discussion)
 
@@ -77,14 +88,58 @@ All open points below were decided by discussion with the author.
 
 ### Kernel-side changes (in the `rushi` kernel repo)
 
-- `bin/compact` gains a `--up-to <seq>` flag. Today the compact always cuts at
-  the end of the log. The flag lands the compact boundary on the picked
-  event, so the prefix up to that seq becomes the summary input. It reuses
-  the `assemble --up-to` name.
-- `bin/compact` gains a `--prompt <text>` flag. It replaces the default
-  compaction instruction wholesale. The six-section format is not merged in.
-  The user's text is the entire instruction. The flag forwards to
-  `bin/assemble --summary-input`, which accepts the same flag.
+- **Correction (2026-09-16).** The original spec of this section was
+  wrong. It specified compacting the active prefix up to the picked
+  event. That is the opposite of pi's branch summarize. The active
+  prefix is the recent work the user keeps. The abandoned branch is
+  what gets compressed into context.
+- New primitive: a **branch mode of `bin/compact`** (P2: first need,
+  inline. No new binary). It reuses the whole auto-compact pipeline:
+  `assemble --summary-input`, the `model` call, and the marker append.
+  The exact flag spelling is a kernel P6 detail.
+  - The summary input covers the abandoned branch events, not the
+    active prefix. The range is derived in-kernel from the open span
+    of the last `rewind` marker on the active path
+    (`rushi_common::rewind`). No new `assemble` flag.
+  - It appends a `compaction_summary` marker with a new additive
+    optional field `branch_of` (P1b, no `v` bump). That field points
+    at the seq of the `rewind` marker whose open span was summarized.
+  - `first_kept_seq` is a no-op sentinel on a branch marker: nothing
+    is replaced. The active path stays in the context intact.
+  - `--prompt` replaces the default instruction. That flag already
+    exists.
+- Flow: compute the active path up to the picked event using
+  `rushi_common::rewind::active_ranges`. Find the last `rewind`
+  marker on that path. Its open span `(target_eff, marker_seq)` is
+  the abandoned branch. In the tree shape below, that is B, C, D.
+  Summarize that span. Append the `compaction_summary` marker at the
+  log end, with `branch_of` set to that `rewind` seq. Also write the
+  summary to `sessions/<n>/branch-summary/v<N>.md`, mirroring how
+  auto-compact writes `handoff/v<N>.md`.
+- Projection rule in `bin/assemble` (additive, P1b):
+  - Boundary selection is the last `compaction_summary` **without**
+    `branch_of`. That is the current last-wins behavior, unchanged.
+  - Markers **with** `branch_of` are projected as always-included
+    add-on framing (a user-role message, like
+    `summary_framing_item`). They never join boundary selection.
+    This stops a branch marker clobbering an auto-compact boundary.
+  - When the projection input includes file loads (`read_file` /
+    `read`), place the `branch_of` marker before the read content.
+    The `handoff.md` boundary framing takes that slot when present.
+    This lets the model attribute the tool results to the abandoned
+    span they came from.
+- P1a: no new event type. A branch summary changes no `claim` or
+  loop state. It is a projection and TUI effect, which P1a routes to
+  a rendering rule. `compaction_summary` plus `branch_of` carries it.
+- On an LLM failure, append the existing `compaction_failed` marker.
+  No fork happens. No `rewind` marker is appended.
+- Two compact primitives coexist. They do different jobs.
+  - `bin/compact --up-to <seq> [--prompt]` is manual compaction. It
+    compacts the active prefix up to the picked seq. It already
+    exists. This flow does not use it.
+  - The `bin/compact` branch mode does branch summarize. It
+    summarizes the abandoned branch and appends the summary. This
+    flow uses it.
 
 ### Palette behavior
 
@@ -108,41 +163,43 @@ All open points below were decided by discussion with the author.
   (the message waits in the input box, unsent). Every other target uses
   `on`.
 
-### Action flows (the three fork outcomes)
+### Action flows (the four outcomes)
 
-`View-only` is the fourth option but does not fork: it appends no `rewind`
-marker and spawns no `bin/compact`; it only scrolls the viewport. The three
-outcomes below all fork.
+Only `Rewind without summary` forks. It appends a `rewind` marker.
+`View-only` changes nothing. It only scrolls the viewport. The two
+summarize outcomes do not fork. They spawn the branch-summarize
+primitive, which appends a `compaction_summary` leaf on the active
+path.
 
-- All three outcomes fork. Each pick appends a `rewind` marker at the
-  picked event. `reason` is `tui_pick`. The two summarize outcomes
-  also run `bin/compact`.
-- The loop must be idle for the three fork actions. Browsing and searching stay
-  allowed mid-step, and `View-only` is allowed mid-step too because it
-  changes no state. When the loop is busy and a fork is requested, the
+- The two summarize outcomes need the loop to be idle. They append
+  log events.
+- Browsing and searching stay allowed mid-step. `View-only` is
+  allowed mid-step too because it changes no state.
+- When a fork or a summarize is requested with the loop busy, the
   hint line shows "loop busy, wait for the step".
-- Order: append the `rewind` marker first, then run the compact. If the
-  compact fails, the fork still stands. The user can retry the compact or
-  continue un-compact.
 
-- `View-only`: close the palette floating window. No `rewind` marker, no fork,
-  no compact, and no `mode` change. The full active path stays intact and the
-  main viewport scrolls to the picked event so it is visible. This is
-  navigation of the existing log; nothing is dimmed or masked.
-- `Rewind without summary`: close the palette, go to the picked event. The TUI re-renders
-  the active path. Off-path events are dropped from the main transcript. The
-  rewind marker stays as the fork-boundary line. Branch visibility is owned
-  by the `tree` palette and its preview pane.
-- `Summarize the branch`: append the rewind marker, spawn
-  `bin/compact --up-to <picked_seq>` as a child process. The status line
-  shows a compacting indicator while it runs. On the `compaction_summary`
-  marker the TUI re-renders. On `compaction_failed` it shows the error in
-  the status line. The fork stands either way.
-- `Summarize with custom prompt`: close the palette, enter a transient
-  compact-prompt state. The input box shows a hint that the next Enter
-  submits the custom compaction instruction. Esc cancels back to normal
-  input. On Enter, append the rewind marker, then spawn
-  `bin/compact --up-to <picked_seq> --prompt <text>`.
+- `View-only`: close the palette floating window. No `rewind` marker,
+  no fork, no kernel process, no `mode` change. The full active path
+  stays intact and the main viewport scrolls to the picked event so
+  it is visible. This is navigation of the existing log. Nothing is
+  dimmed or masked.
+- `Rewind without summary`: close the palette, go to the picked
+  event. The TUI re-renders the active path. Off-path events are
+  dropped from the main transcript. The rewind marker stays as the
+  fork-boundary line. Branch visibility is owned by the `tree`
+  palette and its preview pane.
+- `Summarize the branch`: close the palette. Spawn
+  `bin/compact <session> --branch` as a child process. No `rewind`
+  marker is appended. The status line shows a compacting indicator
+  while it runs. On the `compaction_summary` marker the TUI re-renders
+  and the summary leaf appears on the active path. On
+  `compaction_failed` it shows the error in the status line.
+- `Summarize with custom prompt`: close the palette, enter a
+  transient compact-prompt state. The input box shows a hint that the
+  next Enter submits the custom summarize instruction. Esc cancels
+  back to normal input. On Enter, spawn
+  `bin/compact <session> --branch --prompt <text>`. No `rewind`
+  marker is appended.
 
 ### Preview pane
 
@@ -194,9 +251,13 @@ outcomes below all fork.
   input box unsent. Every other target uses `on`. A busy loop blocks the
   commit with the "loop busy, wait for the step" hint.
 - **Summarize the branch / with custom prompt** — shown in the option
-  list as "pending kernel"; committing flashes that the kernel
-  `bin/compact --up-to [--prompt]` flags are pending. No-op until the
-  kernel side lands.
+  list as "pending kernel". No-op until the kernel's `bin/compact`
+  branch mode lands. The existing `bin/compact --up-to`/`--prompt`
+  flags have compact-prefix meaning. That is the opposite of the
+  pi-aligned branch summarize above, so they are not wired into this
+  flow. The TUI help strings in `tree_option_items`
+  (`bin/tui/src/app.rs`) were reworded 2026-09-16 to the branch-
+  summarize flow.
 - Tree indentation (`└─`, 3 spaces per level, post-fork) is not yet
   rendered. Rows are flat until it is implemented.
 
@@ -330,3 +391,121 @@ The full build spec is
 
 - Unit tests cover wrap, focus, filter cycling, and completion.
   Snapshot tests cover the tree palette states.
+
+## Spec decision: pi-alignment correction for branch summarize (2026-09-16)
+
+This decision supersedes the original `Summarize the branch` /
+`Summarize with custom prompt` design. It was learned from pi.
+
+### The mistake
+
+The original design compacted the active prefix up to the picked
+event. In the tree shape below, that reads as compacting `A, E, F`.
+That is the recent active work the user keeps. It also drops the
+abandoned branch `B, C, D` entirely. That loses the context that makes
+a fork useful.
+
+```
+A -> B -> C -> D   (old leaf, abandoned)
+  |
+   > E -> F         (target, on the active path)
+Common ancestor: A
+```
+
+### The pi design, adopted here
+
+`Summarize the branch` summarizes the **abandoned branch** (the
+sibling that shares the common ancestor), not the active prefix. The
+summary of the other branch carries what and how things were done
+there. It acts as the "why" context for the current branch. After the
+operation:
+
+```
+A -> B -> C -> D
+  |
+  -> E -> F -> [summary of B, C, D]   (new active leaf)
+```
+
+The active-path events `E, F` are kept. The abandoned branch is
+compressed into a single summary leaf appended to the active path.
+
+### Consequences for the spec
+
+- The kernel primitive is a branch mode of `bin/compact`, not a new
+  binary and not the `--up-to`/`--prompt` manual compact. See
+  `Kernel-side changes`.
+- `Summarize with custom prompt` replaces the default summarize
+  instruction with the user's text. It targets the same abandoned
+  branch.
+- The summarize outcomes do not fork. They append no `rewind` marker.
+  They append a `compaction_summary` marker on the active path. That
+  marker carries the summary text.
+- The picked target must be on the active path. The abandoned branch
+  is derived from the last `rewind` marker on that path.
+
+### Decided (2026-09-16, via `refinement-policy.md`)
+
+These decisions apply the kernel's `refinement-policy.md`
+(`rust-unix-harness/docs/refinement-policy.md`) to this flow.
+
+- **Two compaction primitives coexist.** `bin/compact --up-to`/`--prompt`
+  is manual prefix compaction and stays as is. The tree summarize
+  options use a new branch mode of `bin/compact`.
+- **Binary shape (P2 rule of three).** No new `bin/branch-compact`
+  binary. `bin/compact` gains a `--branch` mode. This is the first
+  need, so do it inline. The shared pipeline and the TUI caller both
+  justify an inline mode. The exact flag spelling is a kernel P6
+  detail.
+- **Event type (P1a).** No new event type. A branch summary changes
+  no `claim` or loop state. It is a projection and TUI effect. P1a
+  routes such effects to a rendering rule, not a new type.
+- **Reuse the marker (P1b).** Reuse `compaction_summary` with a new
+  additive optional `branch_of` field (no `v` bump). It points at the
+  `rewind` marker whose open span was summarized. `first_kept_seq` is
+  `1`, a no-op sentinel. The active path stays intact. The summary is
+  a pure add-on.
+- **Versioned markdown artifact (P1b).** Like the auto-compact handoff,
+  the branch summary is written to disk as a versioned, human-readable
+  markdown file. The marker still carries `version`, `parent_version`,
+  and `diverge_seq` (from `handoff_version_meta`) for a stable
+  identity. `bin/assemble` projects only the highest version per
+  `branch_of`, which is the folding rule.
+- **Own `branch-summary/` namespace, not `handoff/`.** The branch
+  summary goes to `sessions/<n>/branch-summary/v<N>.md`, not to
+  `handoff/v<N>.md` or `handoff.md`. That `handoff` path is the
+  auto-compact continuation handoff, and its P3 invariant (`handoff.md`
+  equals the latest compaction handoff) must stay intact. `bin/assemble`
+  reads the branch file and falls back to the marker's inline `summary`.
+- **Branch selection.** For multiple forks, summarize the latest active
+  branch. That is the branch active just before the current branch.
+  In log terms, the open span of the last `rewind` marker on the
+  active path.
+- **Range selection (P0/P3/P4).** Derive it in-kernel. The abandoned
+  range is the open span of the last `rewind` marker on the active
+  path. Compute it with the existing `rushi_common::rewind` module.
+  No new `assemble` flag.
+- **Re-run semantics.** Accumulate by folding into a rolling summary
+  via the existing `COMPACT_INSTRUCTIONS_UPDATE` path. Effort from
+  every abandoned branch survives in the rolling summary.
+
+### Open kernel detail (P6, for the `bin/compact` branch mode)
+
+- **Branch-summary file, written by `bin/compact`.** The loop's
+  `write_handoff` writes the continuation handoff to
+  `handoff/v<N>.md` + `handoff.md`. A branch marker must not write
+  there, or the P3 invariant breaks. `bin/compact --branch` instead
+  writes `branch-summary/v<N>.md` (N from `handoff_version_meta`) and
+  leaves the `handoff/` dir untouched. `bin/assemble` reads that file
+  for the framing and falls back to the inline `summary`.
+- **DAG edge for a branch marker.** `handoff_version_meta` sets
+  `diverge_seq` to the parent boundary's `first_kept_seq`. For a
+  branch marker, set `diverge_seq` to `branch_of` instead. That is
+  the fork point. The DAG edge then reads as this branch summary
+  diverged from the main line at the fork.
+- **Coexistence is already handled.** Boundary selection is the last
+  `compaction_summary` without `branch_of`. Branch markers project as
+  add-on framing. They never clobber an auto-compact boundary. No
+  last-wins edge case remains.
+- **Filed 2026-09-16.** This kernel delta is tracked as
+  `github.com/TonyWu20/rushi` issue #22. The TUI summarize outcomes
+  stay "pending kernel" until that lands.
