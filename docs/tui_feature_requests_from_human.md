@@ -731,3 +731,34 @@ macchiato` as the first internal color scheme. Shipped in
       `stale_g_prefix_cancels_before_plain_e`,
       `ge_crosses_lines_in_browse`,
       `yge_yanks_through_the_previous_word_end`).
+
+## New requests (2026-09-20)
+
+- [x] The fold-view tally (the `⎿` summary line between the user
+      message and the final assistant message) does not show the
+      number of compact events triggered in the turn. Since compact
+      is triggered by the hook mechanism, add the hook trigger times
+      and hook names to the tally.
+      Decision 2026-09-20 (the user's overflow choice): when the
+      tally overflows the terminal width, truncate all hook results
+      into a single field, `hook ×<N times>`. The alternative,
+      wrapping to a second row, was rejected: the current TUI does
+      not support a widget occupying more than one row.
+      Shipped 2026-09-20: `tally_parts` in `bin/tui/src/fold.rs`
+      counts `compaction_started` events (shown as `compact ×N`) and
+      histograms the `hook_applied` `ext_status` markers by the
+      hook command basename (shown as `name ×N`), joined between
+      the tool histogram and the message count. `tally_text_fit`
+      collapses the compact and hook fields into one `hook ×<total>`
+      field when the full text exceeds the column budget; the
+      collapsed-turn row (`FoldState::collapsed_summary` with a
+      width budget) and the live working-row tally
+      (`App::live_fold_tally`) both fit to their row width. Detail:
+      `docs/tui-turn-fold.md` (the "Tally line" section, updated).
+      Tests: `tally_counts_compact_events`,
+      `tally_shows_hook_names_and_counts`,
+      `tally_shows_compact_with_no_tools`,
+      `tally_fit_keeps_hook_names_when_they_fit`,
+      `tally_fit_collapses_to_single_hook_field_when_over_budget`,
+      `collapsed_summary_collapse_to_hook_total_when_over_budget`
+      in `bin/tui/src/fold.rs`.

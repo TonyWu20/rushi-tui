@@ -1422,7 +1422,9 @@ impl App {
     /// The live tally of the in-progress turn, merged into the
     /// working row while the loop runs (docs/tui-turn-fold.md).
     /// `None` when no loop is running or the live turn is empty.
-    pub fn live_fold_tally(&self) -> Option<String> {
+    /// When `budget` is set, an over-wide hook breakdown collapses
+    /// to a single `hook ×N` field (docs/tui-turn-fold.md).
+    pub fn live_fold_tally(&self, budget: Option<usize>) -> Option<String> {
         let sid = self.active()?;
         if !self.loop_running(sid) {
             return None;
@@ -1430,7 +1432,10 @@ impl App {
         let events = self.events();
         let turns = crate::fold::turns(events, self.events_base_seq(), true);
         let t = turns.last()?;
-        crate::fold::tally_text(events, t.start + 1, t.end)
+        match budget {
+            Some(b) => crate::fold::tally_text_fit(events, t.start + 1, t.end, b),
+            None => crate::fold::tally_text(events, t.start + 1, t.end),
+        }
     }
 
     /// The input queue toggle state (Ctrl+F): the next draft sends

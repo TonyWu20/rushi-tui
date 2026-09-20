@@ -2136,7 +2136,12 @@ fn working_row_text(
 /// border color, then the phase text in dim. The caller draws the
 /// row only while the loop runs. The idle state yields no text:
 /// no row, and the transcript absorbs its place.
-fn working_row(app: &App, running: bool, now: &chrono::DateTime<chrono::Utc>) -> Line<'static> {
+fn working_row(
+    app: &App,
+    running: bool,
+    now: &chrono::DateTime<chrono::Utc>,
+    width: usize,
+) -> Line<'static> {
     let state = phase_state(app, running);
     let Some(text) = working_row_text(state, app.loop_phase_ts(), now) else {
         return Line::default();
@@ -2154,7 +2159,13 @@ fn working_row(app: &App, running: bool, now: &chrono::DateTime<chrono::Utc>) ->
     let mut spans = vec![frame, body];
     // The in-progress turn's live tally, merged into this row instead
     // of a separate in-transcript line (docs/tui-turn-fold.md).
-    if let Some(tally) = app.live_fold_tally() {
+    // The tally budget is the row width minus the spinner frame
+    // (`frame` = braille char + space), the phase text (leading space
+    // + text), and the ` · ` separator: an over-wide per-hook
+    // breakdown collapses into a single `hook ×N` field instead of
+    // clipping (docs/tui-turn-fold.md "Summary line").
+    let tally_budget = width.saturating_sub(2 + 1 + text.chars().count() + 3);
+    if let Some(tally) = app.live_fold_tally(Some(tally_budget)) {
         spans.push(Span::styled(
             format!(" · {tally}"),
             app.palette()
@@ -3671,6 +3682,11 @@ pub fn build_transcript_input(input: &TranscriptBuildInput) -> TranscriptBuild {
         running,
         input.turn_fold.clone(),
     );
+    // The column budget for a collapsed-turn tally row: the transcript
+    // width minus the gutter and the two-column `⎿ ` leader. An over-
+    // wide per-hook breakdown collapses to `hook ×<N>` at this budget
+    // (docs/tui-turn-fold.md "Summary line").
+    let tally_budget = input.width.saturating_sub(GUTTER + 2);
     for (i, e) in events[start..].iter().enumerate() {
         // ext_status is shared UI state: suppressed from the transcript
         // by default. ext_status events add no rows, and add no blank
@@ -3706,7 +3722,7 @@ pub fn build_transcript_input(input: &TranscriptBuildInput) -> TranscriptBuild {
         let turn_start_summary: Option<crate::fold::SummaryLine> = fold
             .turn_for_event(w)
             .filter(|t| w == t.start)
-            .and_then(|t| fold.collapsed_summary(events, t));
+            .and_then(|t| fold.collapsed_summary(events, t, tally_budget));
         if !all.is_empty() {
             all.push(Line::from(""));
             line_raw.push(None);
@@ -4550,7 +4566,10 @@ pub fn draw(
     // section 3).
     if running {
         let now = chrono::Utc::now();
-        f.render_widget(Paragraph::new(working_row(app, running, &now)), rows[row]);
+        f.render_widget(
+            Paragraph::new(working_row(app, running, &now, rows[row].width as usize)),
+            rows[row],
+        );
         row += 1;
     } else if rebuilding {
         // The transcript build indicator: the working-row spinner
