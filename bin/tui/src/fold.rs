@@ -47,53 +47,161 @@ pub fn event_at_line(starts: &[Option<usize>], line: usize) -> Option<usize> {
     starts.iter().rposition(|s| s.is_some_and(|l| l <= line))
 }
 
-pub fn tally_text(events: &[Event], lo: usize, hi: usize) -> Option<String> {
+/// The structured tally fields, in display order.
+///
+/// The order matches the tally line: the step count, the tool
+/// histogram, the compact count, the hook histogram, then the
+/// message count. The hook entries are the compact/hook results and
+/// collapse together under the width decision (docs/tui-turn-fold.md
+/// "Summary line").
+struct TallyParts {
+    steps: usize,
+    tools: Vec<(String, usize)>,
+    compact: usize,
+    hooks: Vec<(String, usize)>,
+    msgs: usize,
+}
+
+/// Count-descending order, first-appearance order on ties.
+fn order_by_count_then_appearance(names: &[(String, usize)]) -> Vec<usize> {
+    let mut idx: Vec<usize> = (0..names.len()).collect();
+    idx.sort_by(|&a, &b| names[b].1.cmp(&names[a].1).then_with(|| a.cmp(&b)));
+    idx
+}
+
+/// The hook name from a `hook_applied` marker value.
+///
+/// The marker carries the registered command, which may be a bare
+/// name (`harness-hook-compact`) or a store path
+/// (`/nix/store/.../hooks/harness-hook-compact`). The basename is the
+/// hook's name.
+fn hook_name(value: &str) -> String {
+    value
+        .rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(value)
+        .to_string()
+}
+
+fn tally_parts(events: &[Event], lo: usize, hi: usize) -> TallyParts {
     let mut steps = 0usize;
     let mut msgs = 0usize;
-    // Histogram of the `name` field, in first-appearance order.
-    let mut names: Vec<(String, usize)> = Vec::new();
+    let mut compact = 0usize;
+    // Tool histogram, keyed by the `name` field, first-appearance order.
+    let mut tools: Vec<(String, usize)> = Vec::new();
+    // Hook histogram, keyed by the `hook_applied` marker's command
+    // basename, first-appearance order.
+    let mut hooks: Vec<(String, usize)> = Vec::new();
     for e in &events[lo..hi] {
         match e.kind() {
             EventKind::ToolCall => {
                 steps += 1;
                 let name = e.get_str("name").unwrap_or("unknown").to_string();
-                match names.iter_mut().find(|(n, _)| *n == name) {
+                match tools.iter_mut().find(|(n, _)| *n == name) {
                     Some((_, c)) => *c += 1,
-                    None => names.push((name, 1)),
+                    None => tools.push((name, 1)),
+                }
+            }
+            // A triggered compact. `compaction_started` is the marker
+            // the loop writes when a compaction runs (threshold,
+            // overflow, or last-resort).
+            EventKind::CompactionStarted => compact += 1,
+            // The `hook_applied` ext_status marker names the hook
+            // command that landed (docs/loop-lifecycle-hooks.md 4.5).
+            EventKind::ExtStatus if e.get_str("id") == Some("hook_applied") => {
+                if let Some(v) = e.get_str("value") {
+                    let name = hook_name(v);
+                    match hooks.iter_mut().find(|(n, _)| *n == name) {
+                        Some((_, c)) => *c += 1,
+                        None => hooks.push((name, 1)),
+                    }
                 }
             }
             EventKind::AssistantMessage => msgs += 1,
             _ => {}
         }
     }
-    if steps == 0 && msgs == 0 {
+    TallyParts {
+        steps,
+        tools,
+        compact,
+        hooks,
+        msgs,
+    }
+}
+
+/// Join the parts into a tally string. When `collapse_hooks` is set,
+/// the compact and hook fields fold into a single `hook ×<total>`
+/// field (the width-overflow decision). The step, tool, and message
+/// fields are always shown in full.
+fn build_tally(parts: &TallyParts, collapse_hooks: bool) -> Option<String> {
+    if parts.steps == 0 && parts.msgs == 0 && parts.compact == 0 && parts.hooks.is_empty() {
         return None;
     }
-    // Count-descending, first-appearance order on ties.
-    let order: Vec<usize> = {
-        let mut idx: Vec<usize> = (0..names.len()).collect();
-        idx.sort_by(|&a, &b| names[b].1.cmp(&names[a].1).then_with(|| a.cmp(&b)));
-        idx
-    };
-    // The agreed tally format (docs/tui-turn-fold.md "Summary line"):
-    // the step count, the tool histogram, then the message count.
-    // Middle-dot separators. The multiplication sign marks counts.
-    // Example: `14 steps · read ×5 · bash ×3 · edit ×2 · 6 msgs`.
-    let mut parts: Vec<String> = Vec::new();
-    if steps > 0 {
-        parts.push(format!(
+    let mut out: Vec<String> = Vec::new();
+    if parts.steps > 0 {
+        out.push(format!(
             "{} step{}",
-            steps,
-            if steps == 1 { "" } else { "s" }
+            parts.steps,
+            if parts.steps == 1 { "" } else { "s" }
         ));
     }
-    for &i in &order {
-        parts.push(format!("{} \u{d7}{}", names[i].0, names[i].1));
+    for &i in &order_by_count_then_appearance(&parts.tools) {
+        out.push(format!("{} \u{d7}{}", parts.tools[i].0, parts.tools[i].1));
     }
-    if msgs > 0 {
-        parts.push(format!("{} msg{}", msgs, if msgs == 1 { "" } else { "s" }));
+    if collapse_hooks {
+        let total = parts.compact + parts.hooks.iter().map(|(_, c)| *c).sum::<usize>();
+        if total > 0 {
+            out.push(format!("hook \u{d7}{}", total));
+        }
+    } else {
+        if parts.compact > 0 {
+            out.push(format!("compact \u{d7}{}", parts.compact));
+        }
+        for &i in &order_by_count_then_appearance(&parts.hooks) {
+            out.push(format!("{} \u{d7}{}", parts.hooks[i].0, parts.hooks[i].1));
+        }
     }
-    Some(parts.join(" \u{b7} "))
+    if parts.msgs > 0 {
+        out.push(format!(
+            "{} msg{}",
+            parts.msgs,
+            if parts.msgs == 1 { "" } else { "s" }
+        ));
+    }
+    if out.is_empty() {
+        return None;
+    }
+    Some(out.join(" \u{b7} "))
+}
+
+/// The full tally string: step count, tool histogram, compact count,
+/// per-hook breakdown, then the message count.
+///
+/// The agreed tally format (docs/tui-turn-fold.md "Summary line"):
+/// middle-dot separators, the multiplication sign marks counts.
+/// Example: `14 steps · read ×5 · bash ×3 · compact ×1 ·
+/// harness-hook-compact ×2 · 6 msgs`.
+pub fn tally_text(events: &[Event], lo: usize, hi: usize) -> Option<String> {
+    build_tally(&tally_parts(events, lo, hi), false)
+}
+
+/// The tally fitted to a column budget.
+///
+/// When the full text (with the per-hook breakdown) would exceed
+/// `budget` columns, the compact and hook fields collapse into a
+/// single `hook ×<total>` field instead of enumerating every hook
+/// name. The terminal cannot wrap the tally row, so the overflow
+/// decision is a width check here, not a second row
+/// (docs/tui-turn-fold.md "Summary line").
+pub fn tally_text_fit(events: &[Event], lo: usize, hi: usize, budget: usize) -> Option<String> {
+    let parts = tally_parts(events, lo, hi);
+    let full = build_tally(&parts, false)?;
+    if full.chars().count() <= budget {
+        return Some(full);
+    }
+    build_tally(&parts, true)
 }
 
 pub fn tool_ids(events: &[Event], lo: usize, hi: usize) -> Vec<String> {
@@ -152,16 +260,27 @@ impl FoldState {
         i == t.start || Some(i) == t.final_msg
     }
 
-    /// The tally row of a collapsed completed turn.
-    /// Open turns emit no row. The in-progress turn emits none.
-    /// Its live tally merges into the working row while the loop
-    /// runs (docs/tui-turn-fold.md "In-progress turn").
-    pub fn collapsed_summary(&self, events: &[Event], t: &Turn) -> Option<SummaryLine> {
+    /// The tally row of a collapsed completed turn, fitted to a column
+    /// budget of `budget` columns.
+    ///
+    /// The tally text is produced by [`tally_text_fit`]: when the
+    /// full text (with the per-hook breakdown) would exceed `budget`,
+    /// the compact and hook fields collapse into a single
+    /// `hook ×<total>` field (docs/tui-turn-fold.md "Summary line").
+    /// Pass `usize::MAX` for the full breakdown. Open turns emit no
+    /// row. The in-progress turn emits none; its live tally merges
+    /// into the working row while the loop runs.
+    pub fn collapsed_summary(
+        &self,
+        events: &[Event],
+        t: &Turn,
+        budget: usize,
+    ) -> Option<SummaryLine> {
         if self.turn_open(t) || t.in_progress {
             return None;
         }
         let hi = t.final_msg.unwrap_or(t.end);
-        let text = tally_text(events, t.start + 1, hi)?;
+        let text = tally_text_fit(events, t.start + 1, hi, budget)?;
         Some(SummaryLine { text })
     }
 }
@@ -221,6 +340,24 @@ mod tests {
             "id": id,
             "value": { "text": "ok" },
             "is_error": false
+        })
+        .to_string();
+        ev(&s)
+    }
+
+    fn compact_started() -> Event {
+        ev(
+            r#"{"v":1,"type":"compaction_started","ts":"t","reason":"threshold","tokens_before":100}"#,
+        )
+    }
+
+    fn hook_applied(command: &str) -> Event {
+        let s = serde_json::json!({
+            "v": 1,
+            "type": "ext_status",
+            "ts": "t",
+            "id": "hook_applied",
+            "value": command
         })
         .to_string();
         ev(&s)
@@ -320,6 +457,111 @@ mod tests {
     }
 
     #[test]
+    fn tally_counts_compact_events() {
+        let hidden = vec![
+            asst("a1", "let me check"),
+            call("c1", "bash"),
+            result("c1"),
+            compact_started(),
+            compact_started(),
+            asst("a2", "done"),
+        ];
+        let ts = tally_text(&hidden, 0, hidden.len()).unwrap();
+        assert_eq!(
+            ts,
+            "1 step \u{b7} bash \u{d7}1 \u{b7} compact \u{d7}2 \u{b7} 2 msgs"
+        );
+    }
+
+    #[test]
+    fn tally_shows_hook_names_and_counts() {
+        let hidden = vec![
+            call("c1", "bash"),
+            result("c1"),
+            hook_applied("/nix/store/abc/hooks/harness-hook-goal-arm"),
+            hook_applied("/nix/store/abc/hooks/harness-hook-goal-arm"),
+            hook_applied("harness-hook-simple-english"),
+        ];
+        // Hook names use the command basename; count-desc, first-appearance
+        // on ties (goal-arm x2 then simple-english x1).
+        let ts = tally_text(&hidden, 0, hidden.len()).unwrap();
+        assert_eq!(
+            ts,
+            "1 step \u{b7} bash \u{d7}1 \u{b7} harness-hook-goal-arm \u{d7}2 \u{b7} harness-hook-simple-english \u{d7}1"
+        );
+    }
+
+    #[test]
+    fn tally_shows_compact_with_no_tools() {
+        let hidden = vec![compact_started()];
+        assert_eq!(
+            tally_text(&hidden, 0, hidden.len()).as_deref(),
+            Some("compact \u{d7}1")
+        );
+    }
+
+    #[test]
+    fn tally_fit_keeps_hook_names_when_they_fit() {
+        let hidden = vec![
+            call("c1", "bash"),
+            result("c1"),
+            hook_applied("harness-hook-goal-arm"),
+        ];
+        let ts = tally_text_fit(&hidden, 0, hidden.len(), 1000).unwrap();
+        assert_eq!(
+            ts,
+            "1 step \u{b7} bash \u{d7}1 \u{b7} harness-hook-goal-arm \u{d7}1"
+        );
+    }
+
+    #[test]
+    fn tally_fit_collapses_to_single_hook_field_when_over_budget() {
+        let hidden = vec![
+            call("c1", "bash"),
+            result("c1"),
+            compact_started(),
+            hook_applied("harness-hook-goal-arm"),
+            hook_applied("harness-hook-simple-english"),
+        ];
+        // Total hook activity = 1 compact + 2 hook triggers = 3.
+        let tight = tally_text_fit(&hidden, 0, hidden.len(), 40).unwrap();
+        assert_eq!(tight, "1 step \u{b7} bash \u{d7}1 \u{b7} hook \u{d7}3");
+        // A wide budget keeps the full breakdown.
+        let wide = tally_text_fit(&hidden, 0, hidden.len(), 1000).unwrap();
+        assert_eq!(
+            wide,
+            "1 step \u{b7} bash \u{d7}1 \u{b7} compact \u{d7}1 \u{b7} harness-hook-goal-arm \u{d7}1 \u{b7} harness-hook-simple-english \u{d7}1"
+        );
+    }
+
+    #[test]
+    fn collapsed_summary_collapse_to_hook_total_when_over_budget() {
+        let events = vec![
+            user("u1"),
+            asst("a1", "check"),
+            call("c1", "bash"),
+            result("c1"),
+            compact_started(),
+            hook_applied("harness-hook-goal-arm"),
+            asst("a2", "done"),
+        ];
+        let st = FoldState::new(&events, 1, false, std::collections::HashSet::new());
+        let t = st.turn_for_event(0).unwrap();
+        let wide = st.collapsed_summary(&events, t, 200).unwrap();
+        // The tally covers hidden events [start+1, final_msg): the final
+        // assistant message is not counted in `msgs`.
+        assert_eq!(
+            wide.text,
+            "1 step \u{b7} bash \u{d7}1 \u{b7} compact \u{d7}1 \u{b7} harness-hook-goal-arm \u{d7}1 \u{b7} 1 msg"
+        );
+        let tight = st.collapsed_summary(&events, t, 20).unwrap();
+        assert_eq!(
+            tight.text,
+            "1 step \u{b7} bash \u{d7}1 \u{b7} hook \u{d7}2 \u{b7} 1 msg"
+        );
+    }
+
+    #[test]
     fn tool_ids_collect_the_call_ids() {
         let events = vec![
             user("u1"),
@@ -370,7 +612,9 @@ mod tests {
         assert!(st.visible(5));
         assert!(st.visible(6));
         let t = st.turn_for_event(0).unwrap();
-        let sl = st.collapsed_summary(&events, t).expect("a summary");
+        let sl = st
+            .collapsed_summary(&events, t, usize::MAX)
+            .expect("a summary");
         assert_eq!(sl.text, "1 step \u{b7} bash \u{d7}1 \u{b7} 1 msg");
     }
 
@@ -388,7 +632,7 @@ mod tests {
             assert!(st.visible(i));
         }
         let t = st.turn_for_event(0).unwrap();
-        assert!(st.collapsed_summary(&events, t).is_none());
+        assert!(st.collapsed_summary(&events, t, usize::MAX).is_none());
     }
 
     #[test]
@@ -408,7 +652,7 @@ mod tests {
         assert!(!st.visible(3));
         // No in-transcript summary row for the live turn.
         // The tally merges into the working row instead.
-        assert!(st.collapsed_summary(&events, &t).is_none());
+        assert!(st.collapsed_summary(&events, &t, usize::MAX).is_none());
         // The live tally of the in-progress range, as the working
         // row displays it.
         assert_eq!(
@@ -435,7 +679,7 @@ mod tests {
         let t = st.turns[0].clone();
         // An open live turn hides only the live tail. No summary row
         // either: the working row carries the tally.
-        assert!(st.collapsed_summary(&events, &t).is_none());
+        assert!(st.collapsed_summary(&events, &t, usize::MAX).is_none());
         assert_eq!(
             tally_text(&events, 1, 5).as_deref(),
             Some("1 step \u{b7} bash \u{d7}1 \u{b7} 2 msgs")
@@ -447,7 +691,7 @@ mod tests {
         let events = vec![user("u1"), asst("a1", "hi")];
         let st = FoldState::new(&events, 1, false, std::collections::HashSet::new());
         let t = &st.turns[0];
-        assert!(st.collapsed_summary(&events, t).is_none());
+        assert!(st.collapsed_summary(&events, t, usize::MAX).is_none());
     }
 
     #[test]

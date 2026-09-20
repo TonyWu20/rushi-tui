@@ -47,20 +47,55 @@ tail.
 ## Tally line
 
 The collapsed L1 summary counts the hidden events of the turn.
-It leads with a `⎿` marker, then the step count, then the tool
-histogram, then the message count. The `⎿` leader is prepended at
-render time in `fold_summary_line` in `render.rs`. The step count
-is the hidden `tool_call` events. The message count is the hidden
-intermediate `assistant_message` events and is always last.
+It leads with a `⎿` marker, then the step count, the tool
+histogram, the compact count, the hook histogram, and finally the
+message count. The `⎿` leader is prepended at render time in
+`fold_summary_line` in `render.rs`. The step count is the hidden
+`tool_call` events. The message count is the hidden intermediate
+`assistant_message` events and is always last.
 
 ```
-⎿ 14 steps · read ×5 · bash ×3 · edit ×2 · 6 msgs
+⎿ 14 steps · read ×5 · bash ×3 · compact ×1 · harness-hook-compact ×2 · 6 msgs
 ```
 
-The tally is a histogram of the `name` field. It reads `name` from
-each `tool_call` payload. Tool names sort by count descending.
+The tool tally is a histogram of the `name` field. It reads `name`
+from each `tool_call` payload. Tool names sort by count descending.
 Ties keep first-appearance order. Extension tools recorded into
 `events.jsonl` join the tally with no hard-coded tool list.
+
+The compact count is the number of hidden `compaction_started`
+events. Compaction is hook-triggered. The `exhausted.handle` and
+`overflow.resolve` windows run the compact hook. The loop records
+the result as `compaction_*` events, so the tally counts those
+directly.
+
+The hook histogram counts the `hook_applied` `ext_status` markers,
+which record the hook triggers that landed. Each entry is keyed by
+the command basename (the store-path or bare command name). The
+ordering is the same count-descending, first-appearance rule as the
+tool histogram. No hard-coded hook list: any hook recorded into
+`events.jsonl` joins the tally.
+
+### Tally width overflow
+
+The tally row is a single line. The TUI has no multi-row widget
+for it, so wrapping to a second row is not an option. Instead the
+tally fits to the available width. When the full text (with the
+per-hook breakdown) would exceed the column budget, the compact and
+hook fields collapse into one `hook ×<total>` field. The `total`
+counts the compact events plus all hook triggers. The step, tool,
+and message fields are never truncated.
+
+- Collapsed row: the budget is the transcript width minus the
+  gutter and the two-column `⎿ ` leader.
+  `build_transcript_input` computes it and passes it to
+  `FoldState::collapsed_summary`.
+- Live working row: the budget is the row width minus the spinner
+  frame, the phase text, and the ` · ` separator.
+  `App::live_fold_tally` takes the budget as an `Option`.
+
+Wide terminals (and short hook lists) keep the full
+`name ×count` breakdown.
 
 ## Fold hierarchy
 
@@ -141,8 +176,8 @@ session starts all folded.
 
 ## Confirmed decisions
 
-The user confirmed the original design on 2026-09-14 and the
-re-scope on 2026-09-15.
+The user confirmed the original design on 2026-09-14, the re-scope
+on 2026-09-15, and the tally extension on 2026-09-20.
 
 - The fold applies in all loop states, running or idle.
 - The fold applies in the main view and browse mode alike.
@@ -159,6 +194,13 @@ re-scope on 2026-09-15.
 - `zM` and `zR` reset all levels at once.
 - `zj` and `zk` jump between turn tops only.
 - Extension tools join the tally through the event `name` field.
+- The tally now carries a compact count and a hook trigger
+  histogram (2026-09-20). `compact ×N` counts the hidden
+  `compaction_started` events. Each `hook_applied` marker adds a
+  `name ×N` entry keyed by the command basename.
+- On overflow the tally collapses the compact and hook fields into
+  one `hook ×<total>` field. The TUI has no multi-row widget for the
+  tally row, so no second-row wrap (2026-09-20 decision).
 
 ## Build and test plan
 
