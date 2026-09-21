@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""pty smoke test for the tui binary.
+"""pty smoke test for the rushi-tui binary.
 
 Checks:
 1. The TUI starts on a session and quits on double `q`.
@@ -11,7 +11,7 @@ The screen checks replay the pty byte stream into a small terminal
 grid. Ratatui diffs frames: it writes only the cells that changed, so
 raw stream text is fragmented. The replayed grid is the real display.
 
-Args: the `tui` binary, then the kernel repo root. The repo root is
+Args: the `rushi-tui` binary, then the kernel repo root. The repo root is
 used for the plain cases' session (`sessions/tui-test`, a
 machine-local fixture: the head/tail markers the scroll-burst case
 asserts), the `scripts/ext-fixture/` host-test inputs, and the

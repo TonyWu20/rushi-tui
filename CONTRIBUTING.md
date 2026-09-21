@@ -132,8 +132,8 @@ cd rushi
 cargo build --release
 ```
 
-The launcher finds `tui` side-by-side first, then on PATH. Put the
-launcher next to the TUI `target/release/tui` binary, or export the
+The launcher finds `rushi-tui` side-by-side first, then on PATH. Put the
+launcher next to the TUI `target/release/rushi-tui` binary, or export the
 TUI `target/release` dir on PATH.
 
 ## Step 3 — Baseline build and tests
@@ -206,7 +206,7 @@ Only if the maintainer asks does the PTY smoke gate run. It needs a
 not part of the normal flow:
 
 ```sh
-EXTS_ROOT=../rushi-exts python3 scripts/tui-pty-smoke.py target/debug/tui <kernel-root>
+EXTS_ROOT=../rushi-exts python3 scripts/tui-pty-smoke.py target/debug/rushi-tui <kernel-root>
 ```
 
 ## Step 7 — Commit

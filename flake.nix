@@ -40,7 +40,7 @@
           rushiPkg = rushi-kernel.packages.${system}.default;
           moldStdenv = pkgs.stdenvAdapters.useMoldLinker pkgs.clangStdenv;
 
-          # TUI package ($out/bin/tui contract, ext-flake-authoring.md
+          # TUI package ($out/bin/rushi-tui contract, ext-flake-authoring.md
           # section 5.1). `src` stays the flake source so buildRustPackage
           # can read the workspace Cargo.toml/Cargo.lock at eval time.
           # The `rushi-common` kernel git dep (rev pinned in Cargo.lock)
@@ -58,9 +58,9 @@
                 "ratatui-markdown-0.3.6" = "sha256-++qk2uLCBvak22vQf2OmGta5YaLtHCKiKAx4wLVg7yk=";
               };
             };
-            # Build only the `tui` binary (and its path-dep
-            # `tui-highlight`); skip the standalone `tui-stream-drt`
-            # DRT mirror.
+            # Build only the `tui` package (whose binary is `rushi-tui`;
+            # its path-dep `tui-highlight` builds with it); skip the
+            # standalone `tui-stream-drt` DRT mirror.
             cargoBuildFlags = [ "-p" "tui" ];
             doCheck = false;
             # Without this, `nix search` / `nix path-info` show the
@@ -75,7 +75,7 @@
             # No installPhase override: the default cargoInstallHook copies
             # the target-<triple>/release binaries into $out/bin (it knows
             # the target subdir). The kernel's side-by-side resolver
-            # (<exe_dir>/tui) then finds $out/bin/tui.
+            # (<exe_dir>/rushi-tui) then finds $out/bin/rushi-tui.
           };
         in
         {
@@ -107,9 +107,9 @@
                 z3
                 leanPackages.mathlib
                 # The Nix-built `rushi` launcher (kernel flake packages.default).
-                # The launcher finds `tui` on PATH after its side-by-side
-                # check (resolve_tui_binary); the .envrc export of
-                # target/release completes that contract.
+                # The launcher finds `rushi-tui` on PATH after its
+                # side-by-side check (resolve_tui_binary); the .envrc export
+                # of target/release completes that contract.
                 rushiPkg
               ];
               shellHook = ''
@@ -119,7 +119,7 @@
                 echo "DRT gate:  cd lean && lake build"
                 echo "Run the PTY smoke (two-repo):"
                 echo "  EXTS_ROOT=../rushi-exts python3 scripts/tui-pty-smoke.py \\"
-                echo "      target/debug/tui <kernel-root>"
+                echo "      target/debug/rushi-tui <kernel-root>"
               '';
             };
           };
