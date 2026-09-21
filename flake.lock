@@ -88,11 +88,11 @@
         "nixpkgs": "nixpkgs_2"
       },
       "locked": {
-        "lastModified": 1789775755,
-        "narHash": "sha256-htU4Uy8wbxCpUxDPBxQ5pBlx8W8Q32yqvcGZMM0k8PM=",
+        "lastModified": 1789978327,
+        "narHash": "sha256-6I9LbP9IdWW0+CslkeGnY3/C4XGD1R6TKdk6vyRdFDk=",
         "owner": "TonyWu20",
         "repo": "rushi",
-        "rev": "b812b5287ec0624233ede521ec4653cbbc912d2f",
+        "rev": "7b0cb2da9cc7045e34f510a949d1438970ed8a93",
         "type": "github"
       },
       "original": {
