@@ -1028,6 +1028,10 @@ fn main() {
                     match handle {
                         Some(h) => {
                             h.stop();
+                            // Settle the indicator now: the `Exited` line
+                            // will clear the bit anyway, but only when the
+                            // child reaps (issue #19, option 3).
+                            app.clear_loop_running(&sid);
                             trace(&rt, &port, Some(&sid), "loop_stop", "loop stop requested");
                             app.flash("loop stop requested");
                             // A stop is a decision worth surviving a
@@ -1614,7 +1618,14 @@ fn resync_external_loop(
             }
         }
         Ok(None) => {
-            if app.is_external_loop(sid) {
+            // Gate on the running bit, not on `is_external_loop`: that
+            // predicate is false while a stale local handle (a dead child
+            // that was never retired) still sits in the state, so the
+            // running bit would stay set forever and the wait indicator
+            // would be stranded (issue #19). The free lock is the source
+            // of truth that no live loop owns the session: clear the
+            // running bit whenever it is set and the probe found none.
+            if app.loop_running(sid) {
                 app.clear_loop_running(sid);
                 trace(
                     rt,
@@ -1899,5 +1910,107 @@ mod resolve_config_path_tests {
         let missing = root.join("bin").join("tui");
         assert_eq!(canonicalize_or_raw(&missing), missing);
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod resync_tests {
+    //! The FT-003 resync gate (issue #19, option 2): when the probe
+    //! reports no live loop, the running bit clears even with a stale
+    //! local handle in the state — the old gate on
+    //! `is_external_loop` missed exactly that mixed state and
+    //! stranded the `[wait]` indicator.
+
+    use super::resync_external_loop;
+    use crate::app::App;
+    use crate::config::TuiConfig;
+    use crate::port_file::FileSessionPort;
+    use crate::port::{LoopHandle, LoopLine, SessionId};
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicI32, Ordering};
+    use tempfile::TempDir;
+
+    struct MockHandle {
+        stopped: AtomicI32,
+    }
+
+    impl LoopHandle for MockHandle {
+        fn stop(&self) {
+            self.stopped.fetch_add(1, Ordering::SeqCst);
+        }
+        fn wait_exit(&self) -> i32 {
+            0
+        }
+        fn take_lines(&self) -> Option<tokio::sync::mpsc::UnboundedReceiver<LoopLine>> {
+            None
+        }
+    }
+
+    fn fixture() -> (TempDir, FileSessionPort, tokio::runtime::Runtime) {
+        let dir = TempDir::new().unwrap();
+        let root: PathBuf = dir.path().to_path_buf();
+        let cfg = TuiConfig {
+            clipboard_unnamed: false,
+            sessions_root: root.join("sessions"),
+            loop_cmd: None,
+            config_dir: root.clone(),
+            config_path: root.join("config.toml"),
+            active_model: None,
+            ext_dirs: Vec::new(),
+            color: None,
+            color_scheme: None,
+            custom_schemes: HashMap::new(),
+            tool_display: crate::tool_display::ToolDisplay::preset(
+                crate::tool_display::Preset::OpenCode,
+            ),
+        };
+        let port = FileSessionPort::new(&cfg);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        (dir, port, rt)
+    }
+
+    /// The issue #19 mixed state: running=true with a stale local
+    /// handle (a dead child that lost the lock race). The probe
+    /// reports no live loop; the running bit must clear even though
+    /// `is_external_loop` is false (the handle is still set).
+    #[test]
+    fn resync_clears_running_when_probe_is_free_even_with_stale_handle() {
+        let (_dir, port, rt) = fixture();
+        let mut app = App::new();
+        let sid = SessionId::new("s19");
+        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        app.attach_loop(
+            sid.clone(),
+            Box::new(MockHandle {
+                stopped: AtomicI32::new(0),
+            }),
+            rx,
+        );
+        assert!(app.loop_running(&sid));
+        let st = app.loop_state(&sid).unwrap();
+        assert!(
+            st.running && st.handle.is_some(),
+            "mixed state: running bit set while a stale handle remains"
+        );
+
+        resync_external_loop(&rt, &port, &mut app, &sid);
+
+        assert!(
+            !app.loop_running(&sid),
+            "the running bit clears even with a stale handle (issue #19)"
+        );
+    }
+
+    /// A clean external attach still settles when the probe goes free:
+    /// the guard path (running bit clear) stays a no-op.
+    #[test]
+    fn resync_is_a_no_op_when_nothing_is_running() {
+        let (_dir, port, rt) = fixture();
+        let mut app = App::new();
+        let sid = SessionId::new("s19-idle");
+        resync_external_loop(&rt, &port, &mut app, &sid);
+        assert!(!app.loop_running(&sid), "no state, no running bit");
+        assert!(app.loop_state(&sid).is_none(), "no state is created");
     }
 }

@@ -175,10 +175,26 @@ API-error sleep stays inside the `wait` state.
 | Marker timestamp does not parse | The bit shows the state. The working row keeps the label and drops the span. |
 | Value outside `wait` and `tools` | The state is `running-unknown`. The bit shows `[running]`. The row shows `Working...`. |
 | Loop dies on error or exhaustion | The running bit falls. The state is `idle`. |
+| Stale local loop handle outlives its child (issue #19) | The `Exited` line retires the handle and the output receiver with the running bit. The FT-003 probe clears the running bit on a free lock regardless of any lingering handle, and a stop request clears it immediately. |
 | `cancel` event while waiting | The loop stops. The state is `idle`. The cancel event does not touch the marker. |
 | Loop host clock runs behind the TUI | `N` clamps to `0s`. |
 | Two markers in the same second | Log order wins. The later event is the last value. |
 | More than 128 distinct ext_status ids | The oldest-updated id drops from the per-id map. `loop_phase` drops only under that pressure. |
+
+The running bit has exactly three clear paths. Every transition
+back to idle goes through one of them (issue #19):
+
+- The local `Exited` line. The drain clears the bit. It retires
+  the dead handle and the output receiver with it. A later
+  external reattach then sees a clean external-only state, not a
+  mixed one.
+- The FT-003 probe. When the lock-free probe finds no live loop,
+  it clears the running bit. It clears it for any session that
+  still marks itself running. This holds regardless of any stale
+  handle left in the state. The old gate on `is_external_loop`
+  missed the mixed state and stranded the indicator.
+- A stop request. `StopLoop` clears the bit at request time. The
+  clear does not wait for the child to reap.
 
 ## 5. Conformance tests
 
@@ -320,6 +336,11 @@ TUI side:
 - No change in `bin/tui/src/main.rs`. The tick payload already
   carries the status map and the running bit. The main loop
   redraws about every 100 ms, which drives the spinner.
+- Issue #19, a stale local handle. The `Exited` drain in
+  `bin/tui/src/app.rs` retires the dead handle and receiver.
+  The FT-003 resync in `bin/tui/src/main.rs` clears the running
+  bit on a free lock, gated on the running bit itself. `StopLoop`
+  clears the bit at request time. See the clear paths in section 4.
 
 Docs on ship: `docs/tui.md` section 6 gains the phase-aware bit
 and the working row. `docs/ui-extension.md` section 5 gains the
