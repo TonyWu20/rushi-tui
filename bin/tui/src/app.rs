@@ -3705,19 +3705,13 @@ impl App {
         }
     }
 
-    /// True when the session's loop runs without a local handle: this
-    /// TUI did not start it, the persistent probe reattached it.
-    pub fn is_external_loop(&self, sid: &SessionId) -> bool {
-        self.loop_state(sid)
-            .is_some_and(|s| s.running && s.handle.is_none())
+    /// True when the session's loop state marks it running.
+    pub fn loop_running(&self, sid: &SessionId) -> bool {
+        self.loop_state(sid).is_some_and(|s| s.running)
     }
 
     pub fn loop_state(&self, sid: &SessionId) -> Option<&LoopState> {
         self.loops.get(sid)
-    }
-
-    pub fn loop_running(&self, sid: &SessionId) -> bool {
-        self.loop_state(sid).is_some_and(|s| s.running)
     }
 
     /// Mutable access to one session's loop state (taking the handle
@@ -3746,17 +3740,28 @@ impl App {
             let Some(rx) = st.lines_rx.as_mut() else {
                 continue;
             };
+            let mut exited = false;
             while let Ok(line) = rx.try_recv() {
                 match &line {
                     LoopLine::Exited(code) => {
                         st.running = false;
                         st.exit_code = Some(*code);
+                        exited = true;
                     }
                     LoopLine::Stdout(s) | LoopLine::Stderr(s) => {
                         st.last_line = Some(s.clone());
                     }
                 }
                 out.push((sid.clone(), line));
+            }
+            // A dead child has no further use: a stale handle would keep
+            // `is_external_loop` (running && handle.is_none()) false forever,
+            // so the FT-003 probe could never clear the running bit
+            // (issue #19). Retire the handle and the dead receiver together
+            // with the exit.
+            if exited {
+                st.handle = None;
+                st.lines_rx = None;
             }
         }
         out
@@ -6158,5 +6163,117 @@ mod tree_prettify_tests {
             "tool rows take the ToolName tone"
         );
         assert_eq!(items[3].tag_fg, None, "unclassed rows stay uncolored");
+    }
+}
+
+#[cfg(test)]
+mod loop_state_tests {
+    //! The loop-state transitions of issue #19 (a stale local handle
+    //! keeps the running bit set after an external loop exits): the
+    //! `Exited` line retires the handle and receiver, and a clean
+    //! external attach is possible afterwards.
+
+    use super::App;
+    use crate::port::{LoopHandle, LoopLine, SessionId};
+    use std::sync::atomic::{AtomicI32, Ordering};
+
+    /// A no-op loop handle: records `stop` calls, carries no stream.
+    struct MockHandle {
+        stopped: AtomicI32,
+    }
+
+    impl LoopHandle for MockHandle {
+        fn stop(&self) {
+            self.stopped.fetch_add(1, Ordering::SeqCst);
+        }
+        fn wait_exit(&self) -> i32 {
+            0
+        }
+        fn take_lines(&self) -> Option<tokio::sync::mpsc::UnboundedReceiver<LoopLine>> {
+            None
+        }
+    }
+
+    fn attach_running(app: &mut App, sid: &SessionId) -> tokio::sync::mpsc::UnboundedSender<LoopLine> {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        app.attach_loop(
+            sid.clone(),
+            Box::new(MockHandle {
+                stopped: AtomicI32::new(0),
+            }),
+            rx,
+        );
+        tx
+    }
+
+    /// Issue #19, option 1: draining `LoopLine::Exited` retires the
+    /// local handle. Before the fix the handle stayed set, so a
+    /// following `attach_external_loop` produced the mixed state
+    /// (running + stale handle) that `is_external_loop` could never
+    /// clear, stranding the `[wait]` indicator.
+    #[test]
+    fn drain_exited_retires_the_local_handle() {
+        let mut app = App::new();
+        let sid = SessionId::new("s19");
+        let tx = attach_running(&mut app, &sid);
+
+        let _ = tx.send(LoopLine::Stdout("step".into()));
+        let lines = app.drain_loop_lines();
+        assert_eq!(lines.len(), 1, "the stdout line is delivered");
+        assert!(
+            app.loop_state(&sid).unwrap().handle.is_some(),
+            "the handle is present while the loop runs"
+        );
+
+        let _ = tx.send(LoopLine::Exited(0));
+        drop(tx);
+        let lines = app.drain_loop_lines();
+        assert_eq!(lines.len(), 1, "the Exited line is delivered");
+        let st = app.loop_state(&sid).unwrap();
+        assert!(!st.running, "the running bit falls on exit");
+        assert_eq!(st.exit_code, Some(0));
+        assert!(
+            st.handle.is_none(),
+            "the dead handle is retired (issue #19)"
+        );
+        assert!(
+            st.lines_rx.is_none(),
+            "the dead receiver is retired too"
+        );
+        assert!(
+            app.drain_loop_lines().is_empty(),
+            "a second drain is a no-op on the retired state"
+        );
+
+        // The FT-003 probe now sees the session free and reattaches it
+        // externally: a clean external state the clear path can reach.
+        app.attach_external_loop(sid.clone());
+        let st = app.loop_state(&sid).unwrap();
+        assert!(
+            st.running && st.handle.is_none(),
+            "an external attach after the exit is a clean external state"
+        );
+        app.clear_loop_running(&sid);
+        assert!(
+            !app.loop_running(&sid),
+            "the external clear settles the bit"
+        );
+    }
+
+    /// `StopLoop` (main.rs option 3) clears the running bit on a
+    /// stopped local loop: the bit must not survive the stop request
+    /// until the child reaps.
+    #[test]
+    fn clear_loop_running_settles_a_stopped_local_loop() {
+        let mut app = App::new();
+        let sid = SessionId::new("s19b");
+        let _tx = attach_running(&mut app, &sid);
+        assert!(app.loop_running(&sid));
+        app.clear_loop_running(&sid);
+        assert!(!app.loop_running(&sid), "the bit settles on stop");
+        assert!(
+            app.loop_state(&sid).unwrap().handle.is_some(),
+            "the handle is kept for the `Exited` drain"
+        );
     }
 }
