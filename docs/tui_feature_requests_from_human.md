@@ -850,3 +850,24 @@ macchiato` as the first internal color scheme. Shipped in
       semantics as-is; no kernel, extension, or TUI change now.
       The option list above stays on file if the user wants to
       revisit later.
+      Note (same day, follow-up question): `harness-hook-no-find-grep`
+      (a `tool.before` gate hook) is invisible to the tally by
+      design. It never returns `transform`, so the kernel never
+      writes a `hook_applied` marker for it. Its `block` decisions
+      are also not logged as markers at all: the tool step calls
+      `log_hook_window` with an empty decision
+      (`bin/rushi/src/step/tool.rs` line 75 in
+      rust-unix-harness), so no `hook.tool.before` decision
+      marker exists. The only trace of a block in the log is the
+      synthesized failed `tool_result` carrying the reason
+      (e.g. "BARE grep DETECTED..."). If the tally should ever
+      cover gate blocks, the kernel must first record per-hook
+      tool.before decisions with the hook command name, and the
+      tally would then read that marker.
+      Filing done 2026-09-21: option (c) is kernel issue
+      `TonyWu20/rushi#24` (label `enhancement`, "model.before: skip
+      `hook_applied` markers when the transform did not change the
+      request"). The two parked follow-ups (goal tools off the
+      manifest; per-hook `tool.before` decision markers) are listed
+      in that issue's "Out of scope" section. They get their own
+      issues only when picked up.
