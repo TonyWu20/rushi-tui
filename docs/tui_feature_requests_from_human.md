@@ -782,3 +782,71 @@ macchiato` as the first internal color scheme. Shipped in
       Tests: `replace_char_tests` in `vim_editor.rs` and
       `s_after_r_completes_the_replace_not_the_browse_gate` in
       `app.rs` (`browse_gate_tests`).
+- [x] The PR#16 fold tally's hook-trigger counters are inflated by
+      no-op transforms, making them read as "model calls" rather
+      than meaningful hook activity. Investigation (2026-09-21):
+      the tally counts `hook_applied` `ext_status` markers
+      (`bin/tui/src/fold.rs`). The kernel writes one per hook that
+      *returned* `transform` at `model.before`
+      (`bin/rushi/src/step/model.rs` in rust-unix-harness, issue
+      #19 fix); true no-op responses (`{}` → no decision,
+      `crates/rushi/src/hooks.rs` `fire_one`) already produce no
+      markers. The inflation comes from the two installed
+      extensions' deliberate "always trigger" design:
+      `harness-hook-goal-arm` must re-emit the byte-stable
+      idempotent transform on every model call while a goal is
+      open (P17 keeps the provider prefix cache warm — the
+      tool filter must keep running), and
+      `harness-hook-simple-english` unconditionally emits a
+      transform with its static rule-summary fragment. Both
+      produce a `hook_applied` marker every call even when the
+      applied request is byte-identical to the original.
+      Follow-up (same day, user observation): even in a session
+      that never used goal mode, goal-arm marked *every* step
+      (`sessions/tree-compact-revise`: 248 markers, no goal
+      state files). That case is NOT a `{}` no-op: this
+      `config.toml` registers `goal-tools/` under
+      `extension_tool_paths`, so the goal tool schemas are in the
+      base request of every model call, and the D1 filter strips
+      them every call — a genuine per-call transform. A
+      byte-equality kernel filter (option c below) therefore
+      does NOT silence this case; only the goal-open
+      steady-state case. To silence goal-less sessions the goal
+      tools would have to leave the always-on tool manifest and
+      be advertised by the hook only while a goal is open (the
+      inverse D1 filter). That needs kernel support, because the
+      `route` stage resolves tool calls via the same manifest
+      paths. Simple-english is different: its fragment is the
+      extension's core mechanism (the model must see the rules
+      every turn), so its ×N is by design and cannot be made
+      lazy. Options considered:
+      (a) extensions stop the lazy mechanism — rejected: the
+      goal hook's always-transform is required by the protocol,
+      and pushing diff-logic into every extension author is
+      fragile; (b) TUI filters no-ops — impossible: the log
+      carries no original-vs-transformed request, only the kernel
+      holds both at apply time; (c) kernel records `hook_applied`
+      only when the applied request actually differs from the
+      original — one cheap semantic `serde_json::Value ==`
+      compare in `apply_model_before_transform` (serde_json
+      without `preserve_order` → BTreeMap, allocation-free,
+      key-order-insensitive, matching wire bytes). (c) is cheap
+      but only fixes the goal-open steady-state case; the
+      goal-less-session case needs goal tools to come off the
+      always-on manifest (hook-advertised instead), which is a
+      kernel + goal-app change. Decision pending: whether to
+      implement the kernel-side no-op filter, and whether to also
+      skip the `hook.model.before` decision marker on no-op
+      transforms, not just `hook_applied`. Also pending: accept
+      "requests the hook mutated" as the counter's documented
+      semantics, or pursue the hook-advertised-goal-tools design.
+      Note a pre-existing separate wart
+      (out of scope): with multiple transforming hooks on
+      `model.before`, `fold_decision` applies only the first
+      hook's payload while issue #19's loop marks every hook
+      that returned `transform`.
+      Decision 2026-09-21 (user): bear with the current counters
+      for the moment. Accept the "requests the hook mutated"
+      semantics as-is; no kernel, extension, or TUI change now.
+      The option list above stays on file if the user wants to
+      revisit later.
