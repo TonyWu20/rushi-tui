@@ -376,12 +376,28 @@ fn cycle_reasoning_effort(config_path: &std::path::Path, active: &str) -> Result
 ///    layout (`$out/bin/tui` finds `$out/config.toml`). This is the
 ///    new step that makes a store-installed layout self-contained:
 ///    the bundled `ui_extensions/` layer next to the config loads
-///    with no wrapper script.
+///    with no wrapper script. On macOS the launch path is
+///    canonicalized first, because `current_exe()` reports the
+///    symlink launch path instead of the store binary (issue #18).
 /// 4. `config.toml` in the CWD — the dev-checkout default, so a
 ///    checkout keeps working from its own directory.
 fn resolve_config_path(args: &Args) -> String {
-    let exe = std::env::current_exe().ok();
+    let raw = std::env::current_exe().ok();
+    // macOS `current_exe()` reports the launch path with no symlink
+    // resolution (unlike Linux's /proc/self/exe), so a store package
+    // launched through a symlink chain (the nix-darwin per-user
+    // profile layout) would do its side-by-side lookup next to the
+    // launch dir and miss the package's real `config.toml` +
+    // `ui_extensions/` (issue #18). Canonicalize first; keep the raw
+    // path when canonicalization fails.
+    let exe = raw.as_ref().map(|p| canonicalize_or_raw(p)).or(raw);
     resolve_config_path_for_exe(args, exe.as_deref())
+}
+
+/// `std::fs::canonicalize` with a fallback to the raw path when
+/// resolution fails (deleted binary, missing target, ...).
+fn canonicalize_or_raw(p: &std::path::Path) -> std::path::PathBuf {
+    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
 /// The config-resolution core with the executable location injected
@@ -1762,7 +1778,7 @@ mod resolve_config_path_tests {
     //! `<exe_dir>/../config.toml` (the Nix package layout), and the
     //! CWD `config.toml` fallback, in that priority order.
 
-    use super::{resolve_config_path_for_exe, Args};
+    use super::{canonicalize_or_raw, resolve_config_path_for_exe, Args};
 
     fn args(config: Option<&str>) -> Args {
         Args {
@@ -1821,6 +1837,67 @@ mod resolve_config_path_tests {
             "config.toml"
         );
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Issue #18: a launch path that runs through a symlink chain must
+    /// resolve to the real binary so the side-by-side lookup reaches the
+    /// package root (`<pkg>/config.toml`), like the nix-darwin profile
+    /// layout `/etc/profiles/<user>/bin/tui -> ... -> <store>/bin/tui`.
+    #[test]
+    #[cfg(unix)]
+    fn issue_18_symlinked_launch_path_resolves_side_by_side_config() {
+        // The $CONFIG env var would shadow the side-by-side step; save,
+        // clear, and restore it (same approach as the ladder test).
+        let saved = std::env::var("CONFIG").ok();
+        std::env::remove_var("CONFIG");
+        let root = std::env::temp_dir().join(format!("tui-issue18-test-{}", std::process::id()));
+        let pkg = root.join("pkg");
+        let bin = pkg.join("bin");
+        std::fs::create_dir_all(&bin).expect("mkdir pkg/bin");
+        let real = bin.join("tui");
+        std::fs::write(&real, "#!/bin/sh\n").expect("write fake exe");
+        let side_by_side = pkg.join("config.toml");
+        std::fs::write(&side_by_side, "[paths]\n").expect("write side-by-side config");
+
+        // Profile-style launch dir with a symlink to the store binary.
+        let profile_bin = root.join("profiles").join("user1").join("bin");
+        std::fs::create_dir_all(&profile_bin).expect("mkdir profile bin");
+        let link = profile_bin.join("tui");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink tui");
+
+        // 1. The RAW symlinked path (what macOS current_exe reports)
+        //    misses the side-by-side config: it falls back to CWD.
+        assert_eq!(
+            resolve_config_path_for_exe(&args(None), Some(&link)),
+            "config.toml",
+            "raw symlinked launch path must miss the side-by-side config (issue #18 symptom)"
+        );
+
+        // 2. The canonicalized path (what resolve_config_path now feeds
+        //    the resolver) reaches the package root and finds it.
+        let canonical = canonicalize_or_raw(&link);
+        assert_eq!(canonical, canonicalize_or_raw(&real));
+        assert_ne!(canonical, link);
+        assert_eq!(
+            resolve_config_path_for_exe(&args(None), Some(&canonical)),
+            side_by_side.to_string_lossy().into_owned(),
+            "canonicalized launch path must find the side-by-side config"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+        if let Some(v) = saved {
+            std::env::set_var("CONFIG", v);
+        }
+    }
+
+    /// Unresolvable paths (missing file) pass through unchanged so the
+    /// lookup simply degrades to the next step instead of panicking.
+    #[test]
+    fn canonicalize_or_raw_falls_back_to_raw_path() {
+        let root = std::env::temp_dir().join(format!("tui-issue18-missing-{}", std::process::id()));
+        let missing = root.join("bin").join("tui");
+        assert_eq!(canonicalize_or_raw(&missing), missing);
         let _ = std::fs::remove_dir_all(&root);
     }
 }
