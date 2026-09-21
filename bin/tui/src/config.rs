@@ -57,6 +57,36 @@ impl LoopCommand {
     }
 }
 
+/// The Tier-1 loop command (issue #22): the `rushi` CLI from PATH,
+/// running the full turn loop for one session. The TUI is self-wired —
+/// when the config has no `[loop]` section and no `--loop-cmd` flag is
+/// passed, it supervises `rushi run <session>` instead of relying on
+/// the kernel's (retiring) launcher arm. Only the Tier-1 `rushi` CLI
+/// contract is pinned: no launcher subcommand, no private kernel patch.
+pub fn default_loop_cmd() -> LoopCommand {
+    LoopCommand {
+        command: "rushi".to_string(),
+        args: vec!["run".to_string()],
+        arg_style: ArgStyle::AppendSession,
+    }
+}
+
+/// Parse a `--loop-cmd` override into a `LoopCommand` (issue #22).
+/// The value is a command line: whitespace separates the program from
+/// its args, and the session id is appended last (`append_session`).
+/// `rushi step` becomes `rushi step <session>`; `bash turn.sh` becomes
+/// `bash turn.sh <session>`.
+pub fn parse_loop_cmd_flag(raw: &str) -> LoopCommand {
+    let mut parts = raw.split_whitespace();
+    let command = parts.next().unwrap_or_default().to_string();
+    let args = parts.map(|a| a.to_string()).collect();
+    LoopCommand {
+        command,
+        args,
+        arg_style: ArgStyle::AppendSession,
+    }
+}
+
 /// Everything the TUI needs from the config file.
 #[derive(Debug, Clone)]
 pub struct TuiConfig {
@@ -1057,5 +1087,55 @@ read = "all"
         );
         let err = TuiConfig::load(dir.path().join("config.toml").to_str().unwrap()).unwrap_err();
         assert!(err.contains("read"), "{err}");
+    }
+
+    // ── issue #22: self-wired loop wiring ──
+
+    /// The Tier-1 default is `rushi run <session>` from PATH.
+    #[test]
+    fn default_loop_cmd_is_the_tier1_rushi_cli() {
+        let lc = default_loop_cmd();
+        assert_eq!(lc.command, "rushi");
+        assert_eq!(lc.args, vec!["run".to_string()]);
+        assert_eq!(lc.arg_style, ArgStyle::AppendSession);
+        assert_eq!(
+            lc.argv(&crate::port::SessionId::new("s1")),
+            vec!["rushi", "run", "s1"],
+            "session id is appended last"
+        );
+    }
+
+    /// `--loop-cmd` splits a command line into program + args and
+    /// keeps the session-id-last argv shape.
+    #[test]
+    fn parse_loop_cmd_flag_splits_program_and_args() {
+        let lc = parse_loop_cmd_flag("rushi step");
+        assert_eq!(lc.command, "rushi");
+        assert_eq!(lc.args, vec!["step".to_string()]);
+        assert_eq!(lc.arg_style, ArgStyle::AppendSession);
+        assert_eq!(
+            lc.argv(&crate::port::SessionId::new("s2")),
+            vec!["rushi", "step", "s2"]
+        );
+
+        let sh = parse_loop_cmd_flag("bash turn.sh");
+        assert_eq!(sh.command, "bash");
+        assert_eq!(sh.args, vec!["turn.sh".to_string()]);
+        assert_eq!(
+            sh.argv(&crate::port::SessionId::new("s3")),
+            vec!["bash", "turn.sh", "s3"]
+        );
+    }
+
+    /// `--loop-cmd` with a bare program keeps an empty arg list.
+    #[test]
+    fn parse_loop_cmd_flag_bare_program() {
+        let lc = parse_loop_cmd_flag("rushi");
+        assert_eq!(lc.command, "rushi");
+        assert!(lc.args.is_empty());
+        assert_eq!(
+            lc.argv(&crate::port::SessionId::new("s4")),
+            vec!["rushi", "s4"]
+        );
     }
 }

@@ -51,20 +51,37 @@ use port_file::FileSessionPort;
 
 /// Interactive window onto the session log. Renders events, appends
 /// user events, and supervises the opaque loop command from config.
+///
+/// issue #22: the entry command is `rushi-tui` on its own. Config
+/// discovery is the shared kernel resolver (`rushi_common::paths`,
+/// kernel PR #30), and the loop command defaults to the Tier-1
+/// `rushi` CLI from PATH (`rushi run <session>`). A `--loop-cmd`
+/// flag overrides it. No kernel launcher subcommand is needed.
 #[derive(Parser, Debug)]
-#[command(name = "tui", about = "Terminal UI for the harness session log")]
+#[command(
+    name = "rushi-tui",
+    about = "Terminal UI for the rushi harness session log"
+)]
 struct Args {
     /// The session to open. If omitted, the TUI asks for a new session
     /// name: the session is created on its first appended event.
     session: Option<String>,
 
-    /// Path to the harness config file. Relative paths resolve against
-    /// the current directory. When omitted, the path is resolved
-    /// through [`resolve_config_path`]: the `$CONFIG` env var, then
-    /// the side-by-side `<exe_dir>/../config.toml` (the Nix package
-    /// layout), then `config.toml` in the CWD (issue #11).
+    /// Path to the harness config file. Resolved through
+    /// [`rushi_common::paths::resolve_config_path`]: the `$CONFIG` env
+    /// var, then this flag, then the Nix side-by-side
+    /// `<exe_dir>/../config.toml`, then `config.toml` in the CWD
+    /// (issue #11, now the shared kernel ladder, kernel PR #30).
     #[arg(long)]
     config: Option<String>,
+
+    /// Override the loop command from the config `[loop]` section.
+    /// A command line: whitespace separates the program from its
+    /// args, and the session id is appended last. Examples:
+    /// `rushi step` -> `rushi step <session>`;
+    /// `bash turn.sh` -> `bash turn.sh <session>` (issue #22).
+    #[arg(long)]
+    loop_cmd: Option<String>,
 }
 
 /// Terminal state restoration that must survive a panic: raw mode,
@@ -363,92 +380,52 @@ fn cycle_reasoning_effort(config_path: &std::path::Path, active: &str) -> Result
     set_effort(config_path, active, next)
 }
 
-/// Resolve the config path the TUI loads, extending the CWD default
-/// with the `rushi` kernel's resolution steps (issue #11).
+/// Resolve the config path the TUI loads.
 ///
-/// Priority (highest to lowest):
-/// 1. The `--config` CLI flag — an explicit user path, unchanged from
-///    the previous behavior. The `rushi` kernel always passes it, so
-///    the kernel's own config choice always wins.
-/// 2. `$CONFIG` env var — the user/system override, matching the
-///    kernel convention.
-/// 3. Side-by-side `<exe_dir>/../config.toml` — the Nix package
-///    layout (`$out/bin/tui` finds `$out/config.toml`). This is the
-///    new step that makes a store-installed layout self-contained:
-///    the bundled `ui_extensions/` layer next to the config loads
-///    with no wrapper script. On macOS the launch path is
-///    canonicalized first, because `current_exe()` reports the
-///    symlink launch path instead of the store binary (issue #18).
-/// 4. `config.toml` in the CWD — the dev-checkout default, so a
-///    checkout keeps working from its own directory.
+/// issue #22 / kernel PR #30: the TUI no longer keeps a private copy of
+/// the 4-step ladder; it delegates to the shared kernel resolver
+/// (`rushi_common::paths::resolve_config_path`), so config discovery is
+/// identical to the kernel's by construction:
+///
+/// 1. `$CONFIG` env var — explicit user/system override
+/// 2. `--config` CLI flag
+/// 3. Side-by-side `<exe_dir>/../config.toml` (Nix package layout),
+///    with the exe canonicalized first for macOS symlink recovery
+///    (kernel issue #25)
+/// 4. `config.toml` in the CWD (dev-checkout fallback)
 fn resolve_config_path(args: &Args) -> String {
-    let raw = std::env::current_exe().ok();
-    // macOS `current_exe()` reports the launch path with no symlink
-    // resolution (unlike Linux's /proc/self/exe), so a store package
-    // launched through a symlink chain (the nix-darwin per-user
-    // profile layout) would do its side-by-side lookup next to the
-    // launch dir and miss the package's real `config.toml` +
-    // `ui_extensions/` (issue #18). Canonicalize first; keep the raw
-    // path when canonicalization fails.
-    let exe = raw.as_ref().map(|p| canonicalize_or_raw(p)).or(raw);
-    resolve_config_path_for_exe(args, exe.as_deref())
-}
-
-/// `std::fs::canonicalize` with a fallback to the raw path when
-/// resolution fails (deleted binary, missing target, ...).
-fn canonicalize_or_raw(p: &std::path::Path) -> std::path::PathBuf {
-    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
-}
-
-/// The config-resolution core with the executable location injected
-/// so the side-by-side step is testable (issue #11).
-fn resolve_config_path_for_exe(args: &Args, exe: Option<&std::path::Path>) -> String {
-    // 1. Explicit --config flag (always present from the kernel)
-    if let Some(ref p) = args.config {
-        if !p.is_empty() {
-            return p.clone();
-        }
-    }
-
-    // 2. $CONFIG env var (set by the `user` binary, or by the user)
-    if let Ok(p) = std::env::var("CONFIG") {
-        if !p.is_empty() {
-            return p;
-        }
-    }
-
-    // 3. Side-by-side: <exe_dir>/../config.toml (Nix: $out/config.toml)
-    if let Some(exe) = exe {
-        if let Some(bin_dir) = exe.parent() {
-            if let Some(candidate) = bin_dir.parent().map(|p| p.join("config.toml")) {
-                if candidate.exists() {
-                    return candidate.to_string_lossy().into_owned();
-                }
-            }
-        }
-    }
-
-    // 4. CWD fallback (dev checkout)
-    "config.toml".into()
+    rushi_common::paths::resolve_config_path(args.config.as_deref().map(std::path::Path::new))
 }
 
 fn main() {
     let args = Args::parse();
     let config_path = resolve_config_path(&args);
-    let cfg = match TuiConfig::load(&config_path) {
+    let mut cfg = match TuiConfig::load(&config_path) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("tui: {e}");
+            eprintln!("rushi-tui: {e}");
             std::process::exit(1);
         }
     };
+    // issue #22 (self-wired loop wiring): the `--loop-cmd` flag wins,
+    // then the config `[loop]` section, then the Tier-1 default —
+    // `rushi run <session>` from PATH. The TUI pins only the `rushi`
+    // CLI contract: no kernel launcher subcommand, no private kernel
+    // patch.
+    cfg.loop_cmd = args
+        .loop_cmd
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .map(config::parse_loop_cmd_flag)
+        .or_else(|| cfg.loop_cmd.clone())
+        .or_else(|| Some(config::default_loop_cmd()));
     // Extension discovery fails loud before any terminal effect. A
     // bad manifest or a broken command refuses the start and names
     // the file (docs/ui-extension-plan.md stage 1).
     let disc = match ext::discover(&cfg) {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("tui: {e}");
+            eprintln!("rushi-tui: {e}");
             std::process::exit(1);
         }
     };
@@ -1784,132 +1761,47 @@ mod key_input_tests {
 
 #[cfg(test)]
 mod resolve_config_path_tests {
-    //! The config-path resolution ladder (issue #11): the `--config`
-    //! flag, the `$CONFIG` env var, the side-by-side
-    //! `<exe_dir>/../config.toml` (the Nix package layout), and the
-    //! CWD `config.toml` fallback, in that priority order.
+    //! The config-discovery ladder now lives in the shared kernel
+    //! resolver (issue #22 / kernel PR #30, `rushi_common::paths`).
+    //! These tests pin the behavior the TUI relies on; the kernel's
+    //! own `paths` tests cover the rest (the Nix side-by-side and
+    //! symlink steps are exercised end-to-end by the pty_smoke
+    //! `side_by_side_package_layout` test through the real binary).
 
-    use super::{canonicalize_or_raw, resolve_config_path_for_exe, Args};
+    use super::{resolve_config_path, Args};
 
-    fn args(config: Option<&str>) -> Args {
+    fn no_env() -> Args {
         Args {
             session: None,
-            config: config.map(str::to_string),
+            config: None,
+            loop_cmd: None,
         }
     }
 
-    /// The full ladder, run in one test because the process-global
-    /// `CONFIG` env var makes parallel env assertions race.
+    /// No `$CONFIG`, no `--config`: the CWD `config.toml` fallback.
+    /// The side-by-side probe misses for the test binary (there is no
+    /// `target/config.toml`), so the dev-checkout name wins.
     #[test]
-    fn precedence_flag_config_env_side_by_side_cwd() {
-        let root = std::env::temp_dir().join(format!("tui-cfg-test-{}", std::process::id()));
-        let pkg = root.join("pkg");
-        let bin = pkg.join("bin");
-        std::fs::create_dir_all(&bin).expect("mkdir pkg/bin");
-        std::fs::write(bin.join("tui"), "#!/bin/sh\n").expect("write fake exe");
-        let side_by_side = pkg.join("config.toml");
-        std::fs::write(&side_by_side, "[paths]\n").expect("write side-by-side config");
-
-        // 1. The flag beats the $CONFIG env var and the side-by-side
-        //    file (the kernel always passes --config, so its choice
-        //    wins over any inherited CONFIG).
-        std::env::set_var("CONFIG", "/x/env-config.toml");
-        assert_eq!(
-            resolve_config_path_for_exe(&args(Some("/flag.toml")), Some(&bin.join("tui"))),
-            "/flag.toml"
-        );
-
-        // 2. $CONFIG beats the side-by-side layout.
-        assert_eq!(
-            resolve_config_path_for_exe(&args(None), Some(&bin.join("tui"))),
-            "/x/env-config.toml"
-        );
-
-        // 3. Side-by-side: `<exe_dir>/../config.toml` (the Nix
-        //    layout) beats the CWD fallback.
-        std::env::remove_var("CONFIG");
-        assert_eq!(
-            resolve_config_path_for_exe(&args(None), Some(&bin.join("tui"))),
-            side_by_side.to_string_lossy().into_owned()
-        );
-
-        // 4. No side-by-side file: fall back to the CWD `config.toml`.
-        let bare = root.join("bare").join("bin");
-        std::fs::create_dir_all(&bare).expect("mkdir bare/bin");
-        assert_eq!(
-            resolve_config_path_for_exe(&args(None), Some(&bare.join("tui"))),
-            "config.toml"
-        );
-
-        // No exe location at all (current_exe failed): still the CWD
-        // fallback.
-        assert_eq!(
-            resolve_config_path_for_exe(&args(None), None),
-            "config.toml"
-        );
-
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    /// Issue #18: a launch path that runs through a symlink chain must
-    /// resolve to the real binary so the side-by-side lookup reaches the
-    /// package root (`<pkg>/config.toml`), like the nix-darwin profile
-    /// layout `/etc/profiles/<user>/bin/tui -> ... -> <store>/bin/tui`.
-    #[test]
-    #[cfg(unix)]
-    fn issue_18_symlinked_launch_path_resolves_side_by_side_config() {
-        // The $CONFIG env var would shadow the side-by-side step; save,
-        // clear, and restore it (same approach as the ladder test).
-        let saved = std::env::var("CONFIG").ok();
-        std::env::remove_var("CONFIG");
-        let root = std::env::temp_dir().join(format!("tui-issue18-test-{}", std::process::id()));
-        let pkg = root.join("pkg");
-        let bin = pkg.join("bin");
-        std::fs::create_dir_all(&bin).expect("mkdir pkg/bin");
-        let real = bin.join("tui");
-        std::fs::write(&real, "#!/bin/sh\n").expect("write fake exe");
-        let side_by_side = pkg.join("config.toml");
-        std::fs::write(&side_by_side, "[paths]\n").expect("write side-by-side config");
-
-        // Profile-style launch dir with a symlink to the store binary.
-        let profile_bin = root.join("profiles").join("user1").join("bin");
-        std::fs::create_dir_all(&profile_bin).expect("mkdir profile bin");
-        let link = profile_bin.join("tui");
-        std::os::unix::fs::symlink(&real, &link).expect("symlink tui");
-
-        // 1. The RAW symlinked path (what macOS current_exe reports)
-        //    misses the side-by-side config: it falls back to CWD.
-        assert_eq!(
-            resolve_config_path_for_exe(&args(None), Some(&link)),
-            "config.toml",
-            "raw symlinked launch path must miss the side-by-side config (issue #18 symptom)"
-        );
-
-        // 2. The canonicalized path (what resolve_config_path now feeds
-        //    the resolver) reaches the package root and finds it.
-        let canonical = canonicalize_or_raw(&link);
-        assert_eq!(canonical, canonicalize_or_raw(&real));
-        assert_ne!(canonical, link);
-        assert_eq!(
-            resolve_config_path_for_exe(&args(None), Some(&canonical)),
-            side_by_side.to_string_lossy().into_owned(),
-            "canonicalized launch path must find the side-by-side config"
-        );
-
-        let _ = std::fs::remove_dir_all(&root);
-        if let Some(v) = saved {
-            std::env::set_var("CONFIG", v);
+    fn cwd_fallback() {
+        if std::env::var_os("CONFIG").is_some() {
+            eprintln!("skipping: $CONFIG is set in this environment");
+            return;
         }
+        assert_eq!(resolve_config_path(&no_env()), "config.toml");
     }
 
-    /// Unresolvable paths (missing file) pass through unchanged so the
-    /// lookup simply degrades to the next step instead of panicking.
+    /// The `--config` flag beats the CWD fallback (the kernel always
+    /// passes it, so the user's explicit path still wins over the
+    /// dev-checkout default).
     #[test]
-    fn canonicalize_or_raw_falls_back_to_raw_path() {
-        let root = std::env::temp_dir().join(format!("tui-issue18-missing-{}", std::process::id()));
-        let missing = root.join("bin").join("tui");
-        assert_eq!(canonicalize_or_raw(&missing), missing);
-        let _ = std::fs::remove_dir_all(&root);
+    fn cli_flag_beats_cwd() {
+        if std::env::var_os("CONFIG").is_some() {
+            eprintln!("skipping: $CONFIG is set in this environment");
+            return;
+        }
+        let mut args = no_env();
+        args.config = Some("custom.toml".to_string());
+        assert_eq!(resolve_config_path(&args), "custom.toml");
     }
 }
 

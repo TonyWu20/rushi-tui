@@ -5,7 +5,10 @@ edition = "2021"
 license = "MIT"
 
 [[bin]]
-name = "tui"
+# issue #22: the user-facing entry command is `rushi-tui` (the kernel
+# launcher arm that started `tui` is being retired; the front-end is
+# self-wired and is itself the entry point).
+name = "rushi-tui"
 path = "src/main.rs"
 
 [dependencies]
@@ -56,9 +59,10 @@ ratatui-markdown = { git = "https://github.com/celestia-island/ratatui-markdown"
 regex = "1.13"
 # Kernel dep (docs/tui-ext-repo-split.md section 4, item A1):
 # `rushi-common` is the kernel crate `crates/rushi` in the public kernel
-# repo. The exact kernel rev is pinned in Cargo.lock. To move the TUI to a
-# newer kernel, run `cargo update -p rushi-common` and re-run all gates.
-rushi-common = "0.1.0"
+# repo. issue #22 pins kernel commit `10139de` (PR #30: the shared
+# `rushi_common::paths` config-path resolver and `resolved_exe`). To move
+# the TUI to a newer kernel, bump the rev here and re-run all gates.
+rushi-common = { git = "https://github.com/TonyWu20/rushi", rev = "10139de" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1.53", features = [
