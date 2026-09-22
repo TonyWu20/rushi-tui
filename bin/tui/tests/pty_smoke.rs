@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 const WHEEL_UP: &[u8] = b"\x1b[<64;5;5M";
 
 fn tui_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_tui")
+    env!("CARGO_BIN_EXE_rushi-tui")
 }
 
 fn repo_cfg() -> std::path::PathBuf {

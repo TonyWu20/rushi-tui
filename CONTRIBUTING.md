@@ -76,19 +76,19 @@ cargo --version
 
 prints a version.
 
-`rushi-common` in `bin/tui/Cargo.toml` is a **git dep on the kernel
-repo** (`https://github.com/TonyWu20/rushi`, the `rushi-common` package
-in `crates/rushi`). The exact kernel rev is pinned in `Cargo.lock`. A
-plain `cargo build` fetches it from GitHub, so no sibling kernel
-checkout is needed. To move the TUI to a newer kernel rev, run
-`cargo update -p rushi-common` (the pin moves to the kernel's current
-`main` head) and re-run the Step 6 gates. Do not hand-edit the dep
-URL/branch or its lock pin.
+`rushi-common` in `bin/tui/Cargo.toml` is a **crates.io dep** on the
+kernel crate (`rushi-common`, published from the kernel repo
+`https://github.com/TonyWu20/rushi`). The version pin is `0.1.3`
+(issue #22), and `Cargo.lock` records the exact release checksum.
+A plain `cargo build` fetches it from crates.io, so no sibling kernel
+checkout is needed. To move the TUI to a newer kernel release, bump
+the version in `bin/tui/Cargo.toml` and re-run the Step 6 gates.
+Do not hand-edit the dep version or its lock pin.
 
 ## Step 2b — Bare toolchain (no Nix)
 
-The Rust flow works without Nix. `rushi-common` is a git dep on
-`TonyWu20/rushi`, so `cargo build` needs no sibling checkouts. Install
+The Rust flow works without Nix. `rushi-common` is a crates.io dep
+on the kernel crate, so `cargo build` needs no sibling checkouts. Install
 the pieces the dev shell would have put on PATH:
 
 - Rust via `rustup` (stable), plus the two gate components:
@@ -132,8 +132,8 @@ cd rushi
 cargo build --release
 ```
 
-The launcher finds `tui` side-by-side first, then on PATH. Put the
-launcher next to the TUI `target/release/tui` binary, or export the
+The launcher finds `rushi-tui` side-by-side first, then on PATH. Put the
+launcher next to the TUI `target/release/rushi-tui` binary, or export the
 TUI `target/release` dir on PATH.
 
 ## Step 3 — Baseline build and tests
@@ -206,7 +206,7 @@ Only if the maintainer asks does the PTY smoke gate run. It needs a
 not part of the normal flow:
 
 ```sh
-EXTS_ROOT=../rushi-exts python3 scripts/tui-pty-smoke.py target/debug/tui <kernel-root>
+EXTS_ROOT=../rushi-exts python3 scripts/tui-pty-smoke.py target/debug/rushi-tui <kernel-root>
 ```
 
 ## Step 7 — Commit
@@ -283,9 +283,10 @@ Run this checklist before opening the PR:
 
 - Never silently decide. When two plausible approaches exist, ask the
   human which one to take.
-- Do not hand-edit the `rushi-common` git dep or its `Cargo.lock` pin.
-  To move to a newer kernel rev, run `cargo update -p rushi-common` and
-  re-run the gates. Do not bump unrelated dependencies.
+- Do not hand-edit the `rushi-common` version pin or its
+  `Cargo.lock` entry. To move to a newer kernel release, bump the
+  version in `bin/tui/Cargo.toml` and re-run the gates.
+  Do not bump unrelated dependencies.
 - Keep the branch focused: one change per branch.
 - If a gate fails, fix the cause. Do not loosen tests, snapshots, or
   clippy to make the gate pass.

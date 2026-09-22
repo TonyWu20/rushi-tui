@@ -11,7 +11,7 @@ the documentation, fetched when needed and landing in the transcript
 tail, never the prompt prefix.
 
 WHAT IT DOES
-  Runs the `tui` binary against a session under a pty at a chosen size,
+  Runs the `rushi-tui` binary against a session under a pty at a chosen size,
   replays the frame stream into a terminal grid (ratatui diffs frames:
   it writes only the cells that changed, so the replayed grid is the
   real display), and reports
@@ -87,7 +87,7 @@ def load_screen_class():
 
 
 def spawn(bin_path, session, config, cols, rows, prepend_path=None):
-    """Fork the tui binary against a session under a pty at cols x rows.
+    """Fork the rushi-tui binary against a session under a pty at cols x rows.
 
     Returns (master_fd, pid). The child is detached, its stdio bound to
     the slave, and optionally given a PATH prefix (for the Rust ext
@@ -148,7 +148,7 @@ def sgr_counts(raw):
 def main():
     ap = argparse.ArgumentParser(
         prog="tui-capture",
-        description="Capture what the tui binary renders under a pty, "
+        description="Capture what the rushi-tui binary renders under a pty, "
                     "and assert on the emitted SGR sequences.",
         epilog=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -167,7 +167,7 @@ def main():
                          "text or the emitted SGR sequences (repeatable)")
     ap.add_argument("--raw-out",
                     help="dump the raw pty stream to this path")
-    ap.add_argument("--bin", default=os.path.join(REPO, "target/debug/tui"))
+    ap.add_argument("--bin", default=os.path.join(REPO, "target/debug/rushi-tui"))
     ap.add_argument("--json", action="store_true",
                     help="print a machine-readable result object instead of "
                          "the human-readable report")

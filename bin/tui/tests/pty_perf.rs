@@ -20,7 +20,7 @@ const TAIL_MARKER: &str = "Thisiisnaainsainaisaiaiainsisisi";
 const REBUILD_MARKER: &str = "building transcript";
 
 fn tui_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_tui")
+    env!("CARGO_BIN_EXE_rushi-tui")
 }
 
 /// The battlefield fixture directory. An env override wins, so a copy

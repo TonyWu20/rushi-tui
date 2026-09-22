@@ -4,19 +4,25 @@ Authoritative entry point for any agent starting a new session in
 this repo. Read this first. It tells you what exists, what is
 shipped, and what is next.
 
-## Repo state (2026-09-15)
+## Repo state (2026-09-22)
 
 **Working.** `bin/tui` is the swappable Ratatui TUI front-end for
 the `rushi` kernel. It compiles and runs against the `rushi-common`
-git dep (`github.com/TonyWu20/rushi`, rev pinned in `Cargo.lock`).
-The PTY smoke gate is
+crates.io dep, pinned to `0.1.3` in
+`bin/tui/Cargo.toml` + `Cargo.lock`. The PTY smoke gate is
 `scripts/tui-pty-smoke.py`. The 2026-09-15 turn-fold re-scope
 landed. The fold now applies in the main view too. Thinking blocks
 start collapsed. The final reply sits in a `Report` panel.
 
+**Self-wired entry (2026-09-22, issue #22).** The binary is now
+`rushi-tui`, the user-facing entry point. Config discovery uses the
+shared kernel resolver (`rushi_common::paths`). The loop defaults to
+the Tier-1 `rushi run <session>` CLI, overridable via `--loop-cmd`.
+See `tui-self-wired-entry.md`.
+
 **Split.** This repo is the TUI half of the split described in
 `tui-ext-repo-split.md`. The kernel crate is the `rushi-common`
-git dep on `github.com/TonyWu20/rushi`. UI extensions live in
+crate on crates.io, pinned to `0.1.3`. UI extensions live in
 `../rushi-exts`. This repo has no build-time dependency on either
 sibling checkout.
 
@@ -78,6 +84,7 @@ Method and conventions: `tui-insta-snapshot-testing.md`.
 | `tui-turn-fold.md` | Implemented | 2026-09-15 | Three-level fold in both the main and browse views. Thinking starts collapsed. The final reply sits in a title-less `Report` panel. Neovim-style `z` keys. |
 | `tui-handoff-turn-fold-rescope.md` | Closed | 2026-09-15 | Open items for the turn-fold re-scope. All items resolved on 2026-09-15: the `pty_perf` test is green (fine-grained 100 ms poll), the spec and index are updated, bookkeeping is recorded, diff churn is cleaned, clippy is clean across the workspace (the 33-warning backlog was cleared). |
 | `coauthor-guard.md` | Implemented | 2026-09-15 | Blocks co-author trailers not in `.githooks/coauthor-allowlist`, at commit time and at push time. The `commit-msg` and `pre-push` hooks plus the installer script. |
+| `tui-self-wired-entry.md` | Implemented | 2026-09-22 | Issue #22 adaptation: the `rushi-tui` entry command, the shared kernel config-path resolver (`rushi_common::paths`, kernel PR #30), and the self-wired Tier-1 loop (`rushi run <session>`, `--loop-cmd` override). |
 
 ## Status legend
 
