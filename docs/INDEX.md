@@ -8,8 +8,8 @@ shipped, and what is next.
 
 **Working.** `bin/tui` is the swappable Ratatui TUI front-end for
 the `rushi` kernel. It compiles and runs against the `rushi-common`
-git dep (`github.com/TonyWu20/rushi`, rev pinned in
-`bin/tui/Cargo.toml` + `Cargo.lock`). The PTY smoke gate is
+crates.io dep, pinned to `0.1.3` in
+`bin/tui/Cargo.toml` + `Cargo.lock`. The PTY smoke gate is
 `scripts/tui-pty-smoke.py`. The 2026-09-15 turn-fold re-scope
 landed. The fold now applies in the main view too. Thinking blocks
 start collapsed. The final reply sits in a `Report` panel.
@@ -22,7 +22,7 @@ See `tui-self-wired-entry.md`.
 
 **Split.** This repo is the TUI half of the split described in
 `tui-ext-repo-split.md`. The kernel crate is the `rushi-common`
-git dep on `github.com/TonyWu20/rushi`. UI extensions live in
+crate on crates.io, pinned to `0.1.3`. UI extensions live in
 `../rushi-exts`. This repo has no build-time dependency on either
 sibling checkout.
 

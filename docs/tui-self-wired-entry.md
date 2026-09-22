@@ -46,9 +46,10 @@ It calls the shared kernel resolver:
   `rushi_common::paths` tests. The `pty_smoke`
   `side_by_side_package_layout` test exercises it through the real
   binary.
-- `bin/tui/Cargo.toml`: `rushi-common` is now a git dep pinned to
-  kernel commit `10139de`. It was a crates.io dep before. That commit
-  ships the shared `paths` module.
+- `bin/tui/Cargo.toml`: `rushi-common` is now pinned to the
+  crates.io release `0.1.3`. That release is source-identical to
+  kernel commit `10139de` and ships the shared `paths` module.
+  Before issue #22 it was pinned to the older crates.io release.
 
 The resolved priority now matches the kernel by construction. It is
 `$CONFIG`, then the `--config` flag, then the Nix side-by-side
@@ -77,7 +78,7 @@ There is no kernel launcher commit and no private kernel patch.
 ## 2. Files touched
 
 - `bin/tui/Cargo.toml` — the `[[bin]]` name is `rushi-tui`. The
-  `rushi-common` git dep is pinned to kernel `10139de`.
+  `rushi-common` dep is pinned to crates.io `0.1.3`.
 - `bin/tui/src/main.rs` — `#[command(name = "rushi-tui")]`, the
   `--loop-cmd` flag, the shared `resolve_config_path` delegate, and
   the loop-command precedence.

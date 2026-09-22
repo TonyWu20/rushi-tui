@@ -59,10 +59,11 @@ ratatui-markdown = { git = "https://github.com/celestia-island/ratatui-markdown"
 regex = "1.13"
 # Kernel dep (docs/tui-ext-repo-split.md section 4, item A1):
 # `rushi-common` is the kernel crate `crates/rushi` in the public kernel
-# repo. issue #22 pins kernel commit `10139de` (PR #30: the shared
-# `rushi_common::paths` config-path resolver and `resolved_exe`). To move
-# the TUI to a newer kernel, bump the rev here and re-run all gates.
-rushi-common = { git = "https://github.com/TonyWu20/rushi", rev = "10139de" }
+# repo, published to crates.io. Pinned to `0.1.3` (issue #22), which
+# ships the shared `rushi_common::paths` config-path resolver and
+# `resolved_exe` (kernel PR #30). To move to a newer kernel, bump the
+# version here and re-run all gates.
+rushi-common = "0.1.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1.53", features = [

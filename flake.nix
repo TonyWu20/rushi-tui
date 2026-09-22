@@ -9,9 +9,9 @@
     };
     # The Nix-built `rushi` launcher (kernel flake packages.default),
     # fetched from GitHub so the flake is hostable (no local sibling
-    # checkout required). The `rushi-common` crate is a git dep in
-    # bin/tui/Cargo.toml (rev pinned in Cargo.lock), resolved by cargo
-    # at build time, so no raw source-tree input is needed here.
+    # checkout required). `rushi-common` is a crates.io dep pinned to
+    # 0.1.3 in bin/tui/Cargo.toml, resolved by cargo at build time,
+    # so no raw source-tree input is needed here.
     rushi-kernel = { url = "github:TonyWu20/rushi"; };
   };
 
@@ -43,8 +43,9 @@
           # TUI package ($out/bin/rushi-tui contract, ext-flake-authoring.md
           # section 5.1). `src` stays the flake source so buildRustPackage
           # can read the workspace Cargo.toml/Cargo.lock at eval time.
-          # The `rushi-common` kernel git dep (rev pinned in Cargo.lock)
-          # and the `ratatui-markdown` git dep resolve via cargo at build
+          # The `rushi-common` crates.io dep (version pinned in
+          # bin/tui/Cargo.toml and Cargo.lock) and the
+          # `ratatui-markdown` git dep resolve via cargo at build
           # time; the `tui-highlight` intra-repo path dep resolves within
           # the source tree.
           tuiPkg = pkgs.rustPlatform.buildRustPackage {
@@ -114,7 +115,7 @@
               ];
               shellHook = ''
                 echo "rushi-tui dev shell: rust + lean + Nix-built rushi on PATH."
-                echo "Build the TUI (rushi-common git dep):      cargo build --release"
+                echo "Build the TUI (rushi-common from crates.io):   cargo build --release"
                 echo "Ext-PTY tests: KERNEL_ROOT=<kernel abs path> EXTS_ROOT=<exts abs path> cargo test -p tui"
                 echo "DRT gate:  cd lean && lake build"
                 echo "Run the PTY smoke (two-repo):"
