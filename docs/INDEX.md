@@ -20,6 +20,13 @@ shared kernel resolver (`rushi_common::paths`). The loop defaults to
 the Tier-1 `rushi run <session>` CLI, overridable via `--loop-cmd`.
 See `tui-self-wired-entry.md`.
 
+**Doc split (2026-09-22).** The 2026-09-03-and-later entries of
+`tui_feature_requests_from_human.md` had grown past one line each.
+Their detail now lives in the dated docs under
+`docs/tui-feature-requests/`. The index file is slim
+one-line-per-request again, with each request pointing at its
+detail doc.
+
 **Split.** This repo is the TUI half of the split described in
 `tui-ext-repo-split.md`. The kernel crate is the `rushi-common`
 crate on crates.io, pinned to `0.1.3`. UI extensions live in
@@ -72,7 +79,18 @@ Method and conventions: `tui-insta-snapshot-testing.md`.
 | `goal-ui_feedback_from_human.md` | Draft | 2026-09-10 | Human-reported goal UI bugs and feature requests. |
 | `tree-ui-design-from-human.md` | Draft | 2026-09-16 | Draft for the rewind/tree browse UI. Follow-up decisions 2026-09-15: float navigation and focus, `Tab` completion, the event-type filter, prettified tool rows, pane parse + highlight. 2026-09-16: `Summarize the branch` / `Summarize with custom prompt` corrected to pi's semantics — summarize the abandoned branch and append it as a new active leaf, not compact the active prefix. Decided via the kernel `refinement-policy.md`: a branch mode of `bin/compact`, a reused `compaction_summary` marker (additive `branch_of` field), the summary written to its own versioned `branch-summary/v<N>.md` (never the auto-compact `handoff/` dir), no new event type or binary. |
 | `tree-ui-design-from-human-phase-2.md` | Implemented | 2026-09-17 | Build-ready spec for the four follow-up work items plus the `Tab` reservation. Key contract, row shapes, filter cycle, pane parse + highlight, test plan. Implemented 2026-09-15: prettified tool rows, pane parse + highlight, event-type filter, float focus and wrap navigation, `Tab` completion. Refined 2026-09-16: row tag class colors, the kitty keyboard protocol for `Ctrl+Shift+P`, and `Tab` replacing the typed text. |
-| `tui_feature_requests_from_human.md` | Active | 2026-09-16 | Slim index of all TUI feature requests with ship status. |
+| `tui_feature_requests_from_human.md` | Active | 2026-09-22 | Slim index of all TUI feature requests with ship status. From 2026-09-03 on, each request points to its detail in the dated docs under `docs/tui-feature-requests/`. |
+| `tui-feature-requests/2026-09-03.md` | Detail | 2026-09-22 | Detail for the 2026-09-03 requests: the scroll position bar, the conversation browsing mode, and select-and-yank. |
+| `tui-feature-requests/2026-09-04.md` | Detail | 2026-09-22 | Detail for the 2026-09-04 requests: picker code highlight, session navigation, the `:` command palette, and pending-message recall. |
+| `tui-feature-requests/2026-09-06.md` | Detail | 2026-09-22 | Detail for the 2026-09-06 requests: table-pipe disambiguation, streaming response, thinking/text transition, stream pacing, message-panel redesign, browse pin, picker scope cycle, and path abbreviation. |
+| `tui-feature-requests/2026-09-07.md` | Detail | 2026-09-22 | Detail for the 2026-09-07 requests: the diff split/unified layout and the open visual-selection highlight bug. |
+| `tui-feature-requests/2026-09-12.md` | Detail | 2026-09-22 | Detail for the 2026-09-12 requests: the open table-cell highlighting observation and the windowed picker preview pane. |
+| `tui-feature-requests/2026-09-13.md` | Detail | 2026-09-22 | Detail for the 2026-09-13 requests: preview-pane wrap, browse pin on settle, the no-event-cap, and raw-source yank. |
+| `tui-feature-requests/2026-09-14.md` | Detail | 2026-09-22 | Detail for the 2026-09-14 tool-panel pass: purple name, margin rows, no `tool:` prefix, full-width panel, header target, compact-label scope, and the live-stream simplify. |
+| `tui-feature-requests/2026-09-15.md` | Detail | 2026-09-22 | Detail for the 2026-09-15 requests: browse caret, `e` motion, draft gate, float wrap/focus, `Tab` complete, the `Ctrl+F` tree filter, prettified tree rows, and the jaq tree preview. |
+| `tui-feature-requests/2026-09-16.md` | Detail | 2026-09-22 | Detail for the 2026-09-16 request and feedback: the `working` loop-phase status, tree tag colors, the `Ctrl+Shift+P` focus toggle, and palette `Tab` replace. |
+| `tui-feature-requests/2026-09-19.md` | Detail | 2026-09-22 | Detail for the 2026-09-19 request: the `ge`/`yge` motions in the editor and browse mode. |
+| `tui-feature-requests/2026-09-20.md` | Detail | 2026-09-22 | Detail for the 2026-09-20 requests: the fold-tally hook counters, the `[r-PENDING]` replace mode, and the open tally-inflation investigation. |
 | `tui-ext-repo-split.md` | Historical | 2026-09-15 | The repo-split execution record. The TUI `rushi-common` git re-pointing (item A1) landed 2026-09-15. |
 | `tui-insta-snapshot-testing.md` | Implemented | 2026-09-11 | The insta-snapshot test method: harness, snapshot set, determinism rules. |
 | `tui-perf-freeze-investigation.md` | Investigation | 2026-09-13 | Freeze root cause: the synchronous full transcript build on each cache-key miss. |
@@ -97,6 +115,8 @@ Method and conventions: `tui-insta-snapshot-testing.md`.
 - **Draft** — early exploration. May change shape.
 - **Review** — critique of another doc. Not a specification.
 - **Investigation** — research that surveys external code. Not a spec.
+- **Detail** — verbatim detail for the dated split of the
+  feature-request index. One doc per dated section.
 - **Historical** — records a past decision. Not a current spec.
 - **Superseded** — replaced by a newer doc. Kept for history.
 
