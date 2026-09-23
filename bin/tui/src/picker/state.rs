@@ -407,6 +407,10 @@ impl PickerState {
         self.focus = match self.focus {
             Focus::List => Focus::Preview,
             Focus::Preview => Focus::List,
+            // The input target is a tree-stage construct (docs/tui-
+            // feature-requests/2026-09-23.md tree-input-focus). The
+            // picker never sets it; hold it if one leaks in.
+            Focus::Input => Focus::Input,
         };
         PickAction::ToggleFocus
     }
@@ -450,11 +454,13 @@ impl PickerState {
             // the list in half-visible-row steps, the preview in
             // `PREVIEW_PAGE` line steps.
             Key::CtrlU => match self.focus {
-                Focus::List => self.scroll_list_up(count),
+                // The input focus target never happens in the picker;
+                // treat it like the list if it ever leaks in.
+                Focus::List | Focus::Input => self.scroll_list_up(count),
                 Focus::Preview => self.scroll_preview_up(preview_page),
             },
             Key::CtrlD => match self.focus {
-                Focus::List => self.scroll_list_down(count),
+                Focus::List | Focus::Input => self.scroll_list_down(count),
                 Focus::Preview => self.scroll_preview_down(preview_page),
             },
             Key::CtrlP => self.toggle_preview(count, preview_cutoff),

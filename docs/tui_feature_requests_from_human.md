@@ -441,3 +441,14 @@ macchiato` as the first internal color scheme. Shipped in
       previous branch starting point (the rewind marker row).
       Detail:
       `docs/tui-feature-requests/2026-09-23.md` (tree-fold-jump).
+- [x] The tree filter input gets its own focus target. The `z`
+      fold arm is a state-based command channel, fully
+      disambiguated from query typing. With the filter focused,
+      every character including `z` types into the query. With a
+      view focused, `z` arms the fold and jump keys, and no plain
+      character reaches the filter. Focus cycles input -> list ->
+      preview -> input on `Shift+Tab` / `Ctrl+Shift+P`. The tree
+      stage opens on the filter focus. `zj`/`zk` also jump to the
+      abandoned-tail head.
+      Detail:
+      `docs/tui-feature-requests/2026-09-23.md` (tree-input-focus).

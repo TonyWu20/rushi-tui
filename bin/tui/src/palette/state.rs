@@ -167,8 +167,11 @@ pub struct PaletteState {
     /// the `TreeOptions` stage (docs/tree-ui-design-from-human.md).
     /// `None` outside that stage.
     pub tree_seq: Option<usize>,
-    /// Which pane has focus (docs/tree-ui-design-from-human-phase-2.md
-    /// item 4). Toggled by `Ctrl+Shift+P` / `BackTab`.
+    /// The key-stream focus target (docs/tree-ui-design-from-human-
+    /// phase-2.md item 4, extended by docs/tui-feature-requests/
+    /// 2026-09-23.md tree-input-focus): in the tree stage it cycles
+    /// filter input, entry list, and preview pane. Toggled by
+    /// `Ctrl+Shift+P` / `BackTab`.
     pub focus: Focus,
     /// The tree-list event-type filter (docs/tree-ui-design-from-
     /// human-phase-2.md item 3). Cycled by `Ctrl+F` in the
@@ -271,7 +274,9 @@ impl PaletteState {
     /// Enter the `TreeList` sub-stage (the `tree` Goto item). Like the
     /// session list, it records the query length as the goto prefix so
     /// the fuzzy filter is everything typed after `tree`.
-    /// (docs/tree-ui-design-from-human.md)
+    /// (docs/tree-ui-design-from-human.md) The stage opens with the
+    /// filter input focused: the first key types into the query.
+    /// (docs/tui-feature-requests/2026-09-23.md tree-input-focus)
     pub fn goto_tree_list(&mut self) {
         self.stage = PaletteStage::TreeList;
         self.goto_prefix_len = self.query.len();
@@ -282,6 +287,10 @@ impl PaletteState {
         self.tree_seq = None;
         // The filter is owned by the tree stage; enter it fresh.
         self.tree_filter = TreeFilter::default();
+        // The typing channel starts focused (docs/tui-feature-
+        // requests/2026-09-23.md tree-input-focus): plain characters
+        // type into the query until a focus switch moves to the view.
+        self.focus = Focus::Input;
     }
 
     /// Enter the `TreeOptions` sub-stage, remembering the picked event's
@@ -580,19 +589,31 @@ impl PaletteState {
         PaletteAction::Move
     }
 
-    /// Toggle focus between the entry list and the preview pane
-    /// (docs/tree-ui-design-from-human-phase-2.md item 4). A no-op
-    /// while the preview pane is hidden.
+    /// Cycle the focus target for the key stream
+    /// (docs/tree-ui-design-from-human-phase-2.md item 4, and the
+    /// tree-input-focus request in
+    /// docs/tui-feature-requests/2026-09-23.md). In the `TreeList`
+    /// stage it cycles `Input -> List -> Preview -> Input`: the input
+    /// target owns plain-character typing, while `List` and `Preview`
+    /// own the tree keys and the half-page scrolls. In every other
+    /// stage it stays the plain `List` <-> `Preview` toggle (the
+    /// picker has no input focus), a no-op while the preview pane is
+    /// hidden.
     pub fn toggle_focus(&mut self, count: usize, cutoff: usize) -> PaletteAction {
         if !self.open {
             return PaletteAction::Nothing;
         }
-        if !self.preview_visible(count, cutoff) {
+        if !matches!(self.focus, Focus::Input) && !self.preview_visible(count, cutoff) {
             return PaletteAction::Nothing;
         }
-        self.focus = match self.focus {
-            Focus::List => Focus::Preview,
-            Focus::Preview => Focus::List,
+        self.focus = match (self.stage, self.focus) {
+            (PaletteStage::TreeList, Focus::Input) => Focus::List,
+            (PaletteStage::TreeList, Focus::List) => Focus::Preview,
+            (PaletteStage::TreeList, Focus::Preview) => Focus::Input,
+            (_, Focus::List) => Focus::Preview,
+            // `Input` only exists in the tree stage; fall back to the
+            // list if it ever leaks into another stage.
+            _ => Focus::List,
         };
         PaletteAction::ToggleFocus
     }
@@ -678,11 +699,14 @@ impl PaletteState {
             // the list in half-visible-row steps, the preview in
             // `PREVIEW_PAGE` line steps.
             Key::CtrlU => match self.focus {
-                Focus::List => self.scroll_list_up(count),
+                // With the filter input focused (tree stage only),
+                // the list scrolls: the input has no scroll of its
+                // own.
+                Focus::List | Focus::Input => self.scroll_list_up(count),
                 Focus::Preview => self.scroll_preview_up(preview_page),
             },
             Key::CtrlD => match self.focus {
-                Focus::List => self.scroll_list_down(count),
+                Focus::List | Focus::Input => self.scroll_list_down(count),
                 Focus::Preview => self.scroll_preview_down(preview_page),
             },
             Key::CtrlP => self.toggle_preview(count, preview_cutoff),
@@ -809,6 +833,33 @@ mod tests {
         assert_eq!(s.focus, Focus::Preview);
         assert_eq!(s.toggle_focus(10, 4), PaletteAction::ToggleFocus);
         assert_eq!(s.focus, Focus::List);
+    }
+
+    /// The tree stage opens on the filter input and cycles all three
+    /// targets: input -> list -> preview -> input
+    /// (docs/tui-feature-requests/2026-09-23.md tree-input-focus).
+    #[test]
+    fn tree_stage_focus_cycles_three_targets() {
+        let mut s = open();
+        s.goto_tree_list();
+        assert_eq!(s.focus, Focus::Input, "the tree opens on the filter");
+        assert_eq!(s.toggle_focus(10, 4), PaletteAction::ToggleFocus);
+        assert_eq!(s.focus, Focus::List);
+        assert_eq!(s.toggle_focus(10, 4), PaletteAction::ToggleFocus);
+        assert_eq!(s.focus, Focus::Preview);
+        assert_eq!(s.toggle_focus(10, 4), PaletteAction::ToggleFocus);
+        assert_eq!(s.focus, Focus::Input, "the cycle wraps to the filter");
+    }
+
+    /// The input target toggles even with the preview pane hidden:
+    /// typing is not gated on the pane.
+    #[test]
+    fn input_focus_toggles_with_the_pane_hidden() {
+        let mut s = open();
+        s.goto_tree_list();
+        // Two results is below the cutoff of four: the pane hides.
+        assert_eq!(s.toggle_focus(2, 4), PaletteAction::ToggleFocus);
+        assert_eq!(s.focus, Focus::List, "input reaches the list");
     }
 
     /// `Ctrl+Shift+P` and the legacy `BackTab` fallback both reach

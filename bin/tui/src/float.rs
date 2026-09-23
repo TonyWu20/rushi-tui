@@ -26,6 +26,11 @@ pub enum Focus {
     /// The preview pane has focus. `Ctrl+U` / `Ctrl+D` scroll the
     /// pane `PREVIEW_PAGE` lines. The pane border is green.
     Preview,
+    /// The command input (the filter query) has focus: plain
+    /// characters type into the query and the tree `z` fold arm is
+    /// inert (docs/tui-feature-requests/2026-09-23.md tree-input-
+    /// focus). Set on entry to the `TreeList` stage.
+    Input,
 }
 
 /// The orientation of the float layout, a function of the float width.

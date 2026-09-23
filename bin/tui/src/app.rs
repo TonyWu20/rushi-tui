@@ -645,10 +645,12 @@ pub struct App {
     /// the frame's expand-all each draw. Cleared when the tree view
     /// state is reset (docs/tui-feature-requests/2026-09-23.md).
     tree_folded: std::collections::HashSet<usize>,
-    /// The tree-stage fold arm, mirroring the browse-mode `z` arm
-    /// (`z_fold_arm`): `z` arms, the next character within
-    /// `SS_ARM_TTL` picks the fold or jump key.
-    tree_z_arm: Option<std::time::Instant>,
+    /// The tree-stage fold arm (docs/tui-feature-requests/2026-09-
+    /// 23.md tree-input-focus): `z` is armed while the tree view has
+    /// focus and waits for its second character. State-based, not
+    /// time-based: the arm drops on the next character, any other key,
+    /// or a focus switch. With the filter focused it stays off.
+    tree_z_armed: bool,
     /// Extension-provided palette commands, refreshed when a
     /// `commands_list` reply lands or a command times out.
     ext_commands: Vec<crate::palette::items::PaletteItem>,
@@ -860,7 +862,7 @@ impl App {
             palette_state: crate::palette::state::PaletteState::new(),
             tree_view: tui_treelistview::TreeListViewState::new(),
             tree_folded: std::collections::HashSet::new(),
-            tree_z_arm: None,
+            tree_z_armed: false,
             ext_commands: Vec::new(),
             effort_current: "medium".to_string(),
             palette_cmd_requested: false,
@@ -1529,7 +1531,7 @@ impl App {
             // state (docs/tree-ui-design-from-human.md "Tree indent").
             self.tree_view = tui_treelistview::TreeListViewState::new();
             self.tree_folded.clear();
-            self.tree_z_arm = None;
+            self.tree_z_armed = false;
             self.z_fold_arm = None;
             self.fold_cursor_target = None;
             self.last_event_line_starts.clear();
@@ -3291,27 +3293,28 @@ impl App {
         }
     }
 
-    /// The tree-stage fold and branch-jump keys, mirroring the
-    /// browse-mode fold arm (docs/tui-turn-fold.md key table;
-    /// docs/tui-feature-requests/2026-09-23.md tree-fold-jump).
-    /// `z` arms; the next character within `SS_ARM_TTL` acts.
-    /// `za` toggles the branch under the cursor, `zo` opens it,
-    /// `zc` closes it, `zR` opens every branch, `zM` closes every
-    /// branch, `zj` jumps to the next branch starting point, `zk`
-    /// to the last one before the cursor. An unbound second key
-    /// flashes and drops the arm.
+    /// The tree-stage fold and branch-boundary jump keys, reusing the
+    /// browse-mode fold key set (docs/tui-turn-fold.md key table;
+    /// docs/tui-feature-requests/2026-09-23.md tree-fold-jump and
+    /// tree-input-focus). `z` arms; the next character acts. The arm
+    /// is state-based, not time-based: it stays set until the next
+    /// character resolves it or any other key cancels it. `za`
+    /// toggles the branch under the cursor, `zo` opens it, `zc`
+    /// closes it, `zR` opens every branch, `zM` closes every branch,
+    /// `zj` jumps to the next branch boundary, `zk` to the last one
+    /// before the cursor. A branch boundary is a rewind marker row or
+    /// the head of its abandoned tail. An unbound second key flashes
+    /// and drops the arm.
     fn tree_fold_key(&mut self, c: char) -> bool {
         if c == 'z' {
-            self.tree_z_arm = Some(std::time::Instant::now());
+            self.tree_z_armed = true;
             self.flash("tree fold: z + a o c R M j k");
             return true;
         }
-        let Some(armed_at) = self.tree_z_arm.take() else {
-            return false;
-        };
-        if armed_at.elapsed() > SS_ARM_TTL {
+        if !self.tree_z_armed {
             return false;
         }
+        self.tree_z_armed = false;
         let model = self.session_tree();
         let filter = self.tree_row_filter(&model);
         let query = crate::palette::tree_model::build_query(&filter);
@@ -3319,12 +3322,6 @@ impl App {
         crate::palette::tree_model::expand_all(v, &model);
         Self::apply_tree_folds(&self.tree_folded, &model, v);
         let sel = v.selected_id();
-        let marker_idx: Vec<usize> = v
-            .visible_ids()
-            .enumerate()
-            .filter(|(_, s)| model.is_marker(*s))
-            .map(|(i, _)| i)
-            .collect();
         let mut flash_msg: Option<String> = None;
         match c {
             'a' | 'o' | 'c' => {
@@ -3356,19 +3353,43 @@ impl App {
             }
             'j' | 'k' => {
                 let forward = c == 'j';
-                // The branch starting points in visible order: the
-                // rewind marker rows.
-                let cur = sel.and_then(|s| v.visible_index_of(s)).unwrap_or(0);
-                let target = if forward {
-                    if sel.is_some() {
-                        marker_idx.iter().copied().find(|&i| i > cur)
-                    } else {
-                        marker_idx.first().copied()
+                // The branch boundaries in visible order: every
+                // rewind marker row, plus the head of each marker's
+                // abandoned tail (docs/tui-feature-requests/
+                // 2026-09-23.md tree-input-focus).
+                let marker_idx: Vec<usize> = v
+                    .visible_ids()
+                    .enumerate()
+                    .filter(|(_, s)| model.is_marker(*s))
+                    .map(|(i, _)| i)
+                    .collect();
+                let vis: Vec<usize> = v.visible_ids().collect();
+                let mut boundary_idx = marker_idx.clone();
+                for &mi in &marker_idx {
+                    if let Some(head) = model.tail_head(vis[mi]) {
+                        if let Some(hi) = v.visible_index_of(head) {
+                            boundary_idx.push(hi);
+                        }
                     }
-                } else if sel.is_some() {
-                    marker_idx.iter().copied().rev().find(|&i| i < cur)
-                } else {
-                    marker_idx.last().copied()
+                }
+                boundary_idx.sort_unstable();
+                boundary_idx.dedup();
+                let target = match sel {
+                    Some(sel) => {
+                        let cur = v.visible_index_of(sel).unwrap_or(0);
+                        if forward {
+                            boundary_idx.iter().copied().find(|&i| i > cur)
+                        } else {
+                            boundary_idx.iter().copied().rev().find(|&i| i < cur)
+                        }
+                    }
+                    None => {
+                        if forward {
+                            boundary_idx.first().copied()
+                        } else {
+                            boundary_idx.last().copied()
+                        }
+                    }
                 };
                 match target {
                     Some(i) => {
@@ -3376,9 +3397,9 @@ impl App {
                     }
                     None => {
                         flash_msg = Some(if forward {
-                            "no branch start after the cursor".to_string()
+                            "no branch boundary after the cursor".to_string()
                         } else {
-                            "no branch start before the cursor".to_string()
+                            "no branch boundary before the cursor".to_string()
                         });
                     }
                 }
@@ -3440,7 +3461,7 @@ impl App {
         // borrow below must not overlap an outstanding `&PaletteState`.
         let st = self.palette_state();
         let filter_label = st.tree_filter.label();
-        let preview_focus = st.focus == crate::float::Focus::Preview;
+        let focus = st.focus;
         let query_display = format!(":{}", st.query);
 
         // Paint the float region with the terminal default background.
@@ -3520,8 +3541,17 @@ impl App {
             "enter ok · esc close · ctrl-j/k move · ctrl-p preview · ctrl-shift-p focus · tab complete",
         );
         hints = format!("[f: {filter_label}] · {hints}");
-        if preview_focus {
-            hints.push_str(" · preview focus");
+        // The focus indicator
+        // (docs/tui-feature-requests/2026-09-23.md tree-input-focus):
+        // the input bar names the target that owns the key stream.
+        match focus {
+            crate::float::Focus::Input => {
+                hints.push_str(" · input focus");
+            }
+            crate::float::Focus::Preview => {
+                hints.push_str(" · preview focus");
+            }
+            crate::float::Focus::List => {}
         }
         let query_len = query_display.chars().count();
         let prose = palette.color(crate::color::Role::PlainText);
@@ -3645,7 +3675,7 @@ impl App {
                             // human.md "Tree indent").
                             self.tree_view = tui_treelistview::TreeListViewState::new();
                             self.tree_folded.clear();
-                            self.tree_z_arm = None;
+                            self.tree_z_armed = false;
                             self.palette_state_mut().goto_tree_list();
                         } else {
                             self.palette_state_mut().goto_session_list();
@@ -3857,7 +3887,7 @@ impl App {
             // commit path (no stale selection or scroll).
             self.tree_view = tui_treelistview::TreeListViewState::new();
             self.tree_folded.clear();
-            self.tree_z_arm = None;
+            self.tree_z_armed = false;
             self.palette_state_mut().goto_tree_list();
         } else if is_goto {
             self.palette_state_mut().goto_session_list();
@@ -4439,16 +4469,20 @@ impl App {
             // The tree stage renders the event log as a
             // `tui-treelistview` table, so its row-movement and
             // commit keys route to the view state instead of the
-            // flat cursor machine, from either focus
+            // flat cursor machine, from either view focus
             // (docs/tree-ui-design-from-human.md "Tree indent"):
             // the preview pane follows the selected row, so moving
             // the selection is what the movement keys mean in this
-            // stage. Typing (except the `z` fold arm), `Esc`,
-            // `Ctrl+F`, `Tab`, `Ctrl+P`, and `Ctrl+Shift+P` fall
-            // through to the shared state machine below. With the
-            // preview focused, `Ctrl+U`/`Ctrl+D` scroll the pane
-            // instead of moving the selection.
+            // stage. The filter input focus owns plain-character
+            // typing (docs/tui-feature-requests/2026-09-23.md
+            // tree-input-focus): while it has focus, `z` types into
+            // the query and the fold arm stays off. With a view
+            // focus, plain characters do not reach the query.
             if self.palette_state.stage == crate::palette::state::PaletteStage::TreeList {
+                let view_focus = matches!(
+                    self.palette_state.focus,
+                    crate::float::Focus::List | crate::float::Focus::Preview
+                );
                 let list_focus = self.palette_state.focus == crate::float::Focus::List;
                 match key {
                     Key::CtrlJ
@@ -4460,27 +4494,42 @@ impl App {
                     | Key::Home
                     | Key::End
                     | Key::Enter => {
+                        // Movement and commit keys cancel a pending
+                        // `z` arm: the user moved on.
+                        self.tree_z_armed = false;
                         return self.press_tree_key(key);
                     }
                     Key::CtrlU | Key::CtrlD if list_focus => {
+                        self.tree_z_armed = false;
                         return self.press_tree_key(key);
                     }
-                    // The tree fold arm (docs/tui-feature-requests/
-                    // 2026-09-23.md tree-fold-jump), mirroring the
-                    // browse-mode `z` fold arm: `z` arms; the next
-                    // character within the TTL acts. An unbound
-                    // character flashes and drops the arm.
-                    Key::Char('z') => {
+                    // The tree fold arm acts only while a view has
+                    // focus (docs/tui-feature-requests/2026-09-23.md
+                    // tree-input-focus). With the filter focused,
+                    // `z` is a plain typed character.
+                    Key::Char('z') if view_focus => {
                         self.tree_fold_key('z');
                         return Vec::new();
                     }
                     // The fold arm acts on the next character while
-                    // armed; an expired arm drops and the character
-                    // reaches the query below.
-                    Key::Char(c) if self.tree_z_arm.is_some() && self.tree_fold_key(c) => {
+                    // armed; an unbound character flashes and drops
+                    // the arm.
+                    Key::Char(c) if view_focus && self.tree_z_armed && self.tree_fold_key(c) => {
                         return Vec::new();
                     }
-                    _ => {}
+                    // Plain characters do not reach the filter while
+                    // a view has focus. `Shift+Tab` moves the focus
+                    // to the filter.
+                    Key::Char(_) | Key::Quit | Key::Backspace if view_focus => {
+                        self.tree_z_armed = false;
+                        self.flash("filter not focused: Shift+Tab to type");
+                        return Vec::new();
+                    }
+                    _ => {
+                        // Focus switches, `Esc`, and the other keys
+                        // cancel a pending `z` arm.
+                        self.tree_z_armed = false;
+                    }
                 }
             }
             // The tree stage has no flat ranked list of its own; the
@@ -6788,12 +6837,15 @@ mod tree_fold_tests {
 
     /// `z c` closes the branch under the cursor; `z o` re-opens it.
     /// The fold target of a leaf row is the nearest ancestor that
-    /// has children, like the browse-mode innermost-fold rule.
+    /// has children, like the browse-mode innermost-fold rule. The
+    /// fold keys act while a view has focus (docs/tui-feature-
+    /// requests/2026-09-23.md tree-input-focus).
     #[test]
     fn zc_folds_the_branch_under_the_cursor() {
         let mut app = app_with(branch_events());
         app.palette_state_mut().goto_tree_list();
         app.palette_state_mut().open = true;
+        app.palette_state_mut().focus = crate::float::Focus::List;
         app.press_tree_key(Key::Down); // select row 1, the branch point.
         assert_eq!(app.tree_view.selected_id(), Some(1));
         app.press(Key::Char('z'));
@@ -6819,6 +6871,7 @@ mod tree_fold_tests {
         let mut app = app_with(branch_events());
         app.palette_state_mut().goto_tree_list();
         app.palette_state_mut().open = true;
+        app.palette_state_mut().focus = crate::float::Focus::List;
         app.press_tree_key(Key::Down);
         app.press(Key::Char('z'));
         app.press(Key::Char('c'));
@@ -6826,7 +6879,7 @@ mod tree_fold_tests {
         let other = vec![user("other")];
         app.set_active(SessionId::new("s2"), other, 1);
         assert!(app.tree_folded.is_empty(), "the fold set resets");
-        assert!(app.tree_z_arm.is_none(), "the arm resets");
+        assert!(!app.tree_z_armed, "the arm resets");
     }
 
     /// `zM` folds every branch, `zR` opens them all again.
@@ -6835,6 +6888,7 @@ mod tree_fold_tests {
         let mut app = app_with(branch_events());
         app.palette_state_mut().goto_tree_list();
         app.palette_state_mut().open = true;
+        app.palette_state_mut().focus = crate::float::Focus::List;
         app.press_tree_key(Key::Down);
         app.press(Key::Char('z'));
         app.press(Key::Char('M'));
@@ -6850,18 +6904,21 @@ mod tree_fold_tests {
         assert_eq!(ids, vec![1, 2, 3, 4, 5, 6], "all branches open");
     }
 
-    /// `zj`/`zk` jump between the branch starting points: the
-    /// rewind marker rows, in visible order. `zj` lands on the next
-    /// marker past the cursor, `zk` on the last one before it.
+    /// `zj`/`zk` jump between the branch boundaries: the rewind
+    /// marker rows and the heads of abandoned tails, in visible
+    /// order (docs/tui-feature-requests/2026-09-23.md tree-input-
+    /// focus). In this fixture the only tail head is a marker row,
+    /// so the set collapses to the two markers.
     #[test]
-    fn zj_zk_jump_between_branch_starts() {
+    fn zj_zk_jump_between_branch_boundaries() {
         let mut app = app_with(branch_events());
         app.palette_state_mut().goto_tree_list();
         app.palette_state_mut().open = true;
+        app.palette_state_mut().focus = crate::float::Focus::List;
         app.press_tree_key(Key::Down); // select row 1 (visible index 0).
         app.press(Key::Char('z'));
         app.press(Key::Char('j'));
-        assert_eq!(app.tree_view.selected_id(), Some(2), "next marker");
+        assert_eq!(app.tree_view.selected_id(), Some(2), "next boundary");
         app.press(Key::Char('z'));
         app.press(Key::Char('j'));
         assert_eq!(app.tree_view.selected_id(), Some(5), "the next marker");
@@ -6870,25 +6927,69 @@ mod tree_fold_tests {
         assert_eq!(
             app.tree_view.selected_id(),
             Some(2),
-            "back to the earlier marker"
+            "back to the earlier boundary"
         );
         app.press(Key::Char('z'));
         app.press(Key::Char('k'));
         assert_eq!(
             app.tree_view.selected_id(),
             Some(2),
-            "no marker before: the cursor holds and a flash explains"
+            "no boundary before: the cursor holds and a flash explains"
         );
         assert!(app.status().is_some(), "the jump flash is visible");
     }
 
-    /// An unbound second key flashes and drops the arm. It does not
-    /// reach the query; the next un-armed character does.
+    /// A fixture with a real abandoned tail: the marker (seq 3)
+    /// rewinds to seq 1 and abandons row 2. In the DFS projection
+    /// the tail row renders after the branch block.
+    fn tail_events() -> Vec<Event> {
+        vec![
+            user("a"),
+            user("b"),
+            rewind(1), // seq 3: fork marker; the abandoned tail is row 2.
+            user("c"),
+        ]
+    }
+
+    /// `zj` from inside a branch block reaches the head of the
+    /// abandoned tail, not just marker rows (docs/tui-feature-
+    /// requests/2026-09-23.md tree-input-focus).
     #[test]
-    fn unbound_fold_keys_do_not_reach_the_query() {
+    fn zj_reaches_the_abandoned_tail_head() {
+        let mut app = app_with(tail_events());
+        app.palette_state_mut().goto_tree_list();
+        app.palette_state_mut().open = true;
+        app.palette_state_mut().focus = crate::float::Focus::List;
+        // Land inside the branch block: row 4, visible index 2.
+        app.press_tree_key(Key::Down);
+        app.press_tree_key(Key::Down);
+        app.press_tree_key(Key::Down);
+        assert_eq!(app.tree_view.selected_id(), Some(4), "inside the branch");
+        app.press(Key::Char('z'));
+        app.press(Key::Char('j'));
+        assert_eq!(
+            app.tree_view.selected_id(),
+            Some(2),
+            "the head of the abandoned tail"
+        );
+        app.press(Key::Char('z'));
+        app.press(Key::Char('k'));
+        assert_eq!(
+            app.tree_view.selected_id(),
+            Some(3),
+            "back to the marker row"
+        );
+    }
+
+    /// With a view focused, no plain character reaches the filter:
+    /// an unbound second key flashes and drops the arm, and a later
+    /// plain character only flashes the focus hint.
+    #[test]
+    fn view_focus_keeps_chars_out_of_the_filter() {
         let mut app = app_with(branch_events());
         app.palette_state_mut().goto_tree_list();
         app.palette_state_mut().open = true;
+        app.palette_state_mut().focus = crate::float::Focus::List;
         app.press(Key::Char('z'));
         app.press(Key::Char('b'));
         assert_eq!(
@@ -6899,9 +7000,30 @@ mod tree_fold_tests {
         app.press(Key::Char('c'));
         assert_eq!(
             app.palette_state().query,
-            "c",
-            "an un-armed character types into the query"
+            "",
+            "a plain character in view focus never reaches the filter"
         );
+        assert!(!app.tree_z_armed, "the unbound key dropped the arm");
+        assert!(app.status().is_some(), "a hint flash is visible");
+    }
+
+    /// The tree stage opens with the filter focused: a plain `z`
+    /// types into the query and the fold arm never engages
+    /// (docs/tui-feature-requests/2026-09-23.md tree-input-focus).
+    #[test]
+    fn input_focus_types_z_into_the_query() {
+        let mut app = app_with(branch_events());
+        app.palette_state_mut().goto_tree_list();
+        app.palette_state_mut().open = true;
+        assert_eq!(
+            app.palette_state().focus,
+            crate::float::Focus::Input,
+            "the stage opens on the filter input"
+        );
+        app.press(Key::Char('z'));
+        app.press(Key::Char('e'));
+        assert_eq!(app.palette_state().query, "ze", "z is just a char");
+        assert!(!app.tree_z_armed, "no arm in input focus");
     }
 }
 

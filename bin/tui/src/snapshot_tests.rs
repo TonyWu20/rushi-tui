@@ -1368,7 +1368,9 @@ fn the_focused_preview_pane_border_is_green() {
     let events = tree_phase2_events();
     let (host, _tmp) = empty_host();
 
-    // Unfocused: the pane border stays `Status`, never `Success`.
+    // The tree stage opens on the filter input focus (docs/tui-
+    // feature-requests/2026-09-23.md tree-input-focus): the preview
+    // pane starts unfocused, so its border stays the Status color.
     let mut app = tree_stage_app(events.clone());
     let status = app.palette().color(Role::Status);
     let success = app.palette().color(Role::Success);
@@ -1380,10 +1382,9 @@ fn the_focused_preview_pane_border_is_green() {
     );
     assert!(fg.contains(&status), "the unfocused pane border is Status");
 
-    // Focused: the pane border takes the green `Success` color.
+    // Focused: the pane border takes the green Success color.
     let mut app = tree_stage_app(events);
-    app.palette_state_mut()
-        .toggle_focus(4, crate::picker::render::PREVIEW_CUTOFF);
+    app.palette_state_mut().focus = crate::float::Focus::Preview;
     let buf = render_buffer(&mut app, &host, 100, 30);
     let fg = preview_border_fg(&buf, 100, 30);
     assert!(

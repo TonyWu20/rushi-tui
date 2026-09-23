@@ -97,10 +97,16 @@ pub struct SessionTree {
     /// The app's `events_version`: the model revision, so the crate's
     /// projection cache invalidates when the log grows.
     pub revision: u64,
+    /// The parsed rewind markers, in log order (the shared kernel
+    /// parser). The branch-boundary facts the jump keys read: each
+    /// marker's target and the head of its abandoned tail
+    /// (docs/tui-feature-requests/2026-09-23.md tree-input-focus).
+    markers: Vec<Marker>,
 }
 
 /// One parsed `rewind` marker, with the display-depth facts derived
 /// from it.
+#[derive(Clone)]
 struct Marker {
     /// The marker's own 1-based log seq: the first seq of its span.
     /// The span starts at the marker row, not at the target row.
@@ -271,7 +277,7 @@ impl SessionTree {
         // rows alike (a marker row renders at the depth of the
         // branch it heads, so its branch events follow at the same
         // level).
-        let mut solver = DepthSolver::new(base_seq, markers, n);
+        let mut solver = DepthSolver::new(base_seq, markers.clone(), n);
         let pos_depth: Vec<usize> = (0..n).map(|p| solver.depth_at(base_seq + p)).collect();
 
         // The rows: log order, `ext_status` rows skipped. A row at
@@ -352,6 +358,7 @@ impl SessionTree {
             kinds,
             depth,
             revision,
+            markers,
         }
     }
 
@@ -405,6 +412,29 @@ impl SessionTree {
             .copied()
             .filter(|s| self.has_children(*s))
             .collect()
+    }
+
+    /// The wire `target_seq` of the rewind marker at `marker_seq`
+    /// (the rewound event the branch is rooted at). `None` when the
+    /// row is not a marker.
+    pub fn marker_target(&self, marker_seq: usize) -> Option<usize> {
+        self.markers
+            .iter()
+            .find(|m| m.seq == marker_seq)
+            .map(|m| m.target)
+    }
+
+    /// The head of a rewind marker's abandoned tail: the first
+    /// visible log row after the marker's target and before the
+    /// marker row itself. `None` when that tail holds no visible row,
+    /// or the seq is not a marker. The `zj`/`zk` branch-boundary jump
+    /// targets this row (docs/tui-feature-requests/2026-09-23.md
+    /// tree-input-focus).
+    pub fn tail_head(&self, marker_seq: usize) -> Option<usize> {
+        let target = self.marker_target(marker_seq)?;
+        let lo = self.seqs.partition_point(|&s| s <= target);
+        let hi = self.seqs.partition_point(|&s| s < marker_seq);
+        self.seqs.get(lo).filter(|_| lo < hi).copied()
     }
 }
 
@@ -825,6 +855,32 @@ mod tests {
             (1..=16).collect::<Vec<_>>(),
             "DFS order is log order"
         );
+    }
+
+    /// The branch-boundary facts of the design example: each marker's
+    /// target, and the head of each abandoned tail (the first visible
+    /// row between the target and the marker row). Empty tails and
+    /// non-marker rows have no head.
+    #[test]
+    fn marker_targets_and_tail_heads() {
+        let ev = design_example().0;
+        let (names, details) = empty_maps();
+        let tree = SessionTree::build(&ev, 1, 1, &names, &details);
+        assert_eq!(tree.marker_target(5), Some(4));
+        assert_eq!(tree.marker_target(10), Some(9));
+        assert_eq!(tree.marker_target(13), Some(9));
+        assert_eq!(tree.marker_target(15), Some(4));
+        assert_eq!(tree.marker_target(6), None, "row 6 is not a marker");
+        // M1 (5) and M2 (10) rewind right after their target: the
+        // tail is empty, so there is no head.
+        assert_eq!(tree.tail_head(5), None);
+        assert_eq!(tree.tail_head(10), None);
+        // M3 (13) abandons the C block: the head is its first row.
+        assert_eq!(tree.tail_head(13), Some(10));
+        // M4 (15) abandons the whole B span: the head is the fork
+        // marker that starts it.
+        assert_eq!(tree.tail_head(15), Some(5));
+        assert_eq!(tree.tail_head(6), None, "not a marker");
     }
 
     /// The kernel's nested-fork case
