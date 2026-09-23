@@ -5643,6 +5643,49 @@ mod table_fix_tests {
             "the long cell should wrap to ≥2 visual lines, got {data_line_count}:\n{joined}"
         );
     }
+
+    /// Issue #13: cell content runs through the inline markdown pass.
+    /// The markers drop and the styled tokens (bold, inline code)
+    /// carry their own styles instead of rendering as raw source.
+    #[test]
+    fn table_cell_inline_markdown_is_styled() {
+        let palette = Palette::builtin(Level::Rgb);
+        let rows = vec![
+            "| Name | Value |".to_string(),
+            "|------|-------|".to_string(),
+            "| **bold** | `run.sh` |".to_string(),
+        ];
+        let grid = table_grid(&rows, 40, &palette);
+        let all_spans: Vec<(ratatui::style::Style, String)> =
+            grid.into_iter().flatten().collect();
+        let joined: String = all_spans
+            .iter()
+            .map(|(_, t)| t.as_str())
+            .collect::<Vec<_>>()
+            .concat();
+        // The raw markdown markers must be gone from the rendered text.
+        assert!(
+            !joined.contains("**") && !joined.contains('`'),
+            "cell markers must not render raw:\n{joined}"
+        );
+        // The bold word keeps its BOLD modifier, the inline code word
+        // keeps the InlineCode role color, and the plain runs take the
+        // cell base style (all distinct from the token styles).
+        let bold = ratatui::style::Style::default()
+            .add_modifier(ratatui::style::Modifier::BOLD);
+        let code_style = palette.style(
+            crate::color::Role::InlineCode,
+            ratatui::style::Modifier::empty(),
+        );
+        assert!(
+            all_spans.iter().any(|(s, t)| *t == "bold" && *s == bold),
+            "the bold word must carry the bold style:\n{joined}"
+        );
+        assert!(
+            all_spans.iter().any(|(s, t)| *t == "run.sh" && *s == code_style),
+            "the inline code word must carry the InlineCode style:\n{joined}"
+        );
+    }
 }
 
 #[cfg(test)]

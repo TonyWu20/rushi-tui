@@ -289,11 +289,13 @@ macchiato` as the first internal color scheme. Shipped in
       `Level::thinking` fallback, the macchiato scheme, and the
       color alignment doc.
 
-- [ ] Observation: the text inside a markdown table renders
+- [x] Observation: the text inside a markdown table renders
       as raw text, with no syntax highlighting.
+      Shipped (issue #13): table cells now run through the inline
+      markdown pass, so bold, italics, inline code, and links render
+      like the surrounding prose.
       Detail:
       `docs/tui-feature-requests/2026-09-12.md` (table-cell-highlight).
-      Open.
 
 - [x] The picker preview pane no longer caps file content at
       50 lines (windowed, cancellable rendering).
