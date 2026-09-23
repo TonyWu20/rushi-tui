@@ -43,7 +43,7 @@ pub enum PaletteStage {
 /// phase-2.md item 3). `Ctrl+F` cycles it in the `TreeList` stage.
 /// It narrows candidates before fuzzy ranking; it ANDs with the
 /// query. It resets on stage exit and on palette close.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum TreeFilter {
     /// Every event.
     #[default]
@@ -86,10 +86,7 @@ impl TreeFilter {
     pub fn keeps(self, kind: EventKind) -> bool {
         match self {
             Self::Full => true,
-            Self::User => matches!(
-                kind,
-                EventKind::UserMessage | EventKind::UserMessageRetract
-            ),
+            Self::User => matches!(kind, EventKind::UserMessage | EventKind::UserMessageRetract),
             Self::Assistant => kind == EventKind::AssistantMessage,
             Self::Tool => matches!(kind, EventKind::ToolCall | EventKind::ToolResult),
             Self::UserAssistant => matches!(
@@ -819,9 +816,15 @@ mod tests {
     #[test]
     fn focus_toggle_keys_reach_the_state_machine() {
         let mut s = open();
-        assert_eq!(s.press(&Key::CtrlShiftP, 10, 0, 5, 4), PaletteAction::ToggleFocus);
+        assert_eq!(
+            s.press(&Key::CtrlShiftP, 10, 0, 5, 4),
+            PaletteAction::ToggleFocus
+        );
         assert_eq!(s.focus, Focus::Preview);
-        assert_eq!(s.press(&Key::BackTab, 10, 0, 5, 4), PaletteAction::ToggleFocus);
+        assert_eq!(
+            s.press(&Key::BackTab, 10, 0, 5, 4),
+            PaletteAction::ToggleFocus
+        );
         assert_eq!(s.focus, Focus::List);
     }
 
@@ -832,9 +835,15 @@ mod tests {
         let mut s = open();
         s.focus = Focus::Preview;
         s.preview_scroll = 10;
-        assert_eq!(s.press(&Key::CtrlU, 10, 0, 5, 4), PaletteAction::ScrollPreview);
+        assert_eq!(
+            s.press(&Key::CtrlU, 10, 0, 5, 4),
+            PaletteAction::ScrollPreview
+        );
         assert_eq!(s.preview_scroll, 5, "a page up of five lines");
-        assert_eq!(s.press(&Key::CtrlD, 10, 0, 5, 4), PaletteAction::ScrollPreview);
+        assert_eq!(
+            s.press(&Key::CtrlD, 10, 0, 5, 4),
+            PaletteAction::ScrollPreview
+        );
         assert_eq!(s.preview_scroll, 10, "a page down of five lines");
         assert_eq!(s.cursor(), 0, "the list cursor is untouched");
     }
@@ -924,7 +933,10 @@ mod tests {
             "the session sub-list is unaffected"
         );
         s.goto_tree_list();
-        assert_eq!(s.press(&Key::CtrlF, 10, 0, 5, 4), PaletteAction::CycleFilter);
+        assert_eq!(
+            s.press(&Key::CtrlF, 10, 0, 5, 4),
+            PaletteAction::CycleFilter
+        );
         assert_eq!(s.tree_filter, TreeFilter::User);
     }
 

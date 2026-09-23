@@ -228,8 +228,11 @@ fn render_list(
     f.render_widget(Paragraph::new(lines).block(list_block), layout.list);
 }
 
-/// Draw the preview pane for the highlighted item.
-fn render_preview_pane(
+/// Draw the preview pane for the highlighted item. `pub` because the
+/// tree stage (`App::draw_tree_palette`, docs/tree-ui-design-from-
+/// human.md "Tree indent") reuses the same pane for the selected
+/// event.
+pub fn render_preview_pane(
     f: &mut Frame,
     item: &PaletteItem,
     state: &mut PaletteState,

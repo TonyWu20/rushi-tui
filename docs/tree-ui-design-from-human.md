@@ -258,8 +258,30 @@ path.
   flow. The TUI help strings in `tree_option_items`
   (`bin/tui/src/app.rs`) were reworded 2026-09-16 to the branch-
   summarize flow.
-- Tree indentation (`└─`, 3 spaces per level, post-fork) is not yet
-  rendered. Rows are flat until it is implemented.
+- Tree indentation (`└─`, 3 spaces per level, post-fork) is now
+  rendered. The `TreeList` stage draws the event log through a
+  `tui-treelistview` table instead of a flat list.
+- `bin/tui/src/palette/tree_model.rs` builds the `SessionTree` model.
+  Branch depth mirrors the kernel `rewind_active_ranges` semantics.
+  A branch is rooted at its rewind marker's `target_seq`, the
+  rewound event. A marker's span is the rows strictly after its
+  target, up to the marker that next rewinds back to its target or
+  earlier.
+  - A fork indents its whole span one level below the target's row.
+    The span is the abandoned tail, the marker row, and the new
+    events. The indent starts right under the rewound event.
+  - A fork is a marker whose abandoned tail holds no marker row.
+  - A re-entry keeps the target's depth. Its abandoned tail held a
+    complete nested branch. The new events continue the target's
+    own branch.
+  - A marker whose target sits outside the in-memory window falls
+    back to the trunk.
+- A hidden trunk root holds every depth-0 row. Top-level rows render
+  at level 0 with no marker. Each deeper level adds one `└─` marker
+  and three spaces.
+- The type filter plus fuzzy query keeps a match and its ancestor
+  path visible. Navigation, ring wrap, and the preview pane follow
+  the selected tree row through the `TreeListViewState`.
 
 ### Follow-up spec decisions (2026-09-15)
 

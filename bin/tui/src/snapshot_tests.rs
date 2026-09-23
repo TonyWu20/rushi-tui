@@ -1394,11 +1394,13 @@ fn the_focused_preview_pane_border_is_green() {
 
 /// Item 1: the tree row's leading type tag carries its class's fg
 /// color: user rows take the `Accent` tone, assistant rows the
-/// `Report` tone, tool rows the `ToolName` tone. The cursor row
-/// keeps the accent highlight over the whole row.
+/// `Report` tone, tool rows the `ToolName` tone. When a row is
+/// selected, the row keeps the accent highlight over its whole
+/// width (the tree table's highlight row style).
 #[test]
 fn tree_row_tags_carry_the_class_fg_color() {
     use crate::color::Role;
+    use crate::Key;
     let events = tree_phase2_events();
     let (host, _tmp) = empty_host();
     let mut app = tree_stage_app(events);
@@ -1406,22 +1408,25 @@ fn tree_row_tags_carry_the_class_fg_color() {
     let report = app.palette().color(Role::Report);
     let tool = app.palette().color(Role::ToolName);
     let plain = app.palette().color(Role::PlainText);
+    let highlight = app.palette().color(Role::Border4);
     let buf = render_buffer(&mut app, &host, 100, 30);
 
     // Narrow layout at 100x30: the list's inner rows start at
-    // `list.y + 1`. The label starts 5 cells in from the list's
-    // left border (2-cell marker, the kind letter, one space).
+    // `list.y + 1`. The tree table's content columns start 3 cells
+    // in from the list's left border (the 2-cell highlight symbol
+    // column, `HighlightSpacing::Always`), and the tree column has
+    // no indent at depth 0, so the tag starts at the column's
+    // first cell.
     let layout =
         crate::float::compute_float_layout(ratatui::layout::Rect::new(0, 0, 100, 30), true);
     let list = layout.list;
-    let tag_x = list.x + 5;
-    // Row 0 is the cursor row: the whole row keeps the accent
-    // highlight, so the user tag cell is the highlight fg (black),
-    // not the `Accent` tone.
-    assert_ne!(
+    let tag_x = list.x + 3;
+    // No selection yet: every row is unhighlighted and each tag
+    // carries its class tone.
+    assert_eq!(
         buf[(tag_x, list.y + 1)].fg,
         accent,
-        "the cursor row keeps the accent highlight"
+        "the user row tag is the Accent tone"
     );
     // Row 1: the `bash` call. Row 2: its result. Both tool rows
     // take the `ToolName` tone.
@@ -1435,7 +1440,7 @@ fn tree_row_tags_carry_the_class_fg_color() {
         tool,
         "the tool result row tag is the ToolName tone"
     );
-    // Row 3: the assistant row takes the `Report` tone; its preview
+    // Row 3: the assistant row takes the `Report` tone; its body
     // text stays plain.
     assert_eq!(
         buf[(tag_x, list.y + 4)].fg,
@@ -1445,6 +1450,22 @@ fn tree_row_tags_carry_the_class_fg_color() {
     assert_eq!(
         buf[(tag_x + 12, list.y + 4)].fg,
         plain,
-        "the tag color stops at the tag; the preview stays plain"
+        "the tag color stops at the tag; the body stays plain"
+    );
+
+    // Select the first row: the tree table's highlight row takes
+    // the accent background over the whole row.
+    app.press(Key::Down);
+    let buf = render_buffer(&mut app, &host, 100, 30);
+    assert_eq!(
+        buf[(tag_x + 40, list.y + 1)].bg,
+        highlight,
+        "the selected row keeps the accent highlight over the row"
+    );
+    // Unselected rows keep their tag tones under no highlight.
+    assert_eq!(
+        buf[(tag_x, list.y + 4)].fg,
+        report,
+        "the unselected assistant row keeps the Report tone"
     );
 }
