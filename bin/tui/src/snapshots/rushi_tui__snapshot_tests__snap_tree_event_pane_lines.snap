@@ -1,6 +1,5 @@
 ---
 source: bin/tui/src/snapshot_tests.rs
-assertion_line: 1332
 expression: out
 ---
 " Session: s1─────────────────────────────────────────────────────────────────────────────── [idle]  "
@@ -11,14 +10,14 @@ expression: out
 "                                                                                                    "
 " ╭──────────────────╭commands (narrow) — 4 items───────────────────────────────╮──────────────────╮ "
 " │ Done.            │╭commands────────────────────────────────────────────────╮│                  │ "
-" ╰──────────────────││  G <user> build the project  #1                        ││──────────────────╯ "
-"                    ││❯ G bash make -j4  #2                                   ││                    "
-"                    ││  G bash ok All targets up to date  #3                  ││                    "
-"                    ││  G <assistant> Done.  #4                               ││                    "
+" ╰──────────────────││  <user> build the project                         #1   ││──────────────────╯ "
+"                    ││  bash make -j4                                    #2   ││                    "
+"                    ││  bash ok All targets up to date                   #3   ││                    "
+"                    ││  <assistant> Done.                                #4   ││                    "
 "                    │╰────────────────────────────────────────────────────────╯│                    "
 "                    │                                                          │                    "
-"                    │╭bash make -j4───────────────────────────────────────────╮│                    "
-"                    ││command: make -j4                                       ││                    "
+"                    │╭<user> build the project────────────────────────────────╮│                    "
+"                    ││build the project                                       ││                    "
 "                    ││                                                        ││                    "
 "                    ││Enter offers the four options (View-only, Rewind        ││                    "
 "                    ││without summary, Summarize the branch, Summarize with   ││                    "

@@ -4848,10 +4848,23 @@ pub fn draw(
     // Drawn last, over the transcript and input rows, just like the
     // picker. The palette and the picker never coexist (section 12).
     if app.palette_state().open {
-        let items = app.palette_ranked();
-        let show_preview = app
-            .palette_state()
-            .preview_visible(items.len(), crate::picker::render::PREVIEW_CUTOFF);
+        // The tree stage renders the event log as a `tui-treelistview`
+        // table (docs/tree-ui-design-from-human.md "Tree indent"):
+        // the row model and view state live on the app, and the
+        // preview follows the selected event instead of the flat
+        // cursor.
+        let in_tree = app.palette_state().stage == crate::palette::state::PaletteStage::TreeList;
+        let items = if in_tree {
+            Vec::new()
+        } else {
+            app.palette_ranked()
+        };
+        let show_preview = if in_tree {
+            app.tree_preview_visible()
+        } else {
+            app.palette_state()
+                .preview_visible(items.len(), crate::picker::render::PREVIEW_CUTOFF)
+        };
         let layout = crate::float::compute_float_layout(f.area(), show_preview);
         let rows = layout.list.height.saturating_sub(2).max(1) as usize;
         let palette = app.palette().clone();
@@ -4859,18 +4872,25 @@ pub fn draw(
         // borrow below does not overlap an immutable borrow of the
         // same app.
         let tool_display = *app.tool_display();
-        let pstate = app.palette_state_mut();
-        pstate.visible = rows;
-        pstate.sync(items.len());
-        crate::palette::render::render_palette()
-            .f(f)
-            .state(pstate)
-            .items(&items)
-            .layout(&layout)
-            .palette(&palette)
-            .cursor(cursor)
-            .tool_display(&tool_display)
-            .call();
+        if in_tree {
+            // The view state scrolls on its own; the flat cursor
+            // fields just keep their row-count clamp.
+            app.palette_state_mut().visible = rows;
+            app.draw_tree_palette(f, &layout, cursor);
+        } else {
+            let pstate = app.palette_state_mut();
+            pstate.visible = rows;
+            pstate.sync(items.len());
+            crate::palette::render::render_palette()
+                .f(f)
+                .state(pstate)
+                .items(&items)
+                .layout(&layout)
+                .palette(&palette)
+                .cursor(cursor)
+                .tool_display(&tool_display)
+                .call();
+        }
     }
 }
 

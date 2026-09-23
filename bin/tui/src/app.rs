@@ -636,6 +636,10 @@ pub struct App {
     /// The `:` command-palette state machine
     /// (docs/tui-command-palette.md section 11).
     palette_state: crate::palette::state::PaletteState,
+    /// The `tui-treelistview` view state of the tree palette stage
+    /// (docs/tree-ui-design-from-human.md "Tree indent"): selection,
+    /// scroll, and expansion of the session-log tree table.
+    tree_view: tui_treelistview::TreeListViewState<usize>,
     /// Extension-provided palette commands, refreshed when a
     /// `commands_list` reply lands or a command times out.
     ext_commands: Vec<crate::palette::items::PaletteItem>,
@@ -845,6 +849,7 @@ impl App {
             picker_root: std::path::PathBuf::new(),
             picker_at: None,
             palette_state: crate::palette::state::PaletteState::new(),
+            tree_view: tui_treelistview::TreeListViewState::new(),
             ext_commands: Vec::new(),
             effort_current: "medium".to_string(),
             palette_cmd_requested: false,
@@ -1508,6 +1513,10 @@ impl App {
             self.block_anim_from.clear();
             self.block_anim_start.clear();
             self.frac_epoch = self.frac_epoch.wrapping_add(1);
+            // The tree view state (selection, scroll, expansion) is
+            // per-session: reset it with the rest of the session
+            // state (docs/tree-ui-design-from-human.md "Tree indent").
+            self.tree_view = tui_treelistview::TreeListViewState::new();
             self.z_fold_arm = None;
             self.fold_cursor_target = None;
             self.last_event_line_starts.clear();
@@ -3056,69 +3065,322 @@ impl App {
         filter: &str,
         tree_filter: &crate::palette::state::TreeFilter,
     ) -> Vec<crate::palette::items::PaletteItem> {
-        use crate::palette::items::{CmdKind, PaletteItem};
+        use crate::palette::items::PaletteItem;
         use crate::picker::fuzzy::rank_fuzzy;
-        let events = self.events();
-        // The transcript has no render cap, so every in-memory event
-        // maps to a rendered line and the whole history is reachable.
-        let start = 0;
-        // Call-id maps. `call_names` (the name-only half) feeds the
-        // row labels; `call_details` (id → name + argument JSON)
-        // feeds the tool payload of the preview pane
-        // (docs/tree-ui-design-from-human-phase-2.md items 1, 2,
-        // 2026-09-17 refinement).
-        let call_names = self.call_names();
-        let call_details = self.call_details();
-        let mut candidates: Vec<(usize, String)> = Vec::new();
-        for (i, e) in events[start..].iter().enumerate() {
-            let i = start + i;
-            if e.kind() == EventKind::ExtStatus {
-                continue;
-            }
-            if !tree_filter.keeps(e.kind()) {
-                continue;
-            }
-            candidates.push((i, tree_row_label(e, &call_names)));
+        // The shared tree model builds every row item in log order
+        // (docs/tree-ui-design-from-human.md). The flat-list callers
+        // get those items back; the tree stage renders the same model
+        // through `tui-treelistview` instead.
+        let model = crate::palette::tree_model::SessionTree::build(
+            self.events(),
+            self.events_base_seq(),
+            self.events_version,
+            &self.call_names(),
+            &self.call_details(),
+        );
+        // The event-type filter narrows candidates first
+        // (docs/tree-ui-design-from-human-phase-2.md item 3).
+        let mut items: Vec<PaletteItem> = model
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(row, _)| tree_filter.keeps(model.kind_of(*row)))
+            .map(|(_, it)| it.clone())
+            .collect();
+        // The fuzzy query ranks the survivors.
+        if !filter.is_empty() {
+            let labels: Vec<String> = items.iter().map(|i| i.label.clone()).collect();
+            let ranked = rank_fuzzy(&labels, filter);
+            items = ranked.into_iter().map(|i| items[i].clone()).collect();
         }
-        let labels: Vec<String> = candidates.iter().map(|(_, l)| l.clone()).collect();
-        let ranked = rank_fuzzy(&labels, filter);
-        let base = self.events_base_seq;
-        ranked
-            .into_iter()
-            .map(|i| {
-                let idx = candidates[i].0;
-                let label = labels[i].clone();
-                let seq = base + idx;
-                let picked = &events[idx];
-                let kind = tree_preview_kind(picked);
-                // Tool events carry a decoded payload that the pane
-                // renders through the transcript's tool display
-                // (docs/tree-ui-design-from-human-phase-2.md item 2,
-                // 2026-09-17 refinement); every other event keeps
-                // its plain source text. The full body is uncapped
-                // (item 2); the pane scrolls it, and the "Enter
-                // offers the four options" suffix renders as a plain
-                // line after the body, not inside `help`.
-                let (help, tool_payload) = match kind {
-                    crate::palette::items::PreviewKind::Tool => {
-                        (String::new(), tool_payload_for(picked, &call_details))
+        items
+    }
+
+    /// The `tui-treelistview` model of the active session's event log
+    /// (docs/tree-ui-design-from-human.md "Tree indent"): one node per
+    /// visible event, parent edges following the branch structure,
+    /// depth per the design-doc indent rule.
+    pub fn session_tree(&self) -> crate::palette::tree_model::SessionTree {
+        crate::palette::tree_model::SessionTree::build(
+            self.events(),
+            self.events_base_seq(),
+            self.events_version,
+            &self.call_names(),
+            &self.call_details(),
+        )
+    }
+
+    /// The tree-row filter of the palette stage: the typed fuzzy
+    /// query AND the `Ctrl+F` event-type filter
+    /// (docs/tree-ui-design-from-human-phase-2.md item 3).
+    pub fn tree_row_filter(
+        &self,
+        model: &crate::palette::tree_model::SessionTree,
+    ) -> crate::palette::tree_model::TreeRowFilter {
+        let st = self.palette_state();
+        crate::palette::tree_model::TreeRowFilter::new(st.filter_query(), st.tree_filter, model)
+    }
+
+    /// Whether the tree-stage preview pane is visible for this frame.
+    /// The count is the model's visible-event count, not the view
+    /// projection length: the pane is decided before the first
+    /// render builds the projection, and a collapsed projection must
+    /// not hide the pane.
+    pub fn tree_preview_visible(&mut self) -> bool {
+        let st = self.palette_state();
+        let count = self.session_tree().seqs.len();
+        st.preview_visible(count, crate::picker::render::PREVIEW_CUTOFF)
+    }
+
+    /// The tree-stage key handling that owns row navigation through the
+    /// `tui-treelistview` view state instead of the flat cursor machine
+    /// (docs/tree-ui-design-from-human.md "Tree indent"). `Ctrl+J`/`Ctrl+K`
+    /// step one row with ring wrap; `Ctrl+U`/`Ctrl+D` scroll half the
+    /// visible window; `PgUp`/`PgDn` scroll a full window; `Home`/`End`
+    /// jump to the ends; `Enter` commits the selected event into the
+    /// four-outcome options stage. The wrap and page rules mirror the
+    /// flat list state machine (docs/tree-ui-design-from-human-phase-2.md
+    /// item 4).
+    fn press_tree_key(&mut self, key: Key) -> Vec<Action> {
+        let model = self.session_tree();
+        let filter = self.tree_row_filter(&model);
+        let query = crate::palette::tree_model::build_query(&filter);
+        let page = self.palette_state().visible.max(1);
+        let v = &mut self.tree_view;
+        // The unfiltered full tree renders with every branch expanded;
+        // the filter narrows the projection instead
+        // (docs/tree-ui-design-from-human.md "Tree indent").
+        crate::palette::tree_model::expand_all(v, &model);
+        v.ensure_projection(&model, &query);
+        let count = v.visible_len();
+        match key {
+            Key::CtrlJ | Key::Down => {
+                // With no selection yet, the first `Down` lands on the
+                // first row, like the flat cursor starting at row 0.
+                // After that, ring wrap: at the last row the cursor
+                // jumps to the first.
+                match v.selected_index() {
+                    None => {
+                        v.select_index(Some(0));
                     }
-                    _ => (tree_event_body(picked), None),
-                };
-                PaletteItem {
-                    id: seq.to_string(),
-                    label,
-                    kind: CmdKind::Goto,
-                    hint: format!("#{seq}"),
-                    help,
-                    options: Vec::new(),
-                    ext: None,
-                    preview_kind: kind,
-                    tag_fg: tree_tag_fg(picked),
-                    tool_payload,
+                    Some(sel) => {
+                        let last = count.saturating_sub(1);
+                        v.select_index(if sel >= last { Some(0) } else { Some(sel + 1) });
+                    }
                 }
-            })
-            .collect()
+            }
+            Key::CtrlK | Key::Up => {
+                // With no selection yet, the first `Up` lands on the
+                // last row. After that, ring wrap: at the first row
+                // the cursor jumps to the last.
+                match v.selected_index() {
+                    None => {
+                        v.select_index(Some(count.saturating_sub(1)));
+                    }
+                    Some(sel) => {
+                        let next = if sel == 0 {
+                            count.saturating_sub(1)
+                        } else {
+                            sel - 1
+                        };
+                        v.select_index(Some(next));
+                    }
+                }
+            }
+            Key::PgDn => {
+                // A page that crosses the end lands on the first row.
+                let sel = v.selected_index().unwrap_or(0);
+                let next = sel.saturating_add(page);
+                v.select_index(if next >= count { Some(0) } else { Some(next) });
+            }
+            Key::PgUp => {
+                // A page that crosses the start lands on the last row.
+                let sel = v.selected_index().unwrap_or(0);
+                let next = if sel >= page {
+                    sel - page
+                } else {
+                    count.saturating_sub(1)
+                };
+                v.select_index(Some(next));
+            }
+            Key::CtrlU => {
+                // Half-page up, ring wrap, like the flat list.
+                let step = (page / 2).max(1);
+                let sel = v.selected_index().unwrap_or(0);
+                let next = (sel + count - step) % count.max(1);
+                v.select_index(Some(next));
+            }
+            Key::CtrlD => {
+                // Half-page down, ring wrap, like the flat list.
+                let step = (page / 2).max(1);
+                let sel = v.selected_index().unwrap_or(0);
+                let next = (sel + step) % count.max(1);
+                v.select_index(Some(next));
+            }
+            Key::Home => {
+                v.select_first();
+            }
+            Key::End => {
+                v.select_last();
+            }
+            Key::Enter => {
+                match v.selected_id() {
+                    Some(seq) => self.palette_state_mut().goto_tree_options(seq),
+                    None => {
+                        // Nothing selected yet (the first Enter before
+                        // any movement): commit the first visible row,
+                        // like the flat cursor at row 0.
+                        v.select_index(Some(0));
+                        if let Some(seq) = v.selected_id() {
+                            self.palette_state_mut().goto_tree_options(seq);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        Vec::new()
+    }
+
+    /// The tree-stage item under the current selection: builds the
+    /// model and projection, selects the first row when nothing is
+    /// selected, and returns its palette item. Used by the `Tab`
+    /// completion of the tree stage.
+    fn tree_selected_item(&mut self) -> Option<crate::palette::items::PaletteItem> {
+        let model = self.session_tree();
+        let filter = self.tree_row_filter(&model);
+        let query = crate::palette::tree_model::build_query(&filter);
+        let v = &mut self.tree_view;
+        crate::palette::tree_model::expand_all(v, &model);
+        v.ensure_projection(&model, &query);
+        let seq = match v.selected_id() {
+            Some(seq) => seq,
+            None => {
+                // Nothing selected yet: select the first visible row.
+                v.select_index(Some(0));
+                v.selected_id()?
+            }
+        };
+        model.item_by_seq(seq).cloned()
+    }
+
+    /// Draw the `:` palette float when the tree stage is open: the
+    /// same float chrome as the flat stages, with the event log
+    /// rendered as a `tui-treelistview` table (docs/tree-ui-design-
+    /// from-human.md "Tree indent") instead of a flat line list.
+    pub fn draw_tree_palette(
+        &mut self,
+        f: &mut ratatui::Frame,
+        layout: &crate::float::FloatLayout,
+        cursor: &mut Option<(u16, u16)>,
+    ) {
+        use ratatui::style::{Modifier, Style};
+        use ratatui::text::{Line, Span};
+        let model = self.session_tree();
+        let filter = self.tree_row_filter(&model);
+        let query = crate::palette::tree_model::build_query(&filter);
+        let palette = self.palette().clone();
+        let tool_display = *self.tool_display();
+        // Copy the palette-state facts up front: the mutable view
+        // borrow below must not overlap an outstanding `&PaletteState`.
+        let st = self.palette_state();
+        let filter_label = st.tree_filter.label();
+        let preview_focus = st.focus == crate::float::Focus::Preview;
+        let query_display = format!(":{}", st.query);
+
+        // Paint the float region with the terminal default background.
+        f.render_widget(ratatui::widgets::Clear, layout.float);
+
+        // The outer border and title (the float chrome is owned by
+        // the palette; the table inside keeps its own border like the
+        // flat list block).
+        let accent = palette.color(crate::color::Role::Border4);
+        let border_style = Style::default().fg(accent);
+        let state = &mut self.tree_view;
+        crate::palette::tree_model::expand_all(state, &model);
+        state.ensure_projection(&model, &query);
+        let count = state.visible_len();
+        let title = format!(
+            "commands ({}) — {} item{}",
+            layout.orientation.label(),
+            count,
+            if count == 1 { "" } else { "s" }
+        );
+        let block = ratatui::widgets::Block::bordered()
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .border_style(border_style)
+            .title(Line::from(Span::styled(
+                title,
+                Style::default().add_modifier(Modifier::BOLD),
+            )));
+        f.render_widget(block, layout.float);
+
+        // The inner list border and title, like the flat list block.
+        let list_block = ratatui::widgets::Block::bordered()
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .border_style(Style::default().fg(palette.color(crate::color::Role::Status)))
+            .title(Line::from(Span::styled(
+                "commands",
+                Style::default().fg(palette.color(crate::color::Role::Hint)),
+            )));
+        let inner = list_block.inner(layout.list);
+        f.render_widget(list_block, layout.list);
+
+        // The tree table: the design-doc glyphs and the tag-colored,
+        // truncated label renderer, inside the list block.
+        let label = crate::palette::tree_model::TreeRowLabel {
+            palette: &palette,
+            max_label_chars: inner.width.saturating_sub(12) as usize,
+        };
+        let hint_color = palette.color(crate::color::Role::Hint);
+        let style = crate::palette::tree_model::build_style(accent);
+        let columns = crate::palette::tree_model::build_columns(hint_color);
+        let view = tui_treelistview::TreeListView::new(&model, &query, &label, &columns, style)
+            .glyphs(crate::palette::tree_model::spec_glyphs());
+        f.render_stateful_widget(view, inner, state);
+
+        // The preview pane follows the selected row; before any
+        // movement it follows the first visible row, like the flat
+        // cursor at row 0.
+        let sel = state.selected_id().or_else(|| state.visible_ids().next());
+        if let Some(preview_rect) = layout.preview {
+            if let Some(seq) = sel {
+                if let Some(item) = model.item_by_seq(seq) {
+                    crate::palette::render::render_preview_pane(
+                        f,
+                        item,
+                        self.palette_state_mut(),
+                        &preview_rect,
+                        &palette,
+                        &tool_display,
+                    );
+                }
+            }
+        }
+
+        // The input bar: the `:query` prompt and the tree-stage hints
+        // (the active filter leads, like the flat renderer).
+        let mut hints = String::from(
+            "enter ok · esc close · ctrl-j/k move · ctrl-p preview · ctrl-shift-p focus · tab complete",
+        );
+        hints = format!("[f: {filter_label}] · {hints}");
+        if preview_focus {
+            hints.push_str(" · preview focus");
+        }
+        let query_len = query_display.chars().count();
+        let prose = palette.color(crate::color::Role::PlainText);
+        let hint_style = Style::default().fg(hint_color);
+        let input_line = Line::from(vec![
+            Span::styled(
+                query_display.clone(),
+                Style::default().add_modifier(Modifier::BOLD).fg(prose),
+            ),
+            Span::styled(format!("  {hints}"), hint_style),
+        ]);
+        f.render_widget(ratatui::widgets::Paragraph::new(input_line), layout.input);
+        let caret = layout.input.x + query_len as u16;
+        let max_x = layout.input.x + layout.input.width.saturating_sub(1);
+        *cursor = Some((caret.min(max_x), layout.input.y));
     }
 
     /// The four outcome options for a tree-picked event (docs/tree-ui-
@@ -3184,6 +3446,23 @@ impl App {
     /// them through the main loop.
     pub fn commit_palette(&mut self) -> Vec<Action> {
         let state = self.palette_state();
+        // The tree stage commits through its own selection: the view
+        // state owns the picked row (docs/tree-ui-design-from-human.md
+        // "Tree indent"). This path serves an `Enter` pressed while
+        // the preview pane is focused; with list focus the commit
+        // happens in `press_tree_key` instead.
+        if state.stage == crate::palette::state::PaletteStage::TreeList {
+            match self.tree_selected_item() {
+                Some(item) => {
+                    let seq = item.id.parse::<usize>().unwrap_or(0);
+                    self.palette_state_mut().goto_tree_options(seq);
+                }
+                None => {
+                    self.palette_state_mut().close();
+                }
+            }
+            return Vec::new();
+        }
         let ranked = self.palette_ranked();
         let cursor = state.cursor().min(ranked.len().saturating_sub(1));
         let item = match ranked.get(cursor) {
@@ -3204,6 +3483,11 @@ impl App {
                         // The `tree` item opens the event tree. Every
                         // other Goto item opens the session list.
                         if item.id == "tree" {
+                            // A fresh view state per tree visit: no
+                            // stale selection or scroll from an
+                            // earlier open (docs/tree-ui-design-from-
+                            // human.md "Tree indent").
+                            self.tree_view = tui_treelistview::TreeListViewState::new();
                             self.palette_state_mut().goto_tree_list();
                         } else {
                             self.palette_state_mut().goto_session_list();
@@ -3411,6 +3695,9 @@ impl App {
             .iter()
             .any(|i| i.kind == crate::palette::items::CmdKind::Goto && i.label == token);
         if is_tree {
+            // A fresh view state per tree visit, like the Goto
+            // commit path (no stale selection or scroll).
+            self.tree_view = tui_treelistview::TreeListViewState::new();
             self.palette_state_mut().goto_tree_list();
         } else if is_goto {
             self.palette_state_mut().goto_session_list();
@@ -3989,14 +4276,61 @@ impl App {
         // The `:` command palette owns its key table while open
         // (docs/tui-command-palette.md).
         if self.palette_state.open {
-            let items = self.palette_ranked();
+            // The tree stage renders the event log as a
+            // `tui-treelistview` table, so its row-movement and
+            // commit keys route to the view state instead of the
+            // flat cursor machine, from either focus
+            // (docs/tree-ui-design-from-human.md "Tree indent"):
+            // the preview pane follows the selected row, so moving
+            // the selection is what the movement keys mean in this
+            // stage. Typing, `Esc`, `Ctrl+F`, `Tab`, `Ctrl+P`, and
+            // `Ctrl+Shift+P` fall through to the shared state
+            // machine below. With the preview focused, `Ctrl+U`/
+            // `Ctrl+D` scroll the pane instead of moving the
+            // selection.
+            if self.palette_state.stage == crate::palette::state::PaletteStage::TreeList {
+                let list_focus = self.palette_state.focus == crate::float::Focus::List;
+                match key {
+                    Key::CtrlJ
+                    | Key::Down
+                    | Key::CtrlK
+                    | Key::Up
+                    | Key::PgUp
+                    | Key::PgDn
+                    | Key::Home
+                    | Key::End
+                    | Key::Enter => {
+                        return self.press_tree_key(key);
+                    }
+                    Key::CtrlU | Key::CtrlD if list_focus => {
+                        return self.press_tree_key(key);
+                    }
+                    _ => {}
+                }
+            }
+            // The tree stage has no flat ranked list of its own; the
+            // shared state machine's count drives the fall-through
+            // `Ctrl+P` / `Ctrl+Shift+P` preview keys, so it is the
+            // model's event count (what `tree_preview_visible` counts
+            // for the layout), not an empty list. List movement keys
+            // never reach here: `press_tree_key` owns them.
+            let items = if self.palette_state.stage == crate::palette::state::PaletteStage::TreeList
+            {
+                Vec::new()
+            } else {
+                self.palette_ranked()
+            };
+            let n = if self.palette_state.stage == crate::palette::state::PaletteStage::TreeList {
+                self.session_tree().seqs.len()
+            } else {
+                items.len()
+            };
             let highlighted = if items.is_empty() {
                 0
             } else {
                 let cursor = self.palette_state.cursor().min(items.len() - 1);
                 items[cursor].options.len()
             };
-            let n = items.len();
             // `q` is mapped to `Key::Quit` in main.rs. Inside the palette,
             // `q` is a filter character (types into the query to match the
             // quit command), not the quit gate. Normalize it to a char.
@@ -4046,6 +4380,15 @@ impl App {
                     // continues after the completion
                     // (docs/tree-ui-design-from-human-phase-2.md
                     // item 5).
+                    if self.palette_state.stage == crate::palette::state::PaletteStage::TreeList {
+                        // The tree stage highlights through the view
+                        // state, not the flat cursor: complete the
+                        // selected event's label instead.
+                        if let Some(item) = self.tree_selected_item() {
+                            self.palette_state_mut().apply_complete(&item.label);
+                        }
+                        return Vec::new();
+                    }
                     let cursor = self.palette_state.cursor().min(n.saturating_sub(1));
                     if let Some(item) = items.get(cursor) {
                         self.palette_state_mut().apply_complete(&item.label);
@@ -4528,6 +4871,44 @@ fn tree_row_label(e: &Event, call_names: &HashMap<String, String>) -> String {
 }
 
 /// The short type tag at the front of a tree row.
+/// One palette item for a single tree event row. Shared by
+/// [`crate::palette::tree_model::SessionTree::build`] (the tree view)
+/// and [`App::tree_event_items`] (the flat list): identical labels,
+/// preview bodies, and tool payloads, so a row reads the same in
+/// both.
+pub(crate) fn tree_event_item(
+    e: &Event,
+    seq: usize,
+    call_names: &HashMap<String, String>,
+    call_details: &HashMap<String, (String, Value)>,
+) -> crate::palette::items::PaletteItem {
+    use crate::palette::items::{CmdKind, PaletteItem};
+    let kind = tree_preview_kind(e);
+    // Tool events carry a decoded payload that the pane renders
+    // through the transcript's tool display (docs/tree-ui-design-
+    // from-human-phase-2.md item 2, 2026-09-17 refinement); every
+    // other event keeps its plain source text. The full body is
+    // uncapped (item 2); the pane scrolls it.
+    let (help, tool_payload) = match kind {
+        crate::palette::items::PreviewKind::Tool => {
+            (String::new(), tool_payload_for(e, call_details))
+        }
+        _ => (tree_event_body(e), None),
+    };
+    PaletteItem {
+        id: seq.to_string(),
+        label: tree_row_label(e, call_names),
+        kind: CmdKind::Goto,
+        hint: format!("#{seq}"),
+        help,
+        options: Vec::new(),
+        ext: None,
+        preview_kind: kind,
+        tag_fg: tree_tag_fg(e),
+        tool_payload,
+    }
+}
+
 fn tree_event_tag(e: &Event, call_names: &HashMap<String, String>) -> String {
     match e.kind() {
         EventKind::UserMessage => "user".to_string(),
@@ -6194,7 +6575,10 @@ mod loop_state_tests {
         }
     }
 
-    fn attach_running(app: &mut App, sid: &SessionId) -> tokio::sync::mpsc::UnboundedSender<LoopLine> {
+    fn attach_running(
+        app: &mut App,
+        sid: &SessionId,
+    ) -> tokio::sync::mpsc::UnboundedSender<LoopLine> {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         app.attach_loop(
             sid.clone(),
@@ -6236,10 +6620,7 @@ mod loop_state_tests {
             st.handle.is_none(),
             "the dead handle is retired (issue #19)"
         );
-        assert!(
-            st.lines_rx.is_none(),
-            "the dead receiver is retired too"
-        );
+        assert!(st.lines_rx.is_none(), "the dead receiver is retired too");
         assert!(
             app.drain_loop_lines().is_empty(),
             "a second drain is a no-op on the retired state"

@@ -12,3 +12,4 @@ pub mod items;
 pub mod preview;
 pub mod render;
 pub mod state;
+pub mod tree_model;
