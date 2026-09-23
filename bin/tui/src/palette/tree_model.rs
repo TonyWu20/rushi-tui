@@ -14,8 +14,8 @@
 //!   glyphs.
 //! - [`spec_glyphs`] is the `TreeGlyphs` set of the design doc:
 //!   3 spaces per level, box-drawing `└─` branch marker, no
-//!   continuation lines, no expand-state glyph (the tree is always
-//!   fully expanded; the filter narrows it).
+//!   continuation lines, no expand-state glyph (the tree starts
+//!   fully expanded; the `z` fold keys and the filter narrow it).
 //!
 //! The tree indent (docs/tree-ui-design-from-human.md "Tree indent"):
 //! after any fork (rewind marker) exists, rows are indented by their
@@ -84,6 +84,8 @@ pub struct SessionTree {
     pub roots: Vec<usize>,
     /// seq -> children seqs, in log order. Absent means leaf.
     children: HashMap<usize, Vec<usize>>,
+    /// seq -> tree parent; trunk rows point at the [`TRUNK_ROOT`].
+    parent: HashMap<usize, usize>,
     /// seq -> index into `items`.
     row: HashMap<usize, usize>,
     /// Row index -> event kind.
@@ -288,6 +290,7 @@ impl SessionTree {
         let mut items: Vec<PaletteItem> = Vec::with_capacity(n);
         let mut kinds: Vec<EventKind> = Vec::with_capacity(n);
         let mut children: HashMap<usize, Vec<usize>> = HashMap::new();
+        let mut parent_map: HashMap<usize, usize> = HashMap::with_capacity(n);
         let mut row: HashMap<usize, usize> = HashMap::with_capacity(n);
         let mut depth: HashMap<usize, usize> = HashMap::with_capacity(n);
         let mut last_at_depth: Vec<Option<usize>> = Vec::new();
@@ -311,6 +314,7 @@ impl SessionTree {
             ));
             if d == 0 {
                 children.entry(TRUNK_ROOT).or_default().push(seq);
+                parent_map.insert(seq, TRUNK_ROOT);
             } else {
                 // The branch point: a fork span that carries this depth
                 // roots the row at that fork's target row, so the
@@ -330,6 +334,7 @@ impl SessionTree {
                     _ => fallback,
                 };
                 children.entry(parent).or_default().push(seq);
+                parent_map.insert(seq, parent);
             }
             if d >= last_at_depth.len() {
                 last_at_depth.resize(d + 1, None);
@@ -342,6 +347,7 @@ impl SessionTree {
             items,
             roots: vec![TRUNK_ROOT],
             children,
+            parent: parent_map,
             row,
             kinds,
             depth,
@@ -370,6 +376,35 @@ impl SessionTree {
     /// The event kind of a row index.
     pub fn kind_of(&self, row: usize) -> EventKind {
         self.kinds[row]
+    }
+
+    /// The tree parent of the row: its depth-(d - 1) ancestor, or the
+    /// [`TRUNK_ROOT`] for trunk rows. `None` when the seq is not a
+    /// visible row.
+    pub fn parent_of(&self, seq: usize) -> Option<usize> {
+        self.parent.get(&seq).copied()
+    }
+
+    /// Whether the row has children in the tree projection.
+    pub fn has_children(&self, seq: usize) -> bool {
+        self.children.get(&seq).is_some_and(|c| !c.is_empty())
+    }
+
+    /// Whether the row is a rewind marker: the start of a branch
+    /// block.
+    pub fn is_marker(&self, seq: usize) -> bool {
+        self.row_index(seq)
+            .is_some_and(|i| self.kinds[i] == EventKind::Rewind)
+    }
+
+    /// The foldable rows: the real rows that have children, in log
+    /// order. Excludes the hidden [`TRUNK_ROOT`].
+    pub fn foldable_seqs(&self) -> Vec<usize> {
+        self.seqs
+            .iter()
+            .copied()
+            .filter(|s| self.has_children(*s))
+            .collect()
     }
 }
 

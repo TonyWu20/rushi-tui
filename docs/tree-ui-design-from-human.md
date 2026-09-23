@@ -283,6 +283,13 @@ path.
 - The type filter plus fuzzy query keeps a match and its ancestor
   path visible. Navigation, ring wrap, and the preview pane follow
   the selected tree row through the `TreeListViewState`.
+- The tree stage folds and jumps with the browse-mode `z` arm
+  (docs/tui-feature-requests/2026-09-23.md tree-fold-jump). `z a`
+  toggles the branch under the cursor. `z o` and `z c` open and
+  close it. `z R` and `z M` open and close every branch. `z j`
+  and `z k` jump to the next and last branch starting point, the
+  rewind marker rows. The tree starts fully expanded, and fold
+  state resets when the tree view resets.
 
 ### Follow-up spec decisions (2026-09-15)
 

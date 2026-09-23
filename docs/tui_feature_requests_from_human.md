@@ -429,3 +429,13 @@ macchiato` as the first internal color scheme. Shipped in
       counters for now. The kernel no-op filter is filed as
       `rushi#24` for later. Detail:
       `docs/tui-feature-requests/2026-09-20.md` (tally-hook-inflation).
+
+## New requests (2026-09-23)
+
+- [x] The tree palette gets fold/unfold and jump keys that reuse
+      the browse-mode `z` fold arm: `za` toggles the branch under
+      the cursor, `zo`/`zc` open and close it, `zR`/`zM` open and
+      close every branch, and `zj`/`zk` jump to the next and
+      previous branch starting point (the rewind marker row).
+      Detail:
+      `docs/tui-feature-requests/2026-09-23.md` (tree-fold-jump).

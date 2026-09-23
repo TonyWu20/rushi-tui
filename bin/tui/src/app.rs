@@ -640,6 +640,15 @@ pub struct App {
     /// (docs/tree-ui-design-from-human.md "Tree indent"): selection,
     /// scroll, and expansion of the session-log tree table.
     tree_view: tui_treelistview::TreeListViewState<usize>,
+    /// The user-folded branch points of the tree stage: seqs whose
+    /// branch blocks are collapsed by `z c` / `z M`. Reapplied over
+    /// the frame's expand-all each draw. Cleared when the tree view
+    /// state is reset (docs/tui-feature-requests/2026-09-23.md).
+    tree_folded: std::collections::HashSet<usize>,
+    /// The tree-stage fold arm, mirroring the browse-mode `z` arm
+    /// (`z_fold_arm`): `z` arms, the next character within
+    /// `SS_ARM_TTL` picks the fold or jump key.
+    tree_z_arm: Option<std::time::Instant>,
     /// Extension-provided palette commands, refreshed when a
     /// `commands_list` reply lands or a command times out.
     ext_commands: Vec<crate::palette::items::PaletteItem>,
@@ -850,6 +859,8 @@ impl App {
             picker_at: None,
             palette_state: crate::palette::state::PaletteState::new(),
             tree_view: tui_treelistview::TreeListViewState::new(),
+            tree_folded: std::collections::HashSet::new(),
+            tree_z_arm: None,
             ext_commands: Vec::new(),
             effort_current: "medium".to_string(),
             palette_cmd_requested: false,
@@ -1517,6 +1528,8 @@ impl App {
             // per-session: reset it with the rest of the session
             // state (docs/tree-ui-design-from-human.md "Tree indent").
             self.tree_view = tui_treelistview::TreeListViewState::new();
+            self.tree_folded.clear();
+            self.tree_z_arm = None;
             self.z_fold_arm = None;
             self.fold_cursor_target = None;
             self.last_event_line_starts.clear();
@@ -3147,10 +3160,12 @@ impl App {
         let query = crate::palette::tree_model::build_query(&filter);
         let page = self.palette_state().visible.max(1);
         let v = &mut self.tree_view;
-        // The unfiltered full tree renders with every branch expanded;
-        // the filter narrows the projection instead
-        // (docs/tree-ui-design-from-human.md "Tree indent").
+        // The unfiltered full tree renders with every branch
+        // expanded; the filter narrows the projection instead. The
+        // user's tree folds stay on top of the expand-all
+        // (docs/tui-feature-requests/2026-09-23.md).
         crate::palette::tree_model::expand_all(v, &model);
+        Self::apply_tree_folds(&self.tree_folded, &model, v);
         v.ensure_projection(&model, &query);
         let count = v.visible_len();
         match key {
@@ -3242,6 +3257,145 @@ impl App {
         Vec::new()
     }
 
+    /// Re-apply the user's tree folds on top of the frame's
+    /// expand-all: the expand-all re-adds every branch path, then
+    /// each folded branch point is collapsed again. The fold set
+    /// persists across frames and log growth
+    /// (docs/tui-feature-requests/2026-09-23.md tree-fold-jump).
+    fn apply_tree_folds(
+        folded: &std::collections::HashSet<usize>,
+        model: &crate::palette::tree_model::SessionTree,
+        v: &mut tui_treelistview::TreeListViewState<usize>,
+    ) {
+        for &seq in folded {
+            if let Some(parent) = model.parent_of(seq) {
+                v.set_expanded(seq, Some(parent), false);
+            }
+        }
+    }
+
+    /// The innermost foldable ancestor of the selected row: the row
+    /// itself when it has children, otherwise the nearest ancestor
+    /// that does. `None` when the walk reaches the hidden trunk
+    /// root (nothing foldable above the cursor).
+    fn tree_fold_target(
+        model: &crate::palette::tree_model::SessionTree,
+        sel: Option<usize>,
+    ) -> Option<usize> {
+        let mut cur = sel?;
+        loop {
+            if cur != crate::palette::tree_model::TRUNK_ROOT && model.has_children(cur) {
+                return Some(cur);
+            }
+            cur = model.parent_of(cur)?;
+        }
+    }
+
+    /// The tree-stage fold and branch-jump keys, mirroring the
+    /// browse-mode fold arm (docs/tui-turn-fold.md key table;
+    /// docs/tui-feature-requests/2026-09-23.md tree-fold-jump).
+    /// `z` arms; the next character within `SS_ARM_TTL` acts.
+    /// `za` toggles the branch under the cursor, `zo` opens it,
+    /// `zc` closes it, `zR` opens every branch, `zM` closes every
+    /// branch, `zj` jumps to the next branch starting point, `zk`
+    /// to the last one before the cursor. An unbound second key
+    /// flashes and drops the arm.
+    fn tree_fold_key(&mut self, c: char) -> bool {
+        if c == 'z' {
+            self.tree_z_arm = Some(std::time::Instant::now());
+            self.flash("tree fold: z + a o c R M j k");
+            return true;
+        }
+        let Some(armed_at) = self.tree_z_arm.take() else {
+            return false;
+        };
+        if armed_at.elapsed() > SS_ARM_TTL {
+            return false;
+        }
+        let model = self.session_tree();
+        let filter = self.tree_row_filter(&model);
+        let query = crate::palette::tree_model::build_query(&filter);
+        let v = &mut self.tree_view;
+        crate::palette::tree_model::expand_all(v, &model);
+        Self::apply_tree_folds(&self.tree_folded, &model, v);
+        let sel = v.selected_id();
+        let marker_idx: Vec<usize> = v
+            .visible_ids()
+            .enumerate()
+            .filter(|(_, s)| model.is_marker(*s))
+            .map(|(i, _)| i)
+            .collect();
+        let mut flash_msg: Option<String> = None;
+        match c {
+            'a' | 'o' | 'c' => {
+                let target = Self::tree_fold_target(&model, sel);
+                let Some(t) = target else {
+                    self.flash("no branch under the cursor");
+                    return true;
+                };
+                let open = match c {
+                    'o' => true,
+                    'c' => false,
+                    // Toggle: closed branches are the folded ones.
+                    _ => self.tree_folded.contains(&t),
+                };
+                if open {
+                    self.tree_folded.remove(&t);
+                } else {
+                    self.tree_folded.insert(t);
+                }
+                v.set_expanded(t, model.parent_of(t), open);
+            }
+            'R' => {
+                self.tree_folded.clear();
+                crate::palette::tree_model::expand_all(v, &model);
+            }
+            'M' => {
+                self.tree_folded = model.foldable_seqs().into_iter().collect();
+                v.collapse_all();
+            }
+            'j' | 'k' => {
+                let forward = c == 'j';
+                // The branch starting points in visible order: the
+                // rewind marker rows.
+                let cur = sel.and_then(|s| v.visible_index_of(s)).unwrap_or(0);
+                let target = if forward {
+                    if sel.is_some() {
+                        marker_idx.iter().copied().find(|&i| i > cur)
+                    } else {
+                        marker_idx.first().copied()
+                    }
+                } else if sel.is_some() {
+                    marker_idx.iter().copied().rev().find(|&i| i < cur)
+                } else {
+                    marker_idx.last().copied()
+                };
+                match target {
+                    Some(i) => {
+                        v.select_index(Some(i));
+                    }
+                    None => {
+                        flash_msg = Some(if forward {
+                            "no branch start after the cursor".to_string()
+                        } else {
+                            "no branch start before the cursor".to_string()
+                        });
+                    }
+                }
+            }
+            _ => {
+                flash_msg = Some(format!("z{c} unbound in the tree"));
+            }
+        }
+        // Rebuild the projection after the fold action so the view
+        // reflects it immediately, not on the next frame.
+        v.ensure_projection(&model, &query);
+        if let Some(msg) = flash_msg {
+            self.flash(msg);
+        }
+        true
+    }
+
     /// The tree-stage item under the current selection: builds the
     /// model and projection, selects the first row when nothing is
     /// selected, and returns its palette item. Used by the `Tab`
@@ -3252,6 +3406,7 @@ impl App {
         let query = crate::palette::tree_model::build_query(&filter);
         let v = &mut self.tree_view;
         crate::palette::tree_model::expand_all(v, &model);
+        Self::apply_tree_folds(&self.tree_folded, &model, v);
         v.ensure_projection(&model, &query);
         let seq = match v.selected_id() {
             Some(seq) => seq,
@@ -3298,6 +3453,7 @@ impl App {
         let border_style = Style::default().fg(accent);
         let state = &mut self.tree_view;
         crate::palette::tree_model::expand_all(state, &model);
+        Self::apply_tree_folds(&self.tree_folded, &model, state);
         state.ensure_projection(&model, &query);
         let count = state.visible_len();
         let title = format!(
@@ -3488,6 +3644,8 @@ impl App {
                             // earlier open (docs/tree-ui-design-from-
                             // human.md "Tree indent").
                             self.tree_view = tui_treelistview::TreeListViewState::new();
+                            self.tree_folded.clear();
+                            self.tree_z_arm = None;
                             self.palette_state_mut().goto_tree_list();
                         } else {
                             self.palette_state_mut().goto_session_list();
@@ -3698,6 +3856,8 @@ impl App {
             // A fresh view state per tree visit, like the Goto
             // commit path (no stale selection or scroll).
             self.tree_view = tui_treelistview::TreeListViewState::new();
+            self.tree_folded.clear();
+            self.tree_z_arm = None;
             self.palette_state_mut().goto_tree_list();
         } else if is_goto {
             self.palette_state_mut().goto_session_list();
@@ -4283,11 +4443,11 @@ impl App {
             // (docs/tree-ui-design-from-human.md "Tree indent"):
             // the preview pane follows the selected row, so moving
             // the selection is what the movement keys mean in this
-            // stage. Typing, `Esc`, `Ctrl+F`, `Tab`, `Ctrl+P`, and
-            // `Ctrl+Shift+P` fall through to the shared state
-            // machine below. With the preview focused, `Ctrl+U`/
-            // `Ctrl+D` scroll the pane instead of moving the
-            // selection.
+            // stage. Typing (except the `z` fold arm), `Esc`,
+            // `Ctrl+F`, `Tab`, `Ctrl+P`, and `Ctrl+Shift+P` fall
+            // through to the shared state machine below. With the
+            // preview focused, `Ctrl+U`/`Ctrl+D` scroll the pane
+            // instead of moving the selection.
             if self.palette_state.stage == crate::palette::state::PaletteStage::TreeList {
                 let list_focus = self.palette_state.focus == crate::float::Focus::List;
                 match key {
@@ -4304,6 +4464,21 @@ impl App {
                     }
                     Key::CtrlU | Key::CtrlD if list_focus => {
                         return self.press_tree_key(key);
+                    }
+                    // The tree fold arm (docs/tui-feature-requests/
+                    // 2026-09-23.md tree-fold-jump), mirroring the
+                    // browse-mode `z` fold arm: `z` arms; the next
+                    // character within the TTL acts. An unbound
+                    // character flashes and drops the arm.
+                    Key::Char('z') => {
+                        self.tree_fold_key('z');
+                        return Vec::new();
+                    }
+                    // The fold arm acts on the next character while
+                    // armed; an expired arm drops and the character
+                    // reaches the query below.
+                    Key::Char(c) if self.tree_z_arm.is_some() && self.tree_fold_key(c) => {
+                        return Vec::new();
                     }
                     _ => {}
                 }
@@ -6544,6 +6719,189 @@ mod tree_prettify_tests {
             "tool rows take the ToolName tone"
         );
         assert_eq!(items[3].tag_fg, None, "unclassed rows stay uncolored");
+    }
+}
+
+#[cfg(test)]
+mod tree_fold_tests {
+    //! The tree-stage fold and branch-jump keys
+    //! (docs/tui-feature-requests/2026-09-23.md tree-fold-jump):
+    //! the browse-style `z` arm folds branch blocks, `zj`/`zk`
+    //! jump between branch starting points.
+
+    use super::App;
+    use crate::app::Key;
+    use crate::event::Event;
+    use crate::port::SessionId;
+
+    fn user(content: &str) -> Event {
+        Event::parse_line(&format!(
+            r#"{{"v":1,"type":"user_message","ts":"t","id":"u","content":"{content}"}}"#
+        ))
+        .expect("user event")
+    }
+
+    fn asst(content: &str) -> Event {
+        Event::parse_line(&format!(
+            r#"{{"v":1,"type":"assistant_message","ts":"t","content":"{content}","tool_calls":[],"stop_reason":"stop","usage":{{"input_tokens":1,"output_tokens":1}}}}"#
+        ))
+        .expect("assistant event")
+    }
+
+    fn rewind(target: u64) -> Event {
+        Event::parse_line(&format!(
+            r#"{{"v":1,"type":"rewind","ts":"t","target_seq":{target},"mode":"on"}}"#
+        ))
+        .expect("rewind event")
+    }
+
+    fn app_with(events: Vec<Event>) -> App {
+        let log_lines = events.len() as u64;
+        let mut app = App::new();
+        app.set_active(SessionId::new("s1"), events, log_lines);
+        app
+    }
+
+    /// The fixture: one rewind (seq 2) under the trunk head, one
+    /// re-entry rewind (seq 5), and the rows around them.
+    fn branch_events() -> Vec<Event> {
+        vec![
+            user("a"),
+            rewind(1), // seq 2: fork marker under row 1.
+            user("b"),
+            asst("x"),
+            rewind(1), // seq 5: re-enters the trunk.
+            user("c"),
+        ]
+    }
+
+    /// A fresh tree visit starts fully expanded: every row shows.
+    #[test]
+    fn tree_stage_starts_fully_expanded() {
+        let mut app = app_with(branch_events());
+        app.palette_state_mut().goto_tree_list();
+        app.palette_state_mut().open = true;
+        app.press_tree_key(Key::Down);
+        let ids: Vec<usize> = app.tree_view.visible_ids().collect();
+        assert_eq!(ids, vec![1, 2, 3, 4, 5, 6], "no fold is set yet");
+    }
+
+    /// `z c` closes the branch under the cursor; `z o` re-opens it.
+    /// The fold target of a leaf row is the nearest ancestor that
+    /// has children, like the browse-mode innermost-fold rule.
+    #[test]
+    fn zc_folds_the_branch_under_the_cursor() {
+        let mut app = app_with(branch_events());
+        app.palette_state_mut().goto_tree_list();
+        app.palette_state_mut().open = true;
+        app.press_tree_key(Key::Down); // select row 1, the branch point.
+        assert_eq!(app.tree_view.selected_id(), Some(1));
+        app.press(Key::Char('z'));
+        app.press(Key::Char('c'));
+        let ids: Vec<usize> = app.tree_view.visible_ids().collect();
+        assert_eq!(
+            ids,
+            vec![1, 5, 6],
+            "the fork block hides under row 1; trunk rows stay"
+        );
+        // `z a` toggles the same branch back open.
+        app.press(Key::Char('z'));
+        app.press(Key::Char('a'));
+        let ids: Vec<usize> = app.tree_view.visible_ids().collect();
+        assert_eq!(ids, vec![1, 2, 3, 4, 5, 6], "the toggle re-opens");
+    }
+
+    /// A fold set in one tree visit does not leak into the next:
+    /// a session switch resets the view state, the fold set, and the
+    /// arm together.
+    #[test]
+    fn fold_state_resets_on_session_switch() {
+        let mut app = app_with(branch_events());
+        app.palette_state_mut().goto_tree_list();
+        app.palette_state_mut().open = true;
+        app.press_tree_key(Key::Down);
+        app.press(Key::Char('z'));
+        app.press(Key::Char('c'));
+        assert_eq!(app.tree_folded, std::collections::HashSet::from([1]));
+        let other = vec![user("other")];
+        app.set_active(SessionId::new("s2"), other, 1);
+        assert!(app.tree_folded.is_empty(), "the fold set resets");
+        assert!(app.tree_z_arm.is_none(), "the arm resets");
+    }
+
+    /// `zM` folds every branch, `zR` opens them all again.
+    #[test]
+    fn zm_zr_fold_all_branches() {
+        let mut app = app_with(branch_events());
+        app.palette_state_mut().goto_tree_list();
+        app.palette_state_mut().open = true;
+        app.press_tree_key(Key::Down);
+        app.press(Key::Char('z'));
+        app.press(Key::Char('M'));
+        let ids: Vec<usize> = app.tree_view.visible_ids().collect();
+        assert_eq!(
+            ids,
+            vec![1, 5, 6],
+            "every branch block hides; trunk rows stay"
+        );
+        app.press(Key::Char('z'));
+        app.press(Key::Char('R'));
+        let ids: Vec<usize> = app.tree_view.visible_ids().collect();
+        assert_eq!(ids, vec![1, 2, 3, 4, 5, 6], "all branches open");
+    }
+
+    /// `zj`/`zk` jump between the branch starting points: the
+    /// rewind marker rows, in visible order. `zj` lands on the next
+    /// marker past the cursor, `zk` on the last one before it.
+    #[test]
+    fn zj_zk_jump_between_branch_starts() {
+        let mut app = app_with(branch_events());
+        app.palette_state_mut().goto_tree_list();
+        app.palette_state_mut().open = true;
+        app.press_tree_key(Key::Down); // select row 1 (visible index 0).
+        app.press(Key::Char('z'));
+        app.press(Key::Char('j'));
+        assert_eq!(app.tree_view.selected_id(), Some(2), "next marker");
+        app.press(Key::Char('z'));
+        app.press(Key::Char('j'));
+        assert_eq!(app.tree_view.selected_id(), Some(5), "the next marker");
+        app.press(Key::Char('z'));
+        app.press(Key::Char('k'));
+        assert_eq!(
+            app.tree_view.selected_id(),
+            Some(2),
+            "back to the earlier marker"
+        );
+        app.press(Key::Char('z'));
+        app.press(Key::Char('k'));
+        assert_eq!(
+            app.tree_view.selected_id(),
+            Some(2),
+            "no marker before: the cursor holds and a flash explains"
+        );
+        assert!(app.status().is_some(), "the jump flash is visible");
+    }
+
+    /// An unbound second key flashes and drops the arm. It does not
+    /// reach the query; the next un-armed character does.
+    #[test]
+    fn unbound_fold_keys_do_not_reach_the_query() {
+        let mut app = app_with(branch_events());
+        app.palette_state_mut().goto_tree_list();
+        app.palette_state_mut().open = true;
+        app.press(Key::Char('z'));
+        app.press(Key::Char('b'));
+        assert_eq!(
+            app.palette_state().query,
+            "",
+            "the unbound second key is consumed by the arm"
+        );
+        app.press(Key::Char('c'));
+        assert_eq!(
+            app.palette_state().query,
+            "c",
+            "an un-armed character types into the query"
+        );
     }
 }
 
