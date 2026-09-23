@@ -1070,9 +1070,13 @@ pub fn is_table_block_start(lines: &[&str], i: usize) -> bool {
 /// its column breaks onto as many visual lines as needed, and the
 /// row height grows to the tallest cell, so no cell content is lost
 /// (the old code elided overflow with a trailing `…`, losing data).
-/// Each returned inner `Vec` is one visual grid row of styled
-/// segments, in cell order; a data row that wraps emits one inner
-/// `Vec` per wrapped line, padded to the row height.
+/// Each cell's content runs through the inline markdown pass
+/// ([`inline_segments_p`]), so bold, italics, inline code, and links
+/// inside a cell render like the surrounding prose — not raw source
+/// (docs/tui-feature-requests/2026-09-12.md, table-cell-highlight;
+/// issue #13). Each returned inner `Vec` is one visual grid row of
+/// styled segments, in cell order; a data row that wraps emits one
+/// inner `Vec` per wrapped line, padded to the row height.
 pub fn table_grid(rows: &[String], width: usize, palette: &Palette) -> Vec<Vec<(Style, String)>> {
     let has_sep = rows.get(1).map(|r| is_table_separator(r)).unwrap_or(false);
     let mut cells_rows: Vec<Vec<String>> = Vec::new();
@@ -1093,21 +1097,39 @@ pub fn table_grid(rows: &[String], width: usize, palette: &Palette) -> Vec<Vec<(
     if ncols == 0 {
         return Vec::new();
     }
-    // The column widths: compute the natural content width per column
-    // (the longest cell in that column). When the total natural width
-    // fits in the available space, the grid uses it as-is so no cell
-    // wraps unnecessarily. When it overflows, `allocate_col_widths`
-    // shrinks only the widest columns so the narrow ones keep their
-    // natural width.
+    // Inline-process every cell up front (issue #13: cells used to
+    // pipe-split and raw word-wrap, never reaching the inline
+    // markdown / code highlighter). `inline_segments_p` strips the
+    // markers (`**`, backticks, ...) and returns styled segments; the
+    // plain runs keep `Style::default()` and are re-bound to the
+    // cell's base style at render time (below).
+    let cell_segs: Vec<Vec<Vec<Seg>>> = cells_rows
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(|cell| inline_segments_p(cell, palette))
+                .collect()
+        })
+        .collect();
+    // The column widths: the natural width is the longest *rendered*
+    // cell in that column (the marker-stripped text, the width the
+    // user actually sees), not the raw source width. When the total
+    // fits in the available space the grid uses it as-is so no cell
+    // wraps unnecessarily; otherwise `allocate_col_widths` shrinks
+    // only the widest columns so the narrow ones keep their width.
     let avail = width
         .saturating_sub(2)
         .saturating_sub(ncols)
         .saturating_sub(2 * ncols);
     let content_widths: Vec<usize> = (0..ncols)
         .map(|c| {
-            cells_rows
+            cell_segs
                 .iter()
-                .map(|row| row.get(c).map(|s| s.chars().count()).unwrap_or(0))
+                .map(|row| {
+                    row.get(c)
+                        .map(|segs| segs.iter().map(|(_, t)| t.chars().count()).sum::<usize>())
+                        .unwrap_or(0)
+                })
                 .max()
                 .unwrap_or(0)
         })
@@ -1120,17 +1142,24 @@ pub fn table_grid(rows: &[String], width: usize, palette: &Palette) -> Vec<Vec<(
 
     let mut out: Vec<Vec<(Style, String)>> = Vec::new();
     out.push(grid_border('┌', '┐', '┬', '─', &widths, &border));
-    for (ri, row) in cells_rows.iter().enumerate() {
+    for (ri, _row) in cells_rows.iter().enumerate() {
         let is_header = header_index == Some(ri);
         let st = if is_header { header_style } else { plain };
-        // Wrap each cell to its column width. A data row then spans
-        // as many visual lines as its tallest wrapped cell; shorter
-        // cells pad with blanks so every row's verticals land on the
-        // same columns as the border rows. No content is elided.
-        let wrapped: Vec<Vec<String>> = (0..ncols)
+        // Wrap each cell to its column width, keeping the inline
+        // styles. A data row then spans as many visual lines as its
+        // tallest wrapped cell; shorter cells pad with blanks so every
+        // row's verticals land on the same columns as the border rows.
+        // No content is elided.
+        let wrapped: Vec<Vec<Vec<Seg>>> = (0..ncols)
             .map(|c| {
-                let cell = row.get(c).cloned().unwrap_or_default();
-                wrap_cell_text(&cell, widths[c])
+                let segs = cell_segs[ri].get(c).cloned().unwrap_or_default();
+                // Re-bind the plain runs to the cell's base style; the
+                // token styles (inline code, bold, ...) are kept.
+                let rebased: Vec<Seg> = segs
+                    .into_iter()
+                    .map(|(s, t)| (if s == Style::default() { st } else { s }, t))
+                    .collect();
+                wrap_cell_segments(rebased, widths[c])
             })
             .collect();
         let row_h = wrapped.iter().map(|lines| lines.len()).max().unwrap_or(1);
@@ -1138,11 +1167,28 @@ pub fn table_grid(rows: &[String], width: usize, palette: &Palette) -> Vec<Vec<(
             let mut cells_out: Vec<(Style, String)> = Vec::new();
             cells_out.push((border, "│".to_string()));
             for (c, &w) in widths.iter().enumerate().take(ncols) {
-                let piece = wrapped[c].get(line_i).cloned().unwrap_or_default();
-                // Left-align in the column; missing wrapped lines pad
-                // with blanks.
-                let text = format!(" {:<w$} ", piece, w = w);
-                cells_out.push((st, text));
+                let words: Vec<Seg> = wrapped[c].get(line_i).cloned().unwrap_or_default();
+                // Re-insert the base-style spaces between the wrapped
+                // words, then left-align the whole cell in its column
+                // (leading space, left pad, trailing space) so the
+                // verticals line up with the border rows.
+                let mut spans: Vec<Seg> = Vec::new();
+                for (i, ws) in words.iter().enumerate() {
+                    if i > 0 {
+                        spans.push((st, " ".to_string()));
+                    }
+                    spans.push(ws.clone());
+                }
+                let total: usize = spans.iter().map(|(_, t)| t.chars().count()).sum();
+                let pad = w.saturating_sub(total);
+                cells_out.push((st, " ".to_string()));
+                for (s, t) in spans {
+                    cells_out.push((s, t));
+                }
+                // Left-align in the column: the pad follows the content
+                // (like the old `format!(" {:<w$} ", piece)`), and a
+                // missing wrapped line pads with blanks.
+                cells_out.push((st, " ".repeat(pad + 1)));
                 if c + 1 < ncols {
                     cells_out.push((border, "│".to_string()));
                 }
@@ -1221,6 +1267,7 @@ fn allocate_col_widths(natural: &[usize], avail: usize) -> Vec<usize> {
 /// code elided overflow with a trailing `…`). Empty input yields
 /// one empty line so callers can index it like any other wrapped
 /// cell.
+#[cfg(test)]
 fn wrap_cell_text(text: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
     let words: Vec<&str> = text.split_whitespace().collect();
@@ -1260,6 +1307,72 @@ fn wrap_cell_text(text: &str, width: usize) -> Vec<String> {
     }
     if !cur.is_empty() {
         lines.push(cur.join(" "));
+    }
+    lines
+}
+
+/// Word-wrap a sequence of styled segments (one continuous flow) into
+/// visual lines. Each wrapped line is a `Vec<Seg>` of styled **words**,
+/// with the inter-word spaces left out: the caller re-inserts them in
+/// the cell's base style. A word's style is kept across line breaks, so
+/// an inline-code or bold token that wraps stays styled on every
+/// visual line it spans. A word longer than the column hard-breaks into
+/// `width`-sized chunks, each its own line, like `wrap_cell_text`.
+/// Empty input yields one empty line so callers can index uniformly.
+///
+/// This is the styled counterpart of `wrap_cell_text`, added so table
+/// cells carry the same inline markdown / code styling as surrounding
+/// prose (docs/tui-feature-requests/2026-09-12.md, table-cell-highlight).
+fn wrap_cell_segments(segs: Vec<Seg>, width: usize) -> Vec<Vec<Seg>> {
+    let width = width.max(1);
+    // Flatten the segments into styled words. Each word keeps the style
+    // of the segment it came from; whitespace runs collapse so wrapping
+    // reflows on single spaces, matching `wrap_cell_text`.
+    let mut words: Vec<Seg> = Vec::new();
+    for (style, text) in segs {
+        for word in text.split_whitespace() {
+            words.push((style, word.to_string()));
+        }
+    }
+    if words.is_empty() {
+        return vec![Vec::new()];
+    }
+    let mut lines: Vec<Vec<Seg>> = Vec::new();
+    let mut cur: Vec<Seg> = Vec::new();
+    let mut cur_w = 0usize;
+    for (style, word) in words {
+        let w = word.chars().count();
+        if w > width {
+            // A word wider than the column: flush the current line, then
+            // hard-break the word into width-sized chunks, keeping its
+            // style on each chunk.
+            if !cur.is_empty() {
+                lines.push(std::mem::take(&mut cur));
+                cur_w = 0;
+            }
+            let chars: Vec<char> = word.chars().collect();
+            for chunk in chars.chunks(width) {
+                let piece: String = chunk.iter().collect();
+                lines.push(vec![(style, piece)]);
+            }
+            continue;
+        }
+        if !cur.is_empty() && cur_w + 1 + w > width {
+            lines.push(std::mem::take(&mut cur));
+            cur_w = 0;
+        }
+        if cur.is_empty() {
+            cur_w = w;
+        } else {
+            cur_w += 1 + w;
+        }
+        cur.push((style, word));
+    }
+    if !cur.is_empty() {
+        lines.push(cur);
+    }
+    if lines.is_empty() {
+        lines.push(Vec::new());
     }
     lines
 }
@@ -1368,6 +1481,54 @@ mod tests {
     #[test]
     fn wrap_cell_text_empty() {
         assert_eq!(wrap_cell_text("", 10), vec![String::new()]);
+    }
+
+    #[test]
+    fn wrap_cell_segments_plain_matches_text_wrap() {
+        // A plain segment wraps exactly like the old raw-string wrap.
+        let segs = vec![(Style::default(), "one two three".to_string())];
+        let lines = wrap_cell_segments(segs, 6);
+        let joined: Vec<String> = lines
+            .iter()
+            .map(|l| l.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>().join(" "))
+            .collect();
+        assert_eq!(joined, vec!["one", "two", "three"]);
+    }
+
+    #[test]
+    fn wrap_cell_segments_counts_spaces_like_text_wrap() {
+        let segs = vec![(Style::default(), "aa bb cc".to_string())];
+        let lines = wrap_cell_segments(segs, 7);
+        let joined: Vec<String> = lines
+            .iter()
+            .map(|l| l.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>().join(" "))
+            .collect();
+        assert_eq!(joined, vec!["aa bb", "cc"]);
+    }
+
+    #[test]
+    fn wrap_cell_segments_keeps_style_across_breaks() {
+        // An overlong styled word hard-breaks into width-sized chunks;
+        // every chunk keeps the word's style, and plain words keep the
+        // plain style, across every visual line.
+        let code = Style::default().add_modifier(Modifier::UNDERLINED);
+        let segs = vec![
+            (Style::default(), "aa".to_string()),
+            (code, "bbbbbb".to_string()),
+            (Style::default(), "cc".to_string()),
+        ];
+        let lines = wrap_cell_segments(segs, 4);
+        assert_eq!(lines.len(), 4, "aa / bbbb / bb / cc");
+        assert_eq!(lines[0], vec![(Style::default(), "aa".to_string())]);
+        assert_eq!(lines[1], vec![(code, "bbbb".to_string())]);
+        assert_eq!(lines[2], vec![(code, "bb".to_string())]);
+        assert_eq!(lines[3], vec![(Style::default(), "cc".to_string())]);
+    }
+
+    #[test]
+    fn wrap_cell_segments_empty_is_one_empty_line() {
+        let lines = wrap_cell_segments(Vec::new(), 10);
+        assert_eq!(lines, vec![Vec::new()]);
     }
 
     // Windowed highlight state carry (preview pane plan, layer 3).
