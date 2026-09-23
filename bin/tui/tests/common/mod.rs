@@ -358,20 +358,19 @@ impl Pty {
                 }
                 let c_bin = CString::new(bin).expect("bin has no NUL");
                 let c_sess = CString::new(session).expect("session has no NUL");
-                let c_cfg: Option<CString> = match cfg {
-                    Some(c) => {
-                        Some(CString::new(c.to_string_lossy().as_ref()).expect("cfg has no NUL"))
-                    }
-                    None => {
-                        // No --config flag: the binary resolves its own
-                        // config path through its ladder (issue #11).
-                        // Drop an inherited CONFIG so the test exercises
-                        // the ladder steps, not a dev-machine env var.
-                        let c_key = CString::new("CONFIG").unwrap();
-                        let _ = libc::unsetenv(c_key.as_ptr());
-                        None
-                    }
-                };
+                // The inherited `$CONFIG` env var must never steer the
+                // test's config resolution: the shared kernel resolver
+                // (`rushi_common::paths`, kernel PR #30) ranks `$CONFIG`
+                // above the CLI `--config` flag, so a dev machine's
+                // `$CONFIG` would silently re-target the run at the dev
+                // config. Drop it in both spawn shapes; `spawn_no_config`
+                // exercises the ladder steps instead of a dev env var.
+                // The precedence itself (flag should beat env var) is
+                // tracked as kernel issue #36.
+                let c_key = CString::new("CONFIG").unwrap();
+                let _ = libc::unsetenv(c_key.as_ptr());
+                let c_cfg = cfg
+                    .map(|c| CString::new(c.to_string_lossy().as_ref()).expect("cfg has no NUL"));
                 // Build argv while every CString is still alive: the
                 // raw pointers must outlive the execvp call below.
                 let c_flag = c"--config";
