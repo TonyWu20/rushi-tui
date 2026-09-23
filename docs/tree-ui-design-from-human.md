@@ -264,12 +264,13 @@ path.
 - `bin/tui/src/palette/tree_model.rs` builds the `SessionTree` model.
   Branch depth mirrors the kernel `rewind_active_ranges` semantics.
   A branch is rooted at its rewind marker's `target_seq`, the
-  rewound event. A marker's span is the rows strictly after its
-  target, up to the marker that next rewinds back to its target or
-  earlier.
-  - A fork indents its whole span one level below the target's row.
-    The span is the abandoned tail, the marker row, and the new
-    events. The indent starts right under the rewound event.
+  rewound event. The branch block is the marker row and the events
+  after it, up to the marker that next rewinds back to its target
+  or earlier.
+  - The abandoned tail (rows between the target and the marker)
+    keeps its own depth. The marker row and the new events indent
+    one level below the target row. The branch block renders right
+    under the rewound event.
   - A fork is a marker whose abandoned tail holds no marker row.
   - A re-entry keeps the target's depth. Its abandoned tail held a
     complete nested branch. The new events continue the target's

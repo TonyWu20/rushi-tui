@@ -27,21 +27,24 @@
 //! semantics of `rushi_common::rewind::active_ranges`:
 //!
 //! - A rewind branch is rooted at the marker's `target_seq`, the
-//!   rewound event. The branch's span is the rows strictly after the
-//!   target, up to the branch's close.
+//!   rewound event. The branch block is the marker row and the events
+//!   after it, up to the branch's close.
 //! - A marker forks when its abandoned tail (the rows between the
 //!   target and the marker) holds no marker row: nothing nested was
-//!   abandoned. A forked span sits one level below the target's row:
-//!   the indent starts right under the rewound event, the branch
-//!   point.
+//!   abandoned. A forked branch block sits one level below the
+//!   target's row, and the abandoned tail keeps its own depth. The
+//!   branch block renders right under the rewound event.
 //! - A marker that abandons a complete nested branch re-enters the
-//!   target's branch: its span keeps the target's level, so the
-//!   branch's continuation sits at the branch's own depth.
+//!   target's branch: its branch block keeps the target's level, so
+//!   the continuation sits at the branch's own depth.
 //! - A branch closes at the first later marker that rewinds back to
-//!   its target or earlier: the span stops one seq before it.
-//! - The depth of a row is the deepest covering span level, 0 on the
-//!   trunk. A marker row renders at the depth of the branch it heads,
-//!   the fork-boundary line of that branch.
+//!   its target or earlier: the block stops one seq before it.
+//! - The depth of a row is the deepest covering branch level, 0 on
+//!   the trunk. A marker row renders at the depth of the branch it
+//!   heads, the fork-boundary line of that branch.
+//! - A branch-block row is a child of its fork's target row, the
+//!   branch point. Every other row hangs off the most recent visible
+//!   row at the previous depth.
 //! - A marker whose target sits outside the in-memory window falls
 //!   back to the trunk (depth 0), the same limitation as
 //!   `rewind_active_ranges`.
@@ -97,15 +100,18 @@ pub struct SessionTree {
 /// One parsed `rewind` marker, with the display-depth facts derived
 /// from it.
 struct Marker {
-    /// The wire `target_seq`: the event the branch is rooted at. In
-    /// `on` mode the target stays in the context; in `before` mode it
+    /// The marker's own 1-based log seq: the first seq of its span.
+    /// The span starts at the marker row, not at the target row.
+    seq: usize,
+    /// The wire `target_seq`: the rewound event the branch is rooted
+    /// at. In `on` mode it stays in the context; in `before` mode it
     /// is the excluded user message (restored to the input box).
     target: usize,
     /// A fork when the abandoned tail (`target + 1` to `seq - 1`)
     /// holds no marker row: nothing nested was abandoned, so the
-    /// whole span after the target indents one level. A marker that
-    /// abandons a complete nested branch re-enters instead and
-    /// indents nothing.
+    /// marker row and the branch events after it indent one level
+    /// below the target's row. A marker that abandons a complete
+    /// nested branch re-enters instead and indents nothing.
     fork: bool,
     /// The last in-window seq this marker's span covers: the seq
     /// before the first later marker that rewinds back to this
@@ -160,9 +166,9 @@ impl DepthSolver {
             if m.target < self.base {
                 continue;
             }
-            // The marker's span: the rows strictly after its target,
-            // up to its close.
-            if m.target >= pos || pos > m.close {
+            // The marker's span: from its own row to its close. The
+            // abandoned tail before the marker keeps its own depth.
+            if m.seq > pos || pos > m.close {
                 continue;
             }
             // The span's level: one below the target's level when the
@@ -175,6 +181,37 @@ impl DepthSolver {
         }
         self.depth[p] = Some(d);
         d
+    }
+
+    /// The target row of the fork span that carries the row at `pos`
+    /// to its depth: the nearest covering fork marker whose level
+    /// equals the row's depth. `None` when the row's depth comes
+    /// from a re-entry span (or the row is trunk-level).
+    fn anchor_target(&mut self, pos: usize) -> Option<usize> {
+        if pos < self.base {
+            return None;
+        }
+        let d = self.depth_at(pos);
+        if d == 0 {
+            return None;
+        }
+        let count = self.markers.len();
+        let mut anchor: Option<usize> = None;
+        for i in 0..count {
+            let m = &self.markers[i];
+            if !m.fork || m.target < self.base {
+                continue;
+            }
+            if m.seq > pos || pos > m.close {
+                continue;
+            }
+            let (target, fork) = (m.target, m.fork);
+            let lvl = self.depth_at(target) + usize::from(fork);
+            if lvl == d {
+                anchor = Some(target);
+            }
+        }
+        anchor
     }
 }
 
@@ -220,6 +257,7 @@ impl SessionTree {
                     .map(|m| m.seq - 1)
                     .unwrap_or(last_seq);
                 Marker {
+                    seq,
                     target,
                     fork,
                     close,
@@ -234,14 +272,18 @@ impl SessionTree {
         let mut solver = DepthSolver::new(base_seq, markers, n);
         let pos_depth: Vec<usize> = (0..n).map(|p| solver.depth_at(base_seq + p)).collect();
 
-        // The rows: log order, `ext_status` rows skipped. The parent
-        // of a depth-d row is the most recent visible depth-(d-1)
-        // row; depth-0 rows are children of the synthetic trunk root
+        // The rows: log order, `ext_status` rows skipped. A row at
+        // depth 0 is a child of the synthetic trunk root
         // [`TRUNK_ROOT`] (a hidden root, `TreeRootVisibility::Hidden`):
-        // every top-level row renders at level 0 with no marker, and
-        // the hidden root never appears in the projection. A missing
-        // parent level after a window truncation falls back to the
-        // trunk root.
+        // top-level rows render at level 0 with no marker, and the
+        // hidden root never appears in the projection. A forked row
+        // (one carried by a fork marker's span) hangs off that
+        // marker's target row, the branch point: the branch block —
+        // the marker and its new events — renders right under the
+        // rewound event, while the abandoned tail keeps its own
+        // place. Every other row hangs off the most recent visible
+        // depth-(d - 1) row. A missing parent level after a window
+        // truncation falls back to the trunk root.
         let mut seqs: Vec<usize> = Vec::with_capacity(n);
         let mut items: Vec<PaletteItem> = Vec::with_capacity(n);
         let mut kinds: Vec<EventKind> = Vec::with_capacity(n);
@@ -270,10 +312,24 @@ impl SessionTree {
             if d == 0 {
                 children.entry(TRUNK_ROOT).or_default().push(seq);
             } else {
-                match last_at_depth.get(d - 1).copied().flatten() {
-                    Some(parent) => children.entry(parent).or_default().push(seq),
-                    None => children.entry(TRUNK_ROOT).or_default().push(seq),
-                }
+                // The branch point: a fork span that carries this depth
+                // roots the row at that fork's target row, so the
+                // branch block renders under the rewound event, not
+                // under the abandoned tail that precedes it. Every
+                // other row hangs off the most recent visible
+                // depth-(d - 1) row. A missing parent level after a
+                // window truncation falls back to the trunk root.
+                let anchor = solver.anchor_target(seq);
+                let fallback = last_at_depth
+                    .get(d - 1)
+                    .copied()
+                    .flatten()
+                    .unwrap_or(TRUNK_ROOT);
+                let parent = match anchor {
+                    Some(t) if row.contains_key(&t) => t,
+                    _ => fallback,
+                };
+                children.entry(parent).or_default().push(seq);
             }
             if d >= last_at_depth.len() {
                 last_at_depth.resize(d + 1, None);
@@ -792,11 +848,11 @@ mod tests {
         let tree = SessionTree::build(&ev, 1, 1, &names, &details);
         let d = |s: usize| tree.depth_of(s).expect("depth");
         assert_eq!(d(4), 1, "branch B");
-        // Marker 9's span re-roots its abandoned tail under the fork
-        // point (b2): the re-entered trunk rows a1'/a2' now nest at
-        // B's depth instead of the trunk.
-        assert_eq!(d(7), 1, "the abandoned A' rows nest under the fork point");
-        assert_eq!(d(8), 1, "the abandoned A' rows nest under the fork point");
+        // Marker 6 re-enters the target's branch (the trunk, level 0),
+        // so its block — the marker, a1', a2', and the re-entered B
+        // tail — sits at the target's level, not below it.
+        assert_eq!(d(7), 0, "the re-entered trunk rows sit at the trunk");
+        assert_eq!(d(8), 0, "the re-entered trunk rows sit at the trunk");
         assert_eq!(d(9), 1, "the marker re-enters B (depth 1, not 2)");
         assert_eq!(d(10), 1, "B's continuation keeps B's depth");
     }
@@ -817,10 +873,10 @@ mod tests {
         let tree = SessionTree::build(&ev, 1, 1, &names, &details);
         let d = |s: usize| tree.depth_of(s).expect("depth");
         assert_eq!(d(2), 1, "marker 2 heads branch B under a1");
-        // Marker 4 targets row 2 (the marker row, depth 1). Its whole
-        // span — the abandoned b1, marker 4 itself, and c1 — indents
-        // one level below row 2.
-        assert_eq!(d(3), 2, "the abandoned b1 nests under marker 2");
+        // Marker 4 targets row 2 (the marker row, depth 1). The
+        // branch block (marker 4 and c1) indents one level below
+        // row 2. The abandoned b1 keeps branch B's depth.
+        assert_eq!(d(3), 1, "the abandoned b1 keeps branch B's depth");
         assert_eq!(d(4), 2, "marker 4 sits at its branch's depth");
         assert_eq!(d(5), 2, "c1 nests under marker 2");
     }
@@ -861,11 +917,11 @@ mod tests {
     /// The shape of the real sessions: a long trunk, a `before`-mode
     /// rewind onto the user message the user retried, then the old
     /// assistant tail abandoned between the target and the marker.
-    /// The indent starts right under the rewound event: the target
-    /// row stays flat, everything after it (the abandoned tail, the
-    /// marker, the new events) indents one level below it.
+    /// The target row and the abandoned tail stay on the trunk; the
+    /// marker row and the new events hang one level below the target
+    /// row, so the branch block renders right under the rewound event.
     #[test]
-    fn retry_indent_starts_right_under_the_rewound_event() {
+    fn retry_branch_hangs_under_the_rewound_event() {
         let ev = vec![
             user("a1"),
             asst("a2"),
@@ -879,12 +935,83 @@ mod tests {
         let (names, details) = empty_maps();
         let tree = SessionTree::build(&ev, 1, 1, &names, &details);
         let d = |s: usize| tree.depth_of(s).expect("depth");
-        assert_eq!(d(3), 0, "the rewound event stays at the trunk");
-        assert_eq!(d(4), 1, "the abandoned tail indents under the target");
-        assert_eq!(d(5), 1, "the abandoned tail indents under the target");
-        assert_eq!(d(6), 1, "the marker sits at the branch's depth");
-        assert_eq!(d(7), 1, "the retried event indents under the target");
-        assert_eq!(d(8), 1, "the new answer indents under the target");
+        assert_eq!(d(3), 0, "the rewound event stays on the trunk");
+        assert_eq!(d(4), 0, "the abandoned tail keeps the trunk depth");
+        assert_eq!(d(5), 0, "the abandoned tail keeps the trunk depth");
+        assert_eq!(d(6), 1, "the marker sits one level below the target");
+        assert_eq!(d(7), 1, "the retried event sits under the target");
+        assert_eq!(d(8), 1, "the new answer sits under the target");
+        // The branch block hangs off the target row, the branch point:
+        // it renders right under the rewound event, not after the
+        // abandoned tail.
+        assert_eq!(tree.children.get(&3), Some(&vec![6, 7, 8]));
+        assert_eq!(tree.children.get(&TRUNK_ROOT), Some(&vec![1, 2, 3, 4, 5]));
+    }
+
+    /// The shape of the tracked `sessions/tree-ui-update` log: a long
+    /// trunk, one `before`-mode retry marker (line 4914) targeting a
+    /// deep user message (line 4740), a long abandoned assistant
+    /// tail between them, and the new branch from line 4915. Pins
+    /// the user-visible placement: the tail stays flat on the trunk,
+    /// the marker and the new events hang one level below the target
+    /// row, and the branch block is a child of the target row.
+    #[test]
+    fn tracked_tree_ui_update_session_shape() {
+        use std::io::Read;
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../sessions/tree-ui-update/events.jsonl"
+        );
+        let mut data = std::fs::File::open(path).expect("tracked session log");
+        let mut buf = String::new();
+        data.read_to_string(&mut buf).expect("read log");
+        let events: Vec<Event> = buf.lines().filter_map(Event::parse_line).collect();
+        assert!(events.len() > 4915, "the tracked log is complete");
+        let tree = SessionTree::build(&events, 1, 1, &empty_maps().0, &empty_maps().1);
+        // The target row stays on the trunk.
+        assert_eq!(tree.depth_of(4740), Some(0), "the rewound event stays flat");
+        // The abandoned tail stays flat. Most of it is ext_status
+        // rows, which the model skips, so check the last visible
+        // tail row.
+        let tail_row = tree
+            .seqs
+            .iter()
+            .copied()
+            .rev()
+            .find(|&s| 4740 < s && s < 4914)
+            .expect("a visible tail row");
+        assert_eq!(
+            tree.depth_of(tail_row),
+            Some(0),
+            "the abandoned tail keeps the trunk depth"
+        );
+        // The marker and the new branch indent one level below the
+        // target row.
+        assert_eq!(tree.depth_of(4914), Some(1), "the marker indents");
+        assert_eq!(
+            tree.depth_of(4915),
+            Some(1),
+            "the new branch indents under the target"
+        );
+        if let Some(&last) = tree.seqs.last() {
+            assert_eq!(
+                tree.depth_of(last),
+                Some(1),
+                "the branch runs to the log end"
+            );
+        }
+        // The branch block hangs off the target row, the branch
+        // point, not after the abandoned tail.
+        let kids = tree
+            .children
+            .get(&4740)
+            .expect("the target is a branch point");
+        assert_eq!(kids.first(), Some(&4914), "the marker is the first child");
+        assert_eq!(
+            tree.children.get(&TRUNK_ROOT).and_then(|v| v.last()),
+            Some(&4913),
+            "the tail is the trunk's last child"
+        );
     }
 
     /// A target outside the in-memory window falls back to the trunk,
