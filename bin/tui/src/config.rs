@@ -136,6 +136,16 @@ pub struct TuiConfig {
     /// overrides. The `opencode` preset is the default: read stays
     /// collapsed.
     pub tool_display: crate::tool_display::ToolDisplay,
+    /// The `[paths]` tool manifest entries (`native_tool_paths` +
+    /// `extension_tool_paths`) that resolve to zero tool directories.
+    /// The kernel's `assemble` skips them silently, so the model would
+    /// start the session without those tool schemas. The TUI reports
+    /// them at startup instead of letting the misconfiguration surface
+    /// as a text-marker fallback from the model.
+    pub tool_paths_missing: Vec<PathBuf>,
+    /// Tool dirs found across all configured `[paths]` tool entries.
+    /// Zero means the model would start with no tool schemas at all.
+    pub tool_dirs_found: usize,
 }
 
 /// Raw deserialized shape of `config.toml`.
@@ -183,6 +193,13 @@ struct RawActive {
 #[derive(Debug, Default, Deserialize)]
 struct RawPaths {
     sessions_root: Option<String>,
+    /// Kernel-owned `[paths]` tool entries. The TUI does not consume
+    /// them for dispatch; it only re-resolves them to surface
+    /// misconfigurations at startup (see `TuiConfig::tool_paths_missing`).
+    #[serde(default)]
+    native_tool_paths: Vec<String>,
+    #[serde(default)]
+    extension_tool_paths: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -353,6 +370,33 @@ impl TuiConfig {
                     .collect()
             })
             .unwrap_or_default();
+
+        // The [paths] tool entries are kernel-owned (the assemble stage
+        // loads the tool schemas from them), but the TUI re-resolves
+        // them against the config dir, exactly like the kernel does
+        // (bin/assemble tool_dirs_in), and reports any entry that
+        // resolves to no tool dir. That surfaces a broken tool layout
+        // at startup instead of silently letting the model run with a
+        // shrunken tool list.
+        let tool_entries: Vec<String> = raw
+            .paths
+            .as_ref()
+            .map(|p| {
+                let mut v = p.native_tool_paths.clone();
+                v.extend(p.extension_tool_paths.clone());
+                v
+            })
+            .unwrap_or_default();
+        let mut tool_dirs_found = 0usize;
+        let mut tool_paths_missing = Vec::new();
+        for entry in &tool_entries {
+            let resolved = rushi_common::paths::resolve_tool_entry(&config_dir, entry);
+            let dirs = rushi_common::paths::tool_dirs_in(&resolved);
+            tool_dirs_found += dirs.len();
+            if dirs.is_empty() {
+                tool_paths_missing.push(resolved);
+            }
+        }
 
         let active_model = raw.active.as_ref().and_then(|a| a.model.clone());
 
@@ -556,6 +600,8 @@ impl TuiConfig {
             custom_schemes,
             clipboard_unnamed,
             tool_display,
+            tool_paths_missing,
+            tool_dirs_found,
         })
     }
 
@@ -586,6 +632,8 @@ impl TuiConfig {
             tool_display: crate::tool_display::ToolDisplay::preset(
                 crate::tool_display::Preset::OpenCode,
             ),
+            tool_paths_missing: Vec::new(),
+            tool_dirs_found: 0,
         }
     }
 }
@@ -614,6 +662,11 @@ fn resolve_cwd(p: &str) -> PathBuf {
             .join(p)
     }
 }
+
+// Tool-entry resolution and dir enumeration are shared with the
+// kernel via `rushi_common::paths` (`resolve_tool_entry`,
+// `tool_dirs_in`), so the TUI's `[paths]` validation and the
+// kernel's `assemble` scan cannot drift apart.
 
 #[cfg(test)]
 mod tests {
@@ -681,6 +734,52 @@ arg_style = "append_session"
         let cfg = TuiConfig::load(dir.path().join("config.toml").to_str().unwrap()).unwrap();
         assert_eq!(cfg.sessions_root, abs);
     }
+
+    #[test]
+    fn tool_paths_missing_reported_and_resolved_against_config_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        // One valid tool dir (tool.toml directly), one valid root that
+        // holds a tool sub-dir, one dangling entry.
+        let direct = dir.path().join("tools").join("read");
+        std::fs::create_dir_all(&direct).unwrap();
+        std::fs::write(direct.join("tool.toml"), "[tool]\n").unwrap();
+        let root = dir.path().join("ext-tools").join("web_fetch");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("tool.toml"), "[tool]\n").unwrap();
+        write(
+            dir.path(),
+            "config.toml",
+            "[paths]\nnative_tool_paths = [\"tools\", \"missing-native\"]\nextension_tool_paths = [\"ext-tools\"]\n",
+        );
+        let cfg = TuiConfig::load(dir.path().join("config.toml").to_str().unwrap()).unwrap();
+        assert_eq!(cfg.tool_dirs_found, 2, "read + web_fetch found");
+        assert_eq!(
+            cfg.tool_paths_missing,
+            vec![dir.path().join("missing-native")],
+            "the dangling relative entry resolves against the config dir"
+        );
+    }
+
+    #[test]
+    fn tool_paths_absent_means_nothing_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "config.toml", "[active]\nmodel = \"test-model\"\n");
+        let cfg = TuiConfig::load(dir.path().join("config.toml").to_str().unwrap()).unwrap();
+        assert!(cfg.tool_paths_missing.is_empty());
+        assert_eq!(cfg.tool_dirs_found, 0);
+    }
+
+    #[test]
+    fn tool_dir_without_manifest_counts_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let empty = dir.path().join("tools");
+        std::fs::create_dir_all(&empty).unwrap(); // exists, but no tool.toml inside
+        write(dir.path(), "config.toml", "[paths]\nnative_tool_paths = [\"tools\"]\n");
+        let cfg = TuiConfig::load(dir.path().join("config.toml").to_str().unwrap()).unwrap();
+        assert_eq!(cfg.tool_paths_missing, vec![empty]);
+        assert_eq!(cfg.tool_dirs_found, 0);
+    }
+
 
     #[test]
     fn bad_arg_style_rejected() {

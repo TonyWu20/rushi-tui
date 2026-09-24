@@ -10,7 +10,7 @@
     # The Nix-built `rushi` launcher (kernel flake packages.default),
     # fetched from GitHub so the flake is hostable (no local sibling
     # checkout required). `rushi-common` is a crates.io dep pinned to
-    # 0.1.3 in bin/tui/Cargo.toml, resolved by cargo at build time,
+    # 0.1.5 in bin/tui/Cargo.toml, resolved by cargo at build time,
     # so no raw source-tree input is needed here.
     rushi-kernel = { url = "github:TonyWu20/rushi"; };
   };

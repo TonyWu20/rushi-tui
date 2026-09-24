@@ -2383,9 +2383,9 @@ checksum = "47b34b781b31e5d73e9fbc8689c70551fd1ade9a19e3e28cfec8580a79290cc4"
 
 [[package]]
 name = "rushi-common"
-version = "0.1.4"
+version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ef56792d056fcef899bd6789e52f9bf28a7b0ba63c14bcd37991b9a525613de"
+checksum = "25b1818e49f4b4ef0b555c375ba6232b6a8dcc43fdb98a47a6987904dba365f7"
 dependencies = [
  "libc",
  "serde",

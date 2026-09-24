@@ -46,6 +46,8 @@ fn empty_host() -> (ExtHost, TempDir) {
         color_scheme: None,
         custom_schemes: HashMap::new(),
         tool_display: ToolDisplay::preset(Preset::OpenCode),
+        tool_paths_missing: Vec::new(),
+        tool_dirs_found: 0,
     };
     let disc = discover(&cfg).unwrap();
     let host = ExtHost::new(&disc, &cfg);

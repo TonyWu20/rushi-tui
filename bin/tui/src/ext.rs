@@ -2897,6 +2897,8 @@ mod tests {
             tool_display: crate::tool_display::ToolDisplay::preset(
                 crate::tool_display::Preset::OpenCode,
             ),
+            tool_paths_missing: Vec::new(),
+            tool_dirs_found: 0,
         }
     }
 

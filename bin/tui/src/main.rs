@@ -407,6 +407,30 @@ fn main() {
             std::process::exit(1);
         }
     };
+    // [paths] tool entries that resolve to no tool dir: the kernel's
+    // `assemble` skips them silently, so the model would start without
+    // their schemas (text-marker tool calls, unknown-tool results).
+    // Surface it at startup instead of letting the session degrade.
+    if !cfg.tool_paths_missing.is_empty() {
+        let missing: Vec<String> = cfg
+            .tool_paths_missing
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect();
+        eprintln!(
+            "rushi-tui: warning: [paths] in {} — tool dir(s) missing ({}): {} — \
+             the model will run without their tool schemas",
+            cfg.config_path.display(),
+            missing.len(),
+            missing.join(", ")
+        );
+        tui_log(&format!(
+            "tool paths missing in {} ({} tool dir(s) found): {}",
+            cfg.config_path.display(),
+            cfg.tool_dirs_found,
+            missing.join(", ")
+        ));
+    }
     // issue #22 (self-wired loop wiring): the `--loop-cmd` flag wins,
     // then the config `[loop]` section, then the Tier-1 default —
     // `rushi run <session>` from PATH. The TUI pins only the `rushi`
@@ -450,6 +474,22 @@ fn main() {
     // Attach the background preview reader (docs/tui-preview-pane-
     // plan.md, layer 2); dispatches and settles happen on it.
     app.attach_preview_loader();
+    // The [paths] tool entries that resolve to no tool dir, reported
+    // as a startup flash so the degradation is visible (the kernel
+    // skips them silently; the model then falls back to text tool
+    // calls and the calls leak into the transcript).
+    if !cfg.tool_paths_missing.is_empty() {
+        let missing: Vec<String> = cfg
+            .tool_paths_missing
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect();
+        app.flash(format!(
+            "[paths] tool dir(s) missing ({} found): {} — tool schemas unavailable",
+            cfg.tool_dirs_found,
+            missing.join(", ")
+        ));
+    }
     // Optional transcript-rebuild trace (docs/tui-perf-background-build-audit.md).
     // `TUI_TRANSCRIPT_TRACE=1` writes to /tmp/tui-transcript-trace-<pid>.log;
     // a path value writes there instead.
@@ -1856,6 +1896,8 @@ mod resync_tests {
             tool_display: crate::tool_display::ToolDisplay::preset(
                 crate::tool_display::Preset::OpenCode,
             ),
+            tool_paths_missing: Vec::new(),
+            tool_dirs_found: 0,
         };
         let port = FileSessionPort::new(&cfg);
         let rt = tokio::runtime::Runtime::new().unwrap();
