@@ -4,7 +4,7 @@ Authoritative entry point for any agent starting a new session in
 this repo. Read this first. It tells you what exists, what is
 shipped, and what is next.
 
-## Repo state (2026-09-22)
+## Repo state (2026-09-30)
 
 **Working.** `bin/tui` is the swappable Ratatui TUI front-end for
 the `rushi` kernel. It compiles and runs against the `rushi-common`
@@ -13,6 +13,14 @@ crates.io dep, pinned to `0.1.3` in
 `scripts/tui-pty-smoke.py`. The 2026-09-15 turn-fold re-scope
 landed. The fold now applies in the main view too. Thinking blocks
 start collapsed. The final reply sits in a `Report` panel.
+
+**Turn-fold live tail (2026-09-30, implemented).** While the loop
+is active, the collapsed running turn shows the user box, the tally
+row, and the active tail below it. The active tail is the latest
+active event, an assistant message or tool call. The tally row now
+shows in the transcript, not only in the working row. Idle behavior
+is unchanged. See `tui-turn-fold.md` (kernel in
+`bin/tui/src/fold.rs`).
 
 **Self-wired entry (2026-09-22, issue #22).** The binary is now
 `rushi-tui`, the user-facing entry point. Config discovery uses the
@@ -99,7 +107,7 @@ Method and conventions: `tui-insta-snapshot-testing.md`.
 | `tui-perf-background-build-audit.md` | Audit | 2026-09-13 | Audit of the background build plan and the independent perf test for the 100 ms frame budget. |
 | `tui-perf-streaming-incremental-plan.md` | Spec | 2026-09-13 | Incremental cache for the live streaming block (thinking + text). Eliminates per-frame O(n) re-wrap/re-highlight; subsumes the keep-highlighter-alive optimisation. |
 | `tui-preview-pane-plan.md` | Spec | 2026-09-14 | No-truncation picker preview pane: windowed highlight (only the visible window), cancellable background load, and a size guard so huge ignored files never freeze the TUI. |
-| `tui-turn-fold.md` | Implemented | 2026-09-15 | Three-level fold in both the main and browse views. Thinking starts collapsed. The final reply sits in a title-less `Report` panel. Neovim-style `z` keys. |
+| `tui-turn-fold.md` | Implemented | 2026-09-30 | Three-level fold in both the main and browse views. Thinking starts collapsed. The final reply sits in a title-less `Report` panel. Neovim-style `z` keys. Running-turn live tail. |
 | `tui-handoff-turn-fold-rescope.md` | Closed | 2026-09-15 | Open items for the turn-fold re-scope. All items resolved on 2026-09-15: the `pty_perf` test is green (fine-grained 100 ms poll), the spec and index are updated, bookkeeping is recorded, diff churn is cleaned, clippy is clean across the workspace (the 33-warning backlog was cleared). |
 | `coauthor-guard.md` | Implemented | 2026-09-15 | Blocks co-author trailers not in `.githooks/coauthor-allowlist`, at commit time and at push time. The `commit-msg` and `pre-push` hooks plus the installer script. |
 | `tui-self-wired-entry.md` | Implemented | 2026-09-22 | Issue #22 adaptation: the `rushi-tui` entry command, the shared kernel config-path resolver (`rushi_common::paths`, kernel PR #30), and the self-wired Tier-1 loop (`rushi run <session>`, `--loop-cmd` override). |

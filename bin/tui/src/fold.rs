@@ -7,6 +7,12 @@ pub struct Turn {
     pub final_msg: Option<usize>,
     pub seq: u64,
     pub in_progress: bool,
+    /// The latest active event of an in-progress turn: the newest
+    /// `assistant_message` or `tool_call`. `None` for completed turns
+    /// or a running turn with no active event yet. A collapsed running
+    /// turn shows this event in the transcript (docs/tui-turn-fold.md,
+    /// decision 2026-09-30).
+    pub active_tail: Option<usize>,
 }
 
 pub fn turns(events: &[Event], base_seq: usize, loop_running: bool) -> Vec<Turn> {
@@ -28,12 +34,24 @@ pub fn turns(events: &[Event], base_seq: usize, loop_running: bool) -> Vec<Turn>
             }
         }
         let is_last = k + 1 == users.len();
+        let in_progress = is_last && loop_running;
+        // The latest active event of a running turn (docs/tui-turn-fold.md,
+        // decision 2026-09-30): the newest assistant message or tool call.
+        // A completed turn carries no active tail.
+        let active_tail = if in_progress {
+            (start + 1..end)
+                .rev()
+                .find(|&i| matches!(events[i].kind(), EventKind::AssistantMessage | EventKind::ToolCall))
+        } else {
+            None
+        };
         out.push(Turn {
             start,
             end,
             final_msg,
             seq: (base_seq + start) as u64,
-            in_progress: is_last && loop_running,
+            in_progress,
+            active_tail,
         });
     }
     out
@@ -252,7 +270,16 @@ impl FoldState {
             return true;
         };
         if t.in_progress {
-            return i == t.start || (self.turn_open(t) && Some(i) != t.final_msg);
+            if self.turn_open(t) {
+                // An open live turn shows every event except the
+                // live tail, which the working row carries.
+                return Some(i) != t.final_msg;
+            }
+            // A collapsed live turn shows the user box and the active
+            // tail, the latest active event (assistant message or tool
+            // call). The tally row renders between them
+            // (docs/tui-turn-fold.md, decision 2026-09-30).
+            return i == t.start || Some(i) == t.active_tail;
         }
         if self.turn_open(t) {
             return true;
@@ -260,26 +287,35 @@ impl FoldState {
         i == t.start || Some(i) == t.final_msg
     }
 
-    /// The tally row of a collapsed completed turn, fitted to a column
-    /// budget of `budget` columns.
+    /// The tally row of a collapsed turn, fitted to a column budget of
+    /// `budget` columns.
     ///
     /// The tally text is produced by [`tally_text_fit`]: when the
     /// full text (with the per-hook breakdown) would exceed `budget`,
     /// the compact and hook fields collapse into a single
     /// `hook ×<total>` field (docs/tui-turn-fold.md "Summary line").
     /// Pass `usize::MAX` for the full breakdown. Open turns emit no
-    /// row. The in-progress turn emits none; its live tally merges
-    /// into the working row while the loop runs.
+    /// row. For a collapsed in-progress turn the tally covers the
+    /// hidden events up to the active tail, which renders in the
+    /// transcript below the row (docs/tui-turn-fold.md, decision
+    /// 2026-09-30).
     pub fn collapsed_summary(
         &self,
         events: &[Event],
         t: &Turn,
         budget: usize,
     ) -> Option<SummaryLine> {
-        if self.turn_open(t) || t.in_progress {
+        if self.turn_open(t) {
             return None;
         }
-        let hi = t.final_msg.unwrap_or(t.end);
+        // Completed: tally the hidden events up to the final message.
+        // In-progress: tally the hidden events up to the active tail,
+        // which stays visible below the row.
+        let hi = if t.in_progress {
+            t.active_tail.unwrap_or(t.end)
+        } else {
+            t.final_msg.unwrap_or(t.end)
+        };
         let text = tally_text_fit(events, t.start + 1, hi, budget)?;
         Some(SummaryLine { text })
     }
@@ -636,7 +672,7 @@ mod tests {
     }
 
     #[test]
-    fn in_progress_collapse_hides_live_tail() {
+    fn in_progress_collapse_shows_active_tail() {
         let events = vec![
             user("u1"),
             asst("a1", "starting"),
@@ -646,19 +682,66 @@ mod tests {
         let st = FoldState::new(&events, 1, true, std::collections::HashSet::new());
         let t = st.turns[0].clone();
         assert!(t.in_progress);
+        // The active tail is the newest active event: the tool call.
+        assert_eq!(t.active_tail, Some(2));
+        // A collapsed live turn shows the user box and the active
+        // tail; the intermediate assistant message and the tool
+        // result stay hidden.
         assert!(st.visible(0));
         assert!(!st.visible(1));
-        assert!(!st.visible(2));
+        assert!(st.visible(2));
         assert!(!st.visible(3));
-        // No in-transcript summary row for the live turn.
-        // The tally merges into the working row instead.
-        assert!(st.collapsed_summary(&events, &t, usize::MAX).is_none());
-        // The live tally of the in-progress range, as the working
-        // row displays it.
+        // The in-transcript tally row now covers the hidden events
+        // [start+1, active_tail): only the intermediate assistant
+        // message (the active tool call is shown, so it is not a
+        // hidden step).
+        let sl = st
+            .collapsed_summary(&events, &t, usize::MAX)
+            .expect("the collapsed live turn emits a tally row");
+        assert_eq!(sl.text, "1 msg");
+        // The live tally of the whole in-progress range, as the
+        // working row displays it.
         assert_eq!(
             tally_text(&events, 1, 4).as_deref(),
             Some("1 step \u{b7} bash \u{d7}1 \u{b7} 1 msg")
         );
+    }
+
+    #[test]
+    fn in_progress_collapse_active_tail_is_latest_assistant() {
+        let events = vec![
+            user("u1"),
+            call("c1", "bash"),
+            result("c1"),
+            asst("a1", "still going"),
+        ];
+        let st = FoldState::new(&events, 1, true, std::collections::HashSet::new());
+        let t = st.turns[0].clone();
+        assert_eq!(t.active_tail, Some(3), "the newest active event is the assistant message");
+        // The user box and the active tail are visible; the tool
+        // call and result are hidden.
+        assert!(st.visible(0));
+        assert!(!st.visible(1));
+        assert!(!st.visible(2));
+        assert!(st.visible(3));
+        // The tally row covers the hidden [start+1, active_tail):
+        // the tool call and result, but not the shown assistant.
+        let sl = st
+            .collapsed_summary(&events, &t, usize::MAX)
+            .expect("the collapsed live turn emits a tally row");
+        assert_eq!(sl.text, "1 step \u{b7} bash \u{d7}1");
+    }
+
+    #[test]
+    fn in_progress_collapse_with_no_active_event_shows_user_box_only() {
+        let events = vec![user("u1")];
+        let st = FoldState::new(&events, 1, true, std::collections::HashSet::new());
+        let t = st.turns[0].clone();
+        assert!(t.in_progress);
+        assert_eq!(t.active_tail, None, "no active event yet");
+        assert!(st.visible(0));
+        // No hidden events, so no tally row.
+        assert!(st.collapsed_summary(&events, &t, usize::MAX).is_none());
     }
 
     #[test]
