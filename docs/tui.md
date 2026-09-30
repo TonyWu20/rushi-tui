@@ -521,6 +521,19 @@ second in the main loop. The `[running]` bit shows real loop state,
 not this process's memory. `Ctrl+R` blocks on the probe. `Ctrl+C`
 resolves through the probe when no local handle exists (FT-003).
 
+The liveness probe does not assume the recorded pid is the process
+group leader (issue #26). A `rushi-queue`-spawned loop is the child
+of a `setsid`'d wrapper. The pid the kernel records in `loop.pid`
+is a group member, not the leader. A `kill(-pid, 0)` probe on a
+member fails with `ESRCH`.
+
+The probe and the stop resolve the group from `/proc/<pid>/stat`
+(field 5, the pgrp). They probe and signal that group instead. For
+a TUI-spawned loop the pid is the leader, so the resolution is a
+no-op. When `/proc` is unavailable (macOS), the code treats the
+pid itself as the group. The cmdline session-name check in
+`pid_is_loop` is unchanged.
+
 ### 13.4 Tailer semantics
 
 The tailer tracks a byte offset. It resets on truncation and on

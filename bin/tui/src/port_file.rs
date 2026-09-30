@@ -769,17 +769,11 @@ impl LoopHandle for ProcessLoopHandle {
         {
             return;
         }
-        if group_alive(pid) {
-            unsafe { libc::kill(-pid, libc::SIGTERM) };
-        }
-        // SIGKILL escalation after the grace window. A plain thread:
-        // no runtime is needed to kill a process group.
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_secs(3));
-            if group_alive(pid) {
-                unsafe { libc::kill(-pid, libc::SIGKILL) };
-            }
-        });
+        // Escalating group stop: SIGTERM now, SIGKILL after the grace
+        // window. `group_stop` resolves the process group (a spawned
+        // loop is its own leader, so this is a no-op for it) and
+        // spawns the escalation thread.
+        group_stop(pid);
     }
 
     fn wait_exit(&self) -> i32 {
@@ -832,29 +826,53 @@ fn loop_lock_is_free(session_dir: &Path) -> bool {
     }
 }
 
+/// The process group of `pid` (field 5, the pgrp) read from
+/// `/proc/<pid>/stat`. Returns `None` when `/proc` is unavailable
+/// (macOS) or the pid is already gone. The comm field (in parens)
+/// may hold spaces, so the parse splits at the last closing paren;
+/// the fields after it are `state ppid pgrp ...`, so the pgrp is the
+/// third token. The same parse the `rushi-queue` `pgid` helper uses.
+fn pgrp_of(pid: i32) -> Option<i32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let close = stat.rfind(')')?;
+    stat[close + 1..].split_whitespace().nth(2)?.parse().ok()
+}
+
 fn group_alive(pid: i32) -> bool {
     // Signal 0 checks group existence without delivering anything.
-    // ESRCH: the group is gone (or already reaped).
-    let r = unsafe { libc::kill(-pid, 0) };
+    // ESRCH: the group is gone (or already reaped). A recorded pid
+    // may be a group *member* rather than the leader (a
+    // `rushi-queue`-spawned loop is a child of its `setsid`'d
+    // wrapper), so probe the resolved process group and fall back to
+    // the pid itself when the pgrp is unresolvable (macOS).
+    let group = pgrp_of(pid).unwrap_or(pid);
+    let r = unsafe { libc::kill(-group, 0) };
     r == 0
 }
 
 /// Signal a stopped loop group: SIGTERM now, SIGKILL after a 3 s
-/// grace window. Mirrors the local handle stop escalation.
+/// grace window. Mirrors the local handle stop escalation. Signals
+/// the resolved process group (the recorded pid may be a member, not
+/// the leader), falling back to the pid when the pgrp is unknown.
 fn group_stop(pid: i32) {
+    let group = pgrp_of(pid).unwrap_or(pid);
     if group_alive(pid) {
-        unsafe { libc::kill(-pid, libc::SIGTERM) };
+        unsafe { libc::kill(-group, libc::SIGTERM) };
     }
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(3));
         if group_alive(pid) {
-            unsafe { libc::kill(-pid, libc::SIGKILL) };
+            unsafe { libc::kill(-group, libc::SIGKILL) };
         }
     });
 }
 
-/// A pid is this session's loop when its group is alive and its
-/// command line carries the session name as a whole argument. The
+/// A pid is this session's loop when its process group is alive and
+/// its command line carries the session name as a whole argument.
+/// The liveness probe resolves the group through the pid's pgrp, so
+/// a recorded pid that is a group *member* (a `rushi-queue`-spawned
+/// loop under its `setsid`'d wrapper) passes too; the cmdline
+/// check is the loop's own, whatever its role in the group. The
 /// match is exact: a recycled pid now leading a longer session's
 /// group (the handoff naming makes "s1" a substring of "s1_h1")
 /// must not pass, so it is left alone.
@@ -1207,6 +1225,105 @@ mod tests {
     }
 
     #[test]
+    fn pgrp_of_reads_the_group_field_of_a_live_pid() {
+        let mut sleep = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = sleep.id() as i32;
+        // A plain child shares the test process's group; the
+        // resolver must return exactly that group.
+        let self_pid = std::process::id() as i32;
+        let self_group = pgrp_of(self_pid).unwrap();
+        assert_eq!(pgrp_of(pid), Some(self_group));
+        let _ = sleep.kill();
+        let _ = sleep.wait();
+        // A gone pid has no group to resolve.
+        assert!(pgrp_of(999_999_999).is_none());
+    }
+
+    /// Spawn a `rushi-queue`-style group: the `setsid`'d wrapper is
+    /// the group leader, the loop is the wrapper's *child*, so the
+    /// member's pid is a group member, not the leader. The wrapper
+    /// records both pids (and holds the session lock when `lock` is
+    /// set) and waits on the member. Returns the (leader, member)
+    /// pids and the guard that kills the group on drop; `None` when
+    /// the pids were not recorded (the caller skips).
+    fn spawn_member_group(
+        dir: &Path,
+        session: &str,
+        lock: bool,
+    ) -> Option<(i32, i32, LoopGroupGuard)> {
+        let leader_file = dir.join("leader.pid");
+        let member_file = dir.join("member.pid");
+        let lock_path = dir.join(LOOP_LOCK_FILE);
+        let flock = if lock {
+            format!("exec 9>'{}'; flock -x 9; ", lock_path.display())
+        } else {
+            String::new()
+        };
+        let inner = format!(
+            "{flock}echo $$ > {leader}; \
+             sh -c 'while :; do sleep 1; done' {session} & \
+             echo $! > {member}; wait",
+            leader = leader_file.display(),
+            member = member_file.display(),
+        );
+        let child = std::process::Command::new("setsid")
+            .args(["bash", "-c", &inner, session])
+            .spawn()
+            .unwrap();
+        // Hold the guard before any early return, so the group is
+        // killed and the child reaped on every path.
+        let mut guard = LoopGroupGuard {
+            child: Some(child),
+            leader: 0,
+        };
+        // The wrapper records its pid and the member's before
+        // waiting; poll for both.
+        for _ in 0..100 {
+            if leader_file.exists() && member_file.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let leader = std::fs::read_to_string(&leader_file)
+            .ok()
+            .and_then(|r| r.trim().parse().ok())?;
+        let member = std::fs::read_to_string(&member_file)
+            .ok()
+            .and_then(|r| r.trim().parse().ok())?;
+        guard.leader = leader;
+        Some((leader, member, guard))
+    }
+
+    #[test]
+    fn pid_is_loop_claims_a_group_member_not_the_leader() {
+        let c = make_cfg(None);
+        let dir = c.dir.path().join("sessions").join("s-member");
+        let _ = std::fs::create_dir_all(&dir);
+        let Some((leader, member, _guard)) = spawn_member_group(&dir, "s-member", false) else {
+            eprintln!("SKIPPED: the member group was not observable here");
+            return;
+        };
+        // The recorded pid is a member: not the group leader itself.
+        assert_ne!(member, leader, "the recorded pid must not be the leader");
+        // The resolver maps the member back to the wrapper's group.
+        assert_eq!(pgrp_of(member), Some(leader));
+        // The old `kill(-member, 0)` probe is ESRCH on a member; the
+        // pgrp-resolving probe must claim it. The member's own
+        // command line names the session (the `sh -c` argument list).
+        assert!(
+            pid_is_loop(member, "s-member"),
+            "a live group member naming the session passes"
+        );
+        assert!(
+            !pid_is_loop(member, "other"),
+            "a different session must not pass"
+        );
+    }
+
+    #[test]
     fn stop_external_loop_kills_a_live_orphan_group() {
         let c = make_cfg(None);
         let sid = SessionId::new("s-reattach");
@@ -1277,6 +1394,46 @@ mod tests {
             "the orphan group leader must die within the escalation window"
         );
         // the guard kills the group and reaps the child on drop
+    }
+
+    #[test]
+    fn external_loop_pid_claims_a_group_member() {
+        let c = make_cfg(None);
+        let sid = SessionId::new("s-member");
+        let dir = c.dir.path().join("sessions").join("s-member");
+        let _ = std::fs::create_dir_all(&dir);
+        // The `rushi-queue` shape: the wrapper (group leader) holds
+        // the session lock; the loop is the wrapper's child, and the
+        // recorded pid in `loop.pid` is that child's.
+        let Some((leader, member, _guard)) = spawn_member_group(&dir, "s-member", true) else {
+            eprintln!("SKIPPED: the member group was not observable here");
+            return;
+        };
+        assert_ne!(member, leader, "the recorded pid must not be the leader");
+        std::fs::write(dir.join("loop.pid"), format!("{member}\n")).unwrap();
+        // The FT-003 reattach probe: a group-member pid that names
+        // the session must be claimable, not just a leader pid.
+        assert_eq!(
+            c.port.external_loop_pid(&sid).unwrap(),
+            Some(member),
+            "a group-member pid naming the session passes the probe"
+        );
+        // Stopping resolves the group and kills wrapper and member.
+        let msg = c.port.stop_external_loop(&sid).unwrap();
+        assert!(msg.is_some(), "the stop reports the claimed member pid");
+        let mut dead = false;
+        for _ in 0..35 {
+            if proc_is_dead_or_zombie(member) && proc_is_dead_or_zombie(leader) {
+                dead = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(
+            dead,
+            "the group member and its leader must die within the escalation window"
+        );
+        // the guard reaps the child on drop
     }
 
     /// A pid is dead when /proc/<pid> is gone or the process is a
