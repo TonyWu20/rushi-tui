@@ -2,7 +2,7 @@
 
 Status: Implemented. The user locked the design on 2026-09-14 and
 re-scoped it on 2026-09-15. This doc records the design and every
-confirmed decision.
+confirmed decision. A live-tail decision is pending from 2026-09-30.
 
 The kernel lives in `bin/tui/src/fold.rs` (pure, no `App`
 dependency). The fold state, keys, and cursor remap live on `App`.
@@ -135,10 +135,9 @@ entirely.
 
 ## Running turn
 
-The in-progress turn is folded by default. It shows the user box
-and the live tail, not the full intermediate steps. The live tally
-merges into the working row instead of a separate in-transcript
-spinner line. There is no separate in-transcript spinner row.
+The in-progress turn is folded by default. A collapsed running turn
+shows the user box only. The live tail stays hidden. The live tally
+merges into the working row, not into an in-transcript row.
 
 The working row reads the phase label plus the live tally, for
 example:
@@ -201,6 +200,31 @@ on 2026-09-15, and the tally extension on 2026-09-20.
 - On overflow the tally collapses the compact and hook fields into
   one `hook ×<total>` field. The TUI has no multi-row widget for the
   tally row, so no second-row wrap (2026-09-20 decision).
+
+## Pending decision (2026-09-30): live tail for a running turn
+
+The default folded view of a running turn shows only the user
+message. The final assistant message shows only when the loop is
+idle. This is the behavior in `FoldState::visible`
+(`bin/tui/src/fold.rs`), asserted by the test
+`in_progress_collapse_hides_live_tail`.
+
+Decision 2026-09-30: while the loop is active, the collapsed running
+turn shows the user box, the tally row, and the active tail. The
+active tail sits below the tally. The active tail is the latest
+active event, an assistant message or tool call.
+
+The tally row now shows in the transcript for a running turn. It is
+not only in the working row. The idle behavior is unchanged. A
+completed turn still shows only its final message. The working-row
+tally stays.
+
+The change lands in `FoldState::visible` and the fold-aware build in
+`render.rs`. `Turn.in_progress` already marks the running turn, so
+no new event type is needed. `collapsed_summary` must emit a row for
+the in-progress turn. The snapshot
+`snap_turn_fold_in_progress_spinner` must re-baseline once the live
+tail renders.
 
 ## Build and test plan
 

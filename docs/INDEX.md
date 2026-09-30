@@ -4,7 +4,7 @@ Authoritative entry point for any agent starting a new session in
 this repo. Read this first. It tells you what exists, what is
 shipped, and what is next.
 
-## Repo state (2026-09-22)
+## Repo state (2026-09-30)
 
 **Working.** `bin/tui` is the swappable Ratatui TUI front-end for
 the `rushi` kernel. It compiles and runs against the `rushi-common`
@@ -13,6 +13,14 @@ crates.io dep, pinned to `0.1.3` in
 `scripts/tui-pty-smoke.py`. The 2026-09-15 turn-fold re-scope
 landed. The fold now applies in the main view too. Thinking blocks
 start collapsed. The final reply sits in a `Report` panel.
+
+**Turn-fold live tail (2026-09-30).** The default fold view hides the
+live tail of a running turn. A collapsed running turn shows only the
+user message. The final assistant message shows only when the loop is
+idle. Decision 2026-09-30: when the loop is active, show the tally
+row, and show the active tail below the tally row. The active tail
+is the latest active message or tool call. This is a next work item
+for `tui-turn-fold.md` (kernel in `bin/tui/src/fold.rs`).
 
 **Self-wired entry (2026-09-22, issue #22).** The binary is now
 `rushi-tui`, the user-facing entry point. Config discovery uses the
