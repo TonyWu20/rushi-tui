@@ -2,7 +2,8 @@
 
 Status: Implemented. The user locked the design on 2026-09-14 and
 re-scoped it on 2026-09-15. This doc records the design and every
-confirmed decision. A live-tail decision is pending from 2026-09-30.
+confirmed decision. The live-tail decision of 2026-09-30 is
+confirmed and implemented.
 
 The kernel lives in `bin/tui/src/fold.rs` (pure, no `App`
 dependency). The fold state, keys, and cursor remap live on `App`.
@@ -42,7 +43,9 @@ A turn starts at a `user_message` event and ends at the next one
 or the log end. The final message is the last `assistant_message`
 with content. The kernel guarantees a completed turn ends that way.
 An in-progress turn tracks its last assistant message as the live
-tail.
+tail. It also tracks the active tail: the latest active event, an
+`assistant_message` or a `tool_call`. In the collapsed view the
+active tail renders below the tally row.
 
 ## Tally line
 
@@ -135,9 +138,14 @@ entirely.
 
 ## Running turn
 
-The in-progress turn is folded by default. A collapsed running turn
-shows the user box only. The live tail stays hidden. The live tally
-merges into the working row, not into an in-transcript row.
+The in-progress turn is folded by default. While the loop is active,
+the collapsed running turn shows the user box, the tally row, and the
+active tail below the tally. The active tail is the latest active
+event, an assistant message or a tool call.
+
+The tally row shows in the transcript for a running turn. It is not
+only in the working row. The working-row tally stays. The idle
+behavior is unchanged. A completed turn shows only its final message.
 
 The working row reads the phase label plus the live tally, for
 example:
@@ -176,7 +184,8 @@ session starts all folded.
 ## Confirmed decisions
 
 The user confirmed the original design on 2026-09-14, the re-scope
-on 2026-09-15, and the tally extension on 2026-09-20.
+on 2026-09-15, the tally extension on 2026-09-20, and the live-tail
+decision on 2026-09-30.
 
 - The fold applies in all loop states, running or idle.
 - The fold applies in the main view and browse mode alike.
@@ -200,14 +209,15 @@ on 2026-09-15, and the tally extension on 2026-09-20.
 - On overflow the tally collapses the compact and hook fields into
   one `hook ×<total>` field. The TUI has no multi-row widget for the
   tally row, so no second-row wrap (2026-09-20 decision).
+- Live tail of a running turn (2026-09-30 decision). While the loop
+  is active, the collapsed running turn shows the user box, the tally
+  row, and the active tail. The active tail is the latest active
+  event, an assistant message or tool call. It sits below the tally.
+  The tally row also shows in the transcript, not only in the
+  working row. The working-row tally stays, and idle behavior is
+  unchanged.
 
-## Pending decision (2026-09-30): live tail for a running turn
-
-The default folded view of a running turn shows only the user
-message. The final assistant message shows only when the loop is
-idle. This is the behavior in `FoldState::visible`
-(`bin/tui/src/fold.rs`), asserted by the test
-`in_progress_collapse_hides_live_tail`.
+## Live tail for a running turn (2026-09-30 decision)
 
 Decision 2026-09-30: while the loop is active, the collapsed running
 turn shows the user box, the tally row, and the active tail. The
@@ -221,10 +231,10 @@ tally stays.
 
 The change lands in `FoldState::visible` and the fold-aware build in
 `render.rs`. `Turn.in_progress` already marks the running turn, so
-no new event type is needed. `collapsed_summary` must emit a row for
-the in-progress turn. The snapshot
-`snap_turn_fold_in_progress_spinner` must re-baseline once the live
-tail renders.
+no new event type is needed. `Turn.active_tail` holds the index of
+that latest active event. `collapsed_summary` emits a row for the
+in-progress turn. The snapshots `snap_turn_fold_in_progress_spinner`
+and `snap_running_loop_indicator` re-baselined.
 
 ## Build and test plan
 
