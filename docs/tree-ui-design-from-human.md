@@ -250,14 +250,30 @@ path.
   `user_message` target uses `before` mode and restores the message to the
   input box unsent. Every other target uses `on`. A busy loop blocks the
   commit with the "loop busy, wait for the step" hint.
-- **Summarize the branch / with custom prompt** — shown in the option
-  list as "pending kernel". No-op until the kernel's `bin/compact`
-  branch mode lands. The existing `bin/compact --up-to`/`--prompt`
-  flags have compact-prefix meaning. That is the opposite of the
-  pi-aligned branch summarize above, so they are not wired into this
-  flow. The TUI help strings in `tree_option_items`
-  (`bin/tui/src/app.rs`) were reworded 2026-09-16 to the branch-
-  summarize flow.
+- **Summarize the branch / with custom prompt** — wired end to end
+  2026-09-30, after the kernel landed the `bin/compact --branch`
+  mode in `53b0a47` (issue #22, PR #32). Committing `Summarize the
+  branch` spawns `bin/compact <session> --branch` as a child process.
+  Committing `Summarize with custom prompt` arms a transient prompt
+  capture. The next Enter submits the typed text as the `--prompt`
+  instruction. Esc cancels and keeps the typed text as a plain draft.
+  - Guards: both outcomes need the loop to be idle. A busy loop
+    flashes "loop busy, wait for the step". The picked event must
+    sit on the active path. The kernel derives the abandoned span
+    from the last top-level `rewind` marker on that path. No
+    `rewind` marker is appended.
+  - Run: while the child runs, the status line shows a "branch
+    summarizing" indicator. On success the kernel appends a
+    `compaction_summary` marker carrying `branch_of`. The log watcher
+    re-renders it into the transcript as a "branch summarized" leaf.
+    On a failed summary call the kernel appends `compaction_failed`,
+    and the status line shows the error.
+  - Binary resolution: the kernel binary resolves from the new
+    optional `[tui] compact_cmd` config key. Absent, it is the
+    sibling `compact` of the loop command, the bare `compact` on PATH
+    in the Nix/PATH layout. The existing `bin/compact
+    --up-to`/`--prompt` flags keep their compact-prefix meaning and
+    stay out of this flow.
 - Tree indentation (`└─`, 3 spaces per level, post-fork) is now
   rendered. The `TreeList` stage draws the event log through a
   `tui-treelistview` table instead of a flat list.

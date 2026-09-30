@@ -2887,6 +2887,7 @@ mod tests {
             clipboard_unnamed: false,
             sessions_root: root.join("sessions"),
             loop_cmd: None,
+            compact_cmd: None,
             config_dir: root.to_path_buf(),
             config_path: root.join("config.toml"),
             ext_dirs: Vec::new(),

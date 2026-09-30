@@ -32,6 +32,7 @@ mod vim_editor;
 mod snapshot_tests;
 
 use std::io::Write;
+use std::process::Child;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use std::time::Instant;
@@ -622,6 +623,10 @@ fn main() {
 
     let mut last_width: usize = 0;
     let mut last_loop_probe = Instant::now();
+    // The TUI-spawned branch-summarize child (`bin/compact --branch`,
+    // docs/tree-ui-design-from-human.md). One at a time; `try_wait`
+    // reaps it each frame and clears the status-line indicator.
+    let mut branch_compact: Option<Child> = None;
     // Catch SIGTERM, SIGINT, and SIGHUP so a signalled quit still
     // stops the extension groups (docs/ui-extension.md section 7).
     install_shutdown_handlers();
@@ -634,6 +639,29 @@ fn main() {
             let _ = app.detach_all_handles();
             host.stop();
             return finish(&mut term);
+        }
+        // 0. Reap the branch-summarize child when it exits. Its
+        // appended marker (`compaction_summary` with `branch_of`, or
+        // `compaction_failed`) lands in the log either way; the watch
+        // re-renders it into the transcript (docs/tree-ui-design-
+        // from-human.md).
+        if let Some(child) = branch_compact.as_mut() {
+            if let Ok(Some(status)) = child.try_wait() {
+                branch_compact = None;
+                app.set_branch_compacting(false);
+                if status.success() {
+                    app.flash("branch summarized");
+                } else {
+                    app.flash(format!("branch summarize failed ({status})"));
+                }
+                trace(
+                    &rt,
+                    &port,
+                    app.active(),
+                    "branch_compact",
+                    &format!("branch compact child exited: {status}"),
+                );
+            }
         }
         // 1. New log events for the active session.
         while let Some(item) = app.drain_watch() {
@@ -1470,6 +1498,75 @@ fn main() {
                         }
                     }
                 }
+                // Branch-summarize outcome (docs/tree-ui-design-from-
+                // human.md): spawn the kernel's `bin/compact --branch`,
+                // which summarizes the open span abandoned by the last
+                // top-level `rewind` and appends one branch
+                // `compaction_summary` marker on the active path (with
+                // `--prompt` replacing the default instruction). No
+                // `rewind` marker is appended.
+                Action::BranchSummarize { prompt } => {
+                    let Some(sid) = app.active().cloned() else {
+                        continue;
+                    };
+                    // The idle-loop guard was already applied at commit
+                    // time; re-check: a run may have started since.
+                    if app.loop_running(&sid) {
+                        app.flash("loop busy, wait for the step");
+                        continue;
+                    }
+                    let session_dir = match port.session_dir(&sid) {
+                        Ok(d) => d,
+                        Err(e) => {
+                            app.flash(format!("branch summarize failed: {e}"));
+                            continue;
+                        }
+                    };
+                    let compact_bin = cfg.resolve_compact();
+                    let has_prompt = prompt.is_some();
+                    let mut cmd = std::process::Command::new(&compact_bin);
+                    cmd.arg(&session_dir)
+                        .arg("--branch")
+                        .arg("--config")
+                        .arg(&cfg.config_path);
+                    if let Some(p) = prompt.as_ref() {
+                        cmd.arg("--prompt").arg(p);
+                    }
+                    match cmd.spawn() {
+                        Ok(child) => {
+                            // One compact at a time: reap a still-running
+                            // previous child before replacing it.
+                            if let Some(mut prev) = branch_compact.take() {
+                                let _ = prev.wait();
+                            }
+                            branch_compact = Some(child);
+                            app.set_branch_compacting(true);
+                            app.flash("branch summarizing…");
+                            trace(
+                                &rt,
+                                &port,
+                                Some(&sid),
+                                "branch_compact",
+                                &format!(
+                                    "spawned {} --branch{} (session {})",
+                                    compact_bin.display(),
+                                    if has_prompt { " --prompt <…>" } else { "" },
+                                    sid
+                                ),
+                            );
+                        }
+                        Err(e) => {
+                            app.flash(format!("branch compact spawn failed: {e}"));
+                            trace(
+                                &rt,
+                                &port,
+                                Some(&sid),
+                                "branch_compact",
+                                &format!("spawn {compact_bin:?} failed: {e}"),
+                            );
+                        }
+                    }
+                }
             }
         }
 
@@ -1886,6 +1983,7 @@ mod resync_tests {
             clipboard_unnamed: false,
             sessions_root: root.join("sessions"),
             loop_cmd: None,
+            compact_cmd: None,
             config_dir: root.clone(),
             config_path: root.join("config.toml"),
             active_model: None,

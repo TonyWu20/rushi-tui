@@ -174,6 +174,16 @@ pub enum Action {
         mode: String,
         restore_text: Option<String>,
     },
+    /// Branch-summarize outcome (docs/tree-ui-design-from-human.md):
+    /// spawn `bin/compact <session> --branch` to summarize the
+    /// abandoned branch of the last top-level `rewind` and append one
+    /// branch `compaction_summary` marker on the active path. `prompt`
+    /// is the user's custom summarize instruction when the
+    /// "Summarize with custom prompt" outcome was picked; `None` uses
+    /// the kernel's default instruction.
+    BranchSummarize {
+        prompt: Option<String>,
+    },
 }
 
 /// The oldest pending `approval_request` in the active session log.
@@ -493,6 +503,17 @@ pub struct App {
     events_version: u64,
     events_base_seq: usize,
     view_only_target: Option<usize>,
+    /// Transient branch-summarize prompt capture (docs/tree-ui-
+    /// design-from-human.md, "Summarize with custom prompt"). Set when
+    /// the user commits that outcome; the next Enter submits the
+    /// draft as the `--prompt` text, Esc cancels. No port action is
+    /// emitted while it is armed: the options window is already closed.
+    branch_prompt_armed: bool,
+    /// True while a TUI-spawned `bin/compact --branch` child is
+    /// running (docs/tree-ui-design-from-human.md). The status line
+    /// shows a "branch summarizing" indicator for as long as this is
+    /// set; main clears it when the child reaps.
+    branch_compacting: bool,
     /// The cached transcript build (see `TranscriptCache`).
     transcript_cache: Option<TranscriptCache>,
     /// The incremental live-stream block cache. See
@@ -812,6 +833,8 @@ impl App {
             events_version: 0,
             events_base_seq: 1,
             view_only_target: None,
+            branch_prompt_armed: false,
+            branch_compacting: false,
             transcript_cache: None,
             stream_block_cache: None,
             transcript_worker: None,
@@ -1535,6 +1558,10 @@ impl App {
             self.z_fold_arm = None;
             self.fold_cursor_target = None;
             self.last_event_line_starts.clear();
+            // A new session voids an armed branch-summarize prompt
+            // capture: the typed instruction was meant for the old
+            // session and must not submit against the new one.
+            self.disarm_branch_prompt();
         }
         self.active = Some(id);
         self.events = events;
@@ -3604,8 +3631,8 @@ impl App {
                 id: "summarize-branch".into(),
                 label: "Summarize the branch".into(),
                 kind: CmdKind::Run,
-                hint: "pending kernel".into(),
-                help: "Summarize the abandoned branch and append the summary as a new leaf. Spawns `bin/compact --branch`. Pending the kernel mode.".into(),
+                hint: String::new(),
+                help: "Summarize the abandoned branch and append the summary as a new leaf on the active path. Spawns `bin/compact --branch`. Requires the loop to be idle.".into(),
                 options: Vec::new(),
                 ext: None,
                 preview_kind: crate::palette::items::PreviewKind::Plain,
@@ -3616,8 +3643,8 @@ impl App {
                 id: "summarize-custom".into(),
                 label: "Summarize with custom prompt".into(),
                 kind: CmdKind::Run,
-                hint: "pending kernel".into(),
-                help: "Summarize the abandoned branch with a custom instruction. Spawns `bin/compact --branch --prompt`. Pending the kernel mode.".into(),
+                hint: String::new(),
+                help: "Type a custom summarize instruction; the next Enter sends it to `bin/compact --branch --prompt`, Esc cancels. Requires the loop to be idle.".into(),
                 options: Vec::new(),
                 ext: None,
                 preview_kind: crate::palette::items::PreviewKind::Plain,
@@ -3821,13 +3848,58 @@ impl App {
                 }]
             }
             "summarize-branch" | "summarize-custom" => {
-                // Not wired yet: the kernel gains the branch-summarize
-                // primitive (summary of the abandoned branch appended as
-                // a new leaf; docs/tree-ui-design-from-human.md). Keep
-                // the options open so the user can fall back to View-only
-                // or Rewind without summary.
-                self.flash("branch summarize is pending the kernel primitive");
-                Vec::new()
+                // The two summarize outcomes append a log event and
+                // need an idle loop (docs/tree-ui-design-from-human.md).
+                let busy = self
+                    .active
+                    .as_ref()
+                    .is_some_and(|sid| self.loop_running(sid));
+                if busy {
+                    self.flash("loop busy, wait for the step");
+                    return Vec::new();
+                }
+                // Summarize targets the abandoned branch of the last
+                // top-level rewind, so the picked event must sit on the
+                // active path (pi-alignment correction). No rewind marker
+                // means no abandoned branch to summarize.
+                match self.rewind_active_ranges() {
+                    None => {
+                        self.flash("no abandoned branch to summarize (no rewind marker)");
+                        return Vec::new();
+                    }
+                    Some(ranges) => {
+                        if !rushi_common::rewind::seq_in_ranges(seq, &ranges) {
+                            self.flash(
+                                "pick an active-path event to summarize its branch",
+                            );
+                            return Vec::new();
+                        }
+                    }
+                }
+                match id {
+                    "summarize-branch" => {
+                        // Default instruction: close the options and let
+                        // main spawn `bin/compact --branch`.
+                        self.palette_state_mut().close();
+                        vec![Action::BranchSummarize { prompt: None }]
+                    }
+                    "summarize-custom" => {
+                        // Enter the transient prompt-capture state: the
+                        // options window closes, the editor drops to
+                        // insert mode, and the next Enter submits the
+                        // typed text as the `--prompt` instruction
+                        // (Esc cancels). No port action is emitted now:
+                        // main spawns the compact on the Enter.
+                        self.palette_state_mut().close();
+                        self.editor.mode = Mode::Insert;
+                        self.branch_prompt_armed = true;
+                        self.flash(
+                            "branch summarize: type the instruction, Enter sends, Esc cancels",
+                        );
+                        Vec::new()
+                    }
+                    _ => Vec::new(),
+                }
             }
             _ => Vec::new(),
         }
@@ -4269,6 +4341,24 @@ impl App {
             .and_then(|(msg, at)| (at.elapsed() < STATUS_TTL).then_some(msg.as_str()))
     }
 
+    /// Set the branch-compaction indicator (docs/tree-ui-design-from-
+    /// human.md): the status line shows "branch summarizing" for as
+    /// long as a TUI-spawned `bin/compact --branch` child is running.
+    pub fn set_branch_compacting(&mut self, running: bool) {
+        self.branch_compacting = running;
+    }
+
+    /// Whether a branch-compact child is in flight.
+    pub fn branch_compacting(&self) -> bool {
+        self.branch_compacting
+    }
+
+    /// Disarm the branch-summarize prompt capture (also called on a
+    /// new session so a stale armed state cannot leak across sessions).
+    pub fn disarm_branch_prompt(&mut self) {
+        self.branch_prompt_armed = false;
+    }
+
     // ── key handling ────────────────────────────────────────────
 
     /// Handle one key. Returns the port-level actions for `main` to
@@ -4658,6 +4748,39 @@ impl App {
                 // Tab / BackTab are free: reserved for a future
                 // session-navigation design. No-op for now.
                 Key::Tab | Key::BackTab => {}
+                _ => {}
+            }
+        }
+        // The branch-summarize prompt capture (docs/tree-ui-
+        // design-from-human.md, "Summarize with custom prompt"). After
+        // that outcome is committed, the draft box is the prompt
+        // input. Enter submits it, Esc cancels; every other key
+        // falls through to the editor so typing builds the prompt.
+        if self.branch_prompt_armed {
+            match key {
+                Key::Enter => {
+                    let text = self.take_draft();
+                    self.branch_prompt_armed = false;
+                    if text.is_empty() {
+                        // Nothing typed: keep the capture live so the
+                        // user can still type an instruction.
+                        self.branch_prompt_armed = true;
+                        self.flash("empty prompt — type a summarize instruction, Enter sends");
+                        return Vec::new();
+                    }
+                    // Hand the instruction to main, which spawns
+                    // `bin/compact --branch --prompt <text>`.
+                    return vec![Action::BranchSummarize {
+                        prompt: Some(text),
+                    }];
+                }
+                Key::Esc => {
+                    self.branch_prompt_armed = false;
+                    // The typed text is kept in the box as a plain
+                    // draft; only the prompt capture is cancelled.
+                    self.flash("branch summarize cancelled — text kept as draft");
+                    return Vec::new();
+                }
                 _ => {}
             }
         }
