@@ -12,10 +12,10 @@
     # checkout required). `rushi-common` is a crates.io dep pinned to
     # 0.1.5 in bin/tui/Cargo.toml, resolved by cargo at build time,
     # so no raw source-tree input is needed here.
-    rushi-kernel = { url = "github:TonyWu20/rushi"; };
+    rushi-config = { url = "git+ssh://git@github.com/TonyWu20/rushi-config"; };
   };
 
-  outputs = { self, nixpkgs, fenix, rushi-kernel, ... }:
+  outputs = { self, nixpkgs, fenix, rushi-config, ... }:
     let
       # Explicit system list instead of eachDefaultSystem (same reason
       # as the kernel flake: eachDefaultSystem transposes the result and
@@ -37,7 +37,7 @@
             "rustfmt"
             "rust-analyzer"
           ]);
-          rushiPkg = rushi-kernel.packages.${system}.default;
+          rushiPkg = rushi-config.packages.${system}.default;
           moldStdenv = pkgs.stdenvAdapters.useMoldLinker pkgs.clangStdenv;
 
           # TUI package ($out/bin/rushi-tui contract, ext-flake-authoring.md
