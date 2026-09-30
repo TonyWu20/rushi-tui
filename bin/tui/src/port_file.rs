@@ -13,7 +13,7 @@
 //! layout (docs/tui.md section 10, guardrail 3). A source-scan test in
 //! `main.rs` enforces that.
 
-use crate::config::{LoopCommand, TuiConfig};
+use crate::config::{default_loop_cmd, LoopCommand, TuiConfig};
 use crate::event::{Event, EventKind};
 use crate::port::{BusError, LoopHandle, LoopLine, SessionId, SessionPort, TailCursor, WatchItem};
 
@@ -106,6 +106,24 @@ impl FileSessionPort {
         Ok(Some(pid))
     }
 
+    /// The executable basename the macOS loop-probe identity check
+    /// expects. Resolved from the configured `[loop]` command so a
+    /// custom `[loop]` binary is claimed, not just the Tier-1 `rushi`.
+    /// Falls back to the Tier-1 default when `[loop]` is unset. The
+    /// basename of a bare command (`rushi`) is itself; of a path it is
+    /// the final component.
+    fn loop_exec_basename(&self) -> String {
+        let command = self
+            .loop_cmd
+            .as_ref()
+            .map(|lc| lc.command.clone())
+            .unwrap_or_else(|| default_loop_cmd().command);
+        Path::new(&command)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or(command)
+    }
+
     /// Probe for a live loop of this session. Lock-first: attempts a
     /// non-blocking `flock` on `sessions/<name>/.loop.lock`. If the
     /// lock is free, no live loop exists and the probe returns
@@ -120,7 +138,8 @@ impl FileSessionPort {
         let Some(pid) = self.read_loop_pid(session)? else {
             return Ok(None);
         };
-        if pid_is_loop(pid, session.as_str()) {
+        let loop_name = self.loop_exec_basename();
+        if pid_is_loop(pid, session.as_str(), &loop_name) {
             Ok(Some(pid))
         } else {
             Ok(None)
@@ -141,7 +160,8 @@ impl FileSessionPort {
         let Some(pid) = self.read_loop_pid(session)? else {
             return Ok(None);
         };
-        if !pid_is_loop(pid, session.as_str()) {
+        let loop_name = self.loop_exec_basename();
+        if !pid_is_loop(pid, session.as_str(), &loop_name) {
             return Ok(None);
         }
         group_stop(pid);
@@ -826,16 +846,16 @@ fn loop_lock_is_free(session_dir: &Path) -> bool {
     }
 }
 
-/// The process group of `pid` (field 5, the pgrp) read from
-/// `/proc/<pid>/stat`. Returns `None` when `/proc` is unavailable
-/// (macOS) or the pid is already gone. The comm field (in parens)
-/// may hold spaces, so the parse splits at the last closing paren;
-/// the fields after it are `state ppid pgrp ...`, so the pgrp is the
-/// third token. The same parse the `rushi-queue` `pgid` helper uses.
+/// The process group of `pid`, resolved portably via `getpgid`.
+/// Returns `None` when the pid is gone or unresolvable (`getpgid`
+/// yields `-1`). Works for a group *member* as well as the leader, so
+/// a recorded pid that is a member (a `rushi-queue`-spawned loop under
+/// its `setsid`'d wrapper) still resolves to the wrapper's group.
+/// This replaces the old `/proc/<pid>/stat` parse, which is
+/// unavailable on macOS.
 fn pgrp_of(pid: i32) -> Option<i32> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let close = stat.rfind(')')?;
-    stat[close + 1..].split_whitespace().nth(2)?.parse().ok()
+    let group = unsafe { libc::getpgid(pid) };
+    (group > 0).then_some(group)
 }
 
 fn group_alive(pid: i32) -> bool {
@@ -868,24 +888,70 @@ fn group_stop(pid: i32) {
 }
 
 /// A pid is this session's loop when its process group is alive and
-/// its command line carries the session name as a whole argument.
-/// The liveness probe resolves the group through the pid's pgrp, so
-/// a recorded pid that is a group *member* (a `rushi-queue`-spawned
-/// loop under its `setsid`'d wrapper) passes too; the cmdline
-/// check is the loop's own, whatever its role in the group. The
-/// match is exact: a recycled pid now leading a longer session's
-/// group (the handoff naming makes "s1" a substring of "s1_h1")
-/// must not pass, so it is left alone.
-fn pid_is_loop(pid: i32, session: &str) -> bool {
+/// the identity check below passes. The liveness probe resolves the
+/// group through `getpgid`, so a recorded pid that is a group
+/// *member* (a `rushi-queue`-spawned loop under its `setsid`'d
+/// wrapper) passes too.
+fn pid_is_loop(pid: i32, session: &str, loop_name: &str) -> bool {
     if !group_alive(pid) {
         return false;
     }
-    let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
+    loop_identity_ok(pid, session, loop_name)
+}
+
+/// The identity half of the loop probe: confirm a live pid is a loop,
+/// not a recycled unrelated process. The per-session `.loop.lock`
+/// `flock` is the primary session binding; this is the recycled-pid
+/// guard on top of it.
+///
+/// - Linux: the session name must appear as a *whole* argument in
+///   `/proc/<pid>/cmdline` (a substring must not pass: the handoff
+///   naming makes "s1" a substring of "s1_h1").
+/// - macOS: `/proc` is unavailable. Confirm the executable basename
+///   (via `proc_pidpath`) equals the expected loop program name
+///   (`loop_name`, from the configured `[loop]` command). A recycled
+///   pid is overwhelmingly likely to be a different process.
+#[allow(unused_variables)]
+fn loop_identity_ok(pid: i32, session: &str, loop_name: &str) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        loop_binary_matches(pid, loop_name)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
+            return false;
+        };
+        cmdline.split(|b| *b == 0).any(|arg| arg == session.as_bytes())
+    }
+}
+
+/// The executable basename (via `proc_pidpath`) equals `loop_name`
+/// when the path resolves and the final component matches.
+#[cfg(target_os = "macos")]
+fn loop_binary_matches(pid: i32, loop_name: &str) -> bool {
+    let Some(path) = proc_exec_path(pid) else {
         return false;
     };
-    cmdline
-        .split(|b| *b == 0)
-        .any(|arg| arg == session.as_bytes())
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|name| name == loop_name)
+}
+
+/// The executable path of `pid` on macOS, via `proc_pidpath`
+/// (libSystem). Returns `None` when the process is gone or the read
+/// fails.
+#[cfg(target_os = "macos")]
+fn proc_exec_path(pid: i32) -> Option<PathBuf> {
+    extern "C" {
+        fn proc_pidpath(pid: i32, buffer: *mut u8, buffersize: u32) -> i32;
+    }
+    let mut buf = [0u8; 4096];
+    let n = unsafe { proc_pidpath(pid, buf.as_mut_ptr(), buf.len() as u32) };
+    if n <= 0 {
+        return None;
+    }
+    std::str::from_utf8(&buf[..n as usize]).ok().map(PathBuf::from)
 }
 
 impl TailCursor {
@@ -970,11 +1036,15 @@ mod tests {
     /// RAII guard that kills a `setsid` process group and reaps the
     /// direct child on drop, so no `while :; do sleep 1; done` loop
     /// leaks into init when a test skips, fails, or is interrupted.
+    /// Linux-only: the fake-loop groups it guards use `setsid` and
+    /// the `flock` CLI, neither of which is on macOS.
+    #[cfg(target_os = "linux")]
     struct LoopGroupGuard {
         child: Option<std::process::Child>,
         leader: i32,
     }
 
+    #[cfg(target_os = "linux")]
     impl Drop for LoopGroupGuard {
         fn drop(&mut self) {
             let leader = if self.leader > 0 {
@@ -1108,6 +1178,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn external_loop_pid_reports_a_live_orphan_group() {
         let c = make_cfg(None);
         let sid = SessionId::new("s-probe");
@@ -1173,10 +1244,105 @@ mod tests {
     #[test]
     fn pid_is_loop_rejects_a_dead_pid() {
         // A pid above the system range cannot be this loop's group.
-        assert!(!pid_is_loop(999_999_999, "s1"));
+        assert!(!pid_is_loop(999_999_999, "s1", "rushi"));
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
+    fn macos_identity_helpers_on_a_live_non_rushi_process() {
+        // Smoke-test the macOS-only helpers against a live process.
+        let mut sleep = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = sleep.id() as i32;
+        // The liveness half resolves the group and finds it alive.
+        assert!(group_alive(pid));
+        // Poll for the exec to settle: right after `spawn` the child is
+        // between fork and exec and still reports this test binary.
+        let self_exe = std::env::current_exe().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let mut settled = false;
+        while std::time::Instant::now() < deadline {
+            match proc_exec_path(pid) {
+                Some(p) if p != self_exe => {
+                    settled = true;
+                    break;
+                }
+                _ => std::thread::sleep(Duration::from_millis(20)),
+            }
+        }
+        assert!(settled, "the exec must settle to the `sleep` binary");
+        // `proc_exec_path` resolves the executable of a live pid. Its
+        // basename is whatever `sleep` resolves to on this host
+        // (often a shared `coreutils` binary, not literally `sleep`).
+        let path = proc_exec_path(pid).expect("the binary path resolves");
+        let base = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .expect("an ascii basename");
+        assert_ne!(
+            base, "rushi",
+            "the spawned binary must not be the loop binary"
+        );
+        // The identity check matches the resolved basename itself, and
+        // rejects a different name.
+        assert!(loop_binary_matches(pid, base));
+        assert!(!loop_binary_matches(pid, "rushi"));
+        let _ = sleep.kill();
+        let _ = sleep.wait();
+        // A gone pid is not a live loop group.
+        assert!(!group_alive(pid));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn macos_pid_is_loop_claims_a_rushi_named_process() {
+        // The macOS identity check compares the executable basename
+        // (`proc_pidpath`) to the expected loop name, because `/proc`
+        // argv is unavailable. Spawn a real binary named `rushi`
+        // (a copy of `sleep`) and confirm the probe claims it. A live
+        // process whose basename does not match the expected name is
+        // rejected.
+        let dir = TempDir::new().unwrap();
+        let rushi = dir.path().join("rushi");
+        std::fs::copy("/bin/sleep", &rushi).unwrap();
+        let mut child = std::process::Command::new(&rushi)
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = child.id() as i32;
+        // Poll until the exec settles: until then the child still
+        // reports the test binary as its executable.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let mut settled = false;
+        while std::time::Instant::now() < deadline {
+            if loop_binary_matches(pid, "rushi") {
+                settled = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(settled, "the exec of the `rushi`-named binary must settle");
+        // A live process whose basename matches the expected name is
+        // claimed, whatever the session name.
+        assert!(
+            pid_is_loop(pid, "s-mac", "rushi"),
+            "a live `rushi`-named executable passes the macOS probe"
+        );
+        // The same live process is rejected when the expected name differs.
+        assert!(
+            !pid_is_loop(pid, "s-mac", "other-loop"),
+            "a live process whose basename does not match is rejected"
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+        // The dead pid is no longer a live loop group.
+        assert!(!pid_is_loop(pid, "s-mac", "rushi"));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
     fn pid_is_loop_requires_a_whole_argument_match() {
         let c = make_cfg(None);
         let dir = c.dir.path().join("sessions").join("s-sub");
@@ -1215,9 +1381,9 @@ mod tests {
             }
         };
         guard.leader = pid;
-        assert!(pid_is_loop(pid, "s1_h1"), "the exact name passes");
+        assert!(pid_is_loop(pid, "s1_h1", "rushi"), "the exact name passes");
         assert!(
-            !pid_is_loop(pid, "s1"),
+            !pid_is_loop(pid, "s1", "rushi"),
             "a substring of the name must not pass"
         );
         // Leave no orphan group behind. The guard reaps the group
@@ -1249,7 +1415,11 @@ mod tests {
     /// records both pids (and holds the session lock when `lock` is
     /// set) and waits on the member. Returns the (leader, member)
     /// pids and the guard that kills the group on drop; `None` when
-    /// the pids were not recorded (the caller skips).
+    /// the pids were not recorded (the caller skips). Linux-only: the
+    /// session lock is held with the `flock` CLI and the loop's
+    /// command line is inspected through `/proc`, neither of which is
+    /// available on macOS.
+    #[cfg(target_os = "linux")]
     fn spawn_member_group(
         dir: &Path,
         session: &str,
@@ -1299,6 +1469,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn pid_is_loop_claims_a_group_member_not_the_leader() {
         let c = make_cfg(None);
         let dir = c.dir.path().join("sessions").join("s-member");
@@ -1315,16 +1486,17 @@ mod tests {
         // pgrp-resolving probe must claim it. The member's own
         // command line names the session (the `sh -c` argument list).
         assert!(
-            pid_is_loop(member, "s-member"),
+            pid_is_loop(member, "s-member", "rushi"),
             "a live group member naming the session passes"
         );
         assert!(
-            !pid_is_loop(member, "other"),
+            !pid_is_loop(member, "other", "rushi"),
             "a different session must not pass"
         );
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn stop_external_loop_kills_a_live_orphan_group() {
         let c = make_cfg(None);
         let sid = SessionId::new("s-reattach");
@@ -1398,6 +1570,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn external_loop_pid_claims_a_group_member() {
         let c = make_cfg(None);
         let sid = SessionId::new("s-member");
@@ -1439,6 +1612,8 @@ mod tests {
 
     /// A pid is dead when /proc/<pid> is gone or the process is a
     /// zombie (killed, awaiting reap). A running process is not dead.
+    /// Linux-only: reads `/proc/<pid>/stat`, which macOS lacks.
+    #[cfg(target_os = "linux")]
     fn proc_is_dead_or_zombie(pid: i32) -> bool {
         let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
             Ok(s) => s,
@@ -1457,7 +1632,8 @@ mod tests {
 
     /// A pid is a live group leader that names the session when /proc
     /// shows it alive and non-zombie, its pgrp equals its pid, and its
-    /// command line names the session.
+    /// command line names the session. Linux-only (reads `/proc`).
+    #[cfg(target_os = "linux")]
     fn proc_is_alive_group_leader_named(pid: i32, session: &str) -> bool {
         let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
             Ok(s) => s,
@@ -1485,7 +1661,8 @@ mod tests {
     }
 
     /// The command line of a pid names the session when any NUL-joined
-    /// argv field contains the session id.
+    /// argv field contains the session id. Linux-only (reads `/proc`).
+    #[cfg(target_os = "linux")]
     fn cmdline_names_session(pid: i32, session: &str) -> bool {
         let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
             return false;

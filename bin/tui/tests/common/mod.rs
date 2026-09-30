@@ -313,7 +313,7 @@ impl Pty {
     ) -> Self {
         let mut amaster: libc::c_int = 0;
         let mut aslave: libc::c_int = 0;
-        let winsz = libc::winsize {
+        let mut winsz = libc::winsize {
             ws_row: rows as u16,
             ws_col: cols as u16,
             ws_xpixel: 0,
@@ -325,7 +325,7 @@ impl Pty {
                 &mut aslave,
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
-                &winsz,
+                &mut winsz,
             ) != 0
             {
                 panic!("openpty failed: {}", std::io::Error::last_os_error());

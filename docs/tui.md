@@ -527,12 +527,25 @@ of a `setsid`'d wrapper. The pid the kernel records in `loop.pid`
 is a group member, not the leader. A `kill(-pid, 0)` probe on a
 member fails with `ESRCH`.
 
-The probe and the stop resolve the group from `/proc/<pid>/stat`
-(field 5, the pgrp). They probe and signal that group instead. For
-a TUI-spawned loop the pid is the leader, so the resolution is a
-no-op. When `/proc` is unavailable (macOS), the code treats the
-pid itself as the group. The cmdline session-name check in
-`pid_is_loop` is unchanged.
+The probe and the stop resolve the group with `getpgid`. This is
+portable across Linux and macOS. It works for group members as well
+as leaders. The probe and the stop signal that group. For a
+TUI-spawned loop the pid is the leader, so the resolution is a
+no-op.
+
+The session-name check in `pid_is_loop` guards against recycled
+pids. The per-session `flock` on `.loop.lock` is the primary
+binding. The name check is the guard on top.
+
+- Linux: `/proc/<pid>/cmdline` must hold the session name as a whole
+  argument. A substring never passes. So a live `s1_h1` handoff loop
+  is never claimed by a probe for `s1`.
+- macOS: `/proc` does not exist. The check reads the executable path
+  via `proc_pidpath` and compares its basename to the configured
+  `[loop]` command basename (the Tier-1 default, `rushi`, when `[loop]`
+  is unset). A recycled pid is overwhelmingly a different executable,
+  so it is rejected. A custom `[loop]` command is claimed as long as
+  the running executable has that command's basename.
 
 ### 13.4 Tailer semantics
 
