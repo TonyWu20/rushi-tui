@@ -16,10 +16,11 @@ start collapsed. The final reply sits in a `Report` panel.
 
 **Turn-fold live tail (2026-09-30, implemented).** While the loop
 is active, the collapsed running turn shows the user box, the tally
-row, and the active tail below it. The active tail is the latest
-active event, an assistant message or tool call. The tally row now
-shows in the transcript, not only in the working row. Idle behavior
-is unchanged. See `tui-turn-fold.md` (kernel in
+row, and the active tail below it. The active tail is a single
+entry: the newest settled active event, an assistant message or a
+tool result. It holds on screen until the next active event settles.
+The tally row now shows in the transcript, not only in the working
+row. Idle behavior is unchanged. See `tui-turn-fold.md` (kernel in
 `bin/tui/src/fold.rs`).
 
 **Self-wired entry (2026-09-22, issue #22).** The binary is now

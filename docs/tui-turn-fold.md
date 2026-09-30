@@ -42,10 +42,12 @@ The fold applies to every turn, including the in-progress one.
 A turn starts at a `user_message` event and ends at the next one
 or the log end. The final message is the last `assistant_message`
 with content. The kernel guarantees a completed turn ends that way.
-An in-progress turn tracks its last assistant message as the live
-tail. It also tracks the active tail: the latest active event, an
-`assistant_message` or a `tool_call`. In the collapsed view the
-active tail renders below the tally row.
+
+An in-progress turn has an active tail. The active tail is a single
+entry: the newest settled active event, a content-bearing
+`assistant_message` or a `tool_result`. It holds on screen until the
+next active event settles, which substitutes it. In the collapsed
+view the active tail renders below the tally row.
 
 ## Tally line
 
@@ -140,8 +142,9 @@ entirely.
 
 The in-progress turn is folded by default. While the loop is active,
 the collapsed running turn shows the user box, the tally row, and the
-active tail below the tally. The active tail is the latest active
-event, an assistant message or a tool call.
+active tail below the tally. The active tail is a single entry: the
+newest settled active event, a content-bearing assistant message or a
+tool result. It holds on screen until the next active event settles.
 
 The tally row shows in the transcript for a running turn. It is not
 only in the working row. The working-row tally stays. The idle
@@ -211,36 +214,48 @@ decision on 2026-09-30.
   tally row, so no second-row wrap (2026-09-20 decision).
 - Live tail of a running turn (2026-09-30 decision). While the loop
   is active, the collapsed running turn shows the user box, the tally
-  row, and the active tail. The active tail is the latest active
-  event, an assistant message or tool call. It sits below the tally.
-  The tally row also shows in the transcript, not only in the
-  working row. The working-row tally stays, and idle behavior is
-  unchanged.
+  row, and the active tail. It sits below the tally. The tally row
+  also shows in the transcript, not only in the working row. The
+  working-row tally stays, and idle behavior is unchanged.
+- Live-tail persistence refinement (2026-09-30). The active tail is a
+  single entry: the newest settled active event. It is a content-
+  bearing assistant message or a tool result. It holds on screen
+  until the next active event settles, which substitutes it. A bare
+  in-flight tool call does not advance the tail, so the shown entry
+  does not flash.
 
 ## Live tail for a running turn (2026-09-30 decision)
 
 Decision 2026-09-30: while the loop is active, the collapsed running
 turn shows the user box, the tally row, and the active tail. The
-active tail sits below the tally. The active tail is the latest
-active event, an assistant message or tool call.
+active tail sits below the tally.
 
 The tally row now shows in the transcript for a running turn. It is
 not only in the working row. The idle behavior is unchanged. A
 completed turn still shows only its final message. The working-row
 tally stays.
 
-The change lands in `FoldState::visible` and the fold-aware build in
-`render.rs`. `Turn.in_progress` already marks the running turn, so
-no new event type is needed. `Turn.active_tail` holds the index of
-that latest active event. `collapsed_summary` emits a row for the
-in-progress turn. The snapshots `snap_turn_fold_in_progress_spinner`
-and `snap_running_loop_indicator` re-baselined.
+Refinement 2026-09-30: the active tail is a single entry, the newest
+settled active event. It is a content-bearing assistant message or a
+tool result. It holds on screen until the next active event settles,
+which substitutes it. A bare in-flight tool call is not a candidate,
+so the tail does not flash to the in-progress call.
+
+`Turn` carries `active_tail`, the index of that single entry for a
+running turn. A collapsed running turn shows the user box and the
+active-tail entry. `collapsed_summary` tallies the hidden events up
+to `active_tail`. The main and browse layouts share this view.
+
+`snap_turn_fold_in_progress_spinner` was re-baselined.
+`snap_running_loop_indicator` is unchanged. Its active tail is the
+last assistant message, with no tool result after it.
 
 ## Build and test plan
 
 - Turn segmentation is a pure pre-pass over the event vec. It
   splits on `user_message` and records the final message index per
-  turn.
+  turn. It also records the newest settled active event (a message or
+  tool result) of a running turn, the active tail.
 - The fold-aware build feeds both the main and browse layouts. One
   shared open-turn set drives the build.
 - A fold-state change rebuilds the layout and remaps the cursor
