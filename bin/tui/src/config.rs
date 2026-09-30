@@ -97,6 +97,11 @@ pub struct TuiConfig {
     pub sessions_root: PathBuf,
     /// The opaque loop command, if configured.
     pub loop_cmd: Option<LoopCommand>,
+    /// The `compact` binary for the branch-summarize flow
+    /// (`bin/compact --branch`, docs/tree-ui-design-from-human.md).
+    /// A program name or path; a bare name resolves on PATH at
+    /// spawn. Absent: derived from the loop command's sibling.
+    pub compact_cmd: Option<String>,
     /// Absolute directory containing the config file.
     pub config_dir: PathBuf,
     /// Absolute config file path (exported to the loop process).
@@ -260,6 +265,12 @@ struct RawTui {
     /// against the config dir.
     #[serde(default)]
     ext_dirs: Vec<String>,
+    /// The `[tui] compact_cmd` program: the `compact` binary for the
+    /// branch-summarize flow (docs/tree-ui-design-from-human.md).
+    /// A bare name resolves on PATH at spawn; an absent or empty
+    /// value falls back to the loop command's sibling `compact`.
+    #[serde(default)]
+    compact_cmd: Option<String>,
 }
 
 /// The `[tui.tool_display]` table: a preset name plus the per-field
@@ -370,6 +381,15 @@ impl TuiConfig {
                     .collect()
             })
             .unwrap_or_default();
+
+        // The `[tui] compact_cmd` program (the branch-summarize flow).
+        // An empty value reads as absent: a Nix generator writes `""`
+        // for keys the config does not set, like `color` above.
+        let compact_cmd = raw
+            .tui
+            .as_ref()
+            .and_then(|t| t.compact_cmd.clone())
+            .filter(|s| !s.trim().is_empty());
 
         // The [paths] tool entries are kernel-owned (the assemble stage
         // loads the tool schemas from them), but the TUI re-resolves
@@ -591,6 +611,7 @@ impl TuiConfig {
         Ok(TuiConfig {
             sessions_root,
             loop_cmd,
+            compact_cmd,
             config_dir,
             config_path: canonical,
             ext_dirs,
@@ -621,6 +642,7 @@ impl TuiConfig {
         TuiConfig {
             sessions_root: resolve_cwd("sessions"),
             loop_cmd: None,
+            compact_cmd: None,
             config_dir,
             config_path: path.to_path_buf(),
             ext_dirs: Vec::new(),
@@ -635,6 +657,28 @@ impl TuiConfig {
             tool_paths_missing: Vec::new(),
             tool_dirs_found: 0,
         }
+    }
+
+    /// The `compact` binary to spawn for the branch-summarize flow
+    /// (docs/tree-ui-design-from-human.md, the two summarize outcomes).
+    /// An explicit `[tui] compact_cmd` wins: a bare name resolves on
+    /// PATH at spawn, a relative path against the process CWD.
+    /// Absent: the sibling `compact` of the effective loop command's
+    /// program. The loop program is usually a bare PATH name (the Nix
+    /// layout ships the kernel siblings in one bin dir), so the
+    /// sibling is the bare name `compact` too.
+    pub fn resolve_compact(&self) -> PathBuf {
+        if let Some(c) = self.compact_cmd.as_deref() {
+            if !c.trim().is_empty() {
+                return PathBuf::from(c);
+            }
+        }
+        let loop_cmd = self.loop_cmd.clone().unwrap_or_else(default_loop_cmd);
+        let prog = PathBuf::from(&loop_cmd.command);
+        if let Some(dir) = prog.parent().filter(|d| !d.as_os_str().is_empty()) {
+            return dir.join("compact");
+        }
+        PathBuf::from("compact")
     }
 }
 
@@ -712,6 +756,75 @@ arg_style = "append_session"
         let lc = cfg.loop_cmd.as_ref().unwrap();
         let argv = lc.argv(&crate::port::SessionId::new("s1"));
         assert_eq!(argv, vec!["bash", "scripts/loop.sh", "s1"]);
+    }
+
+    #[test]
+    fn parses_compact_cmd_from_tui_section() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "config.toml",
+            r#"
+[tui]
+compact_cmd = "/opt/kernel/bin/compact"
+"#,
+        );
+        let cfg = TuiConfig::load(dir.path().join("config.toml").to_str().unwrap()).unwrap();
+        assert_eq!(cfg.compact_cmd.as_deref(), Some("/opt/kernel/bin/compact"));
+    }
+
+    #[test]
+    fn empty_compact_cmd_reads_as_absent() {
+        // A generator that materializes every key (Nix) writes `""`
+        // for keys the config does not set, so an empty value reads
+        // as absent, like `color`.
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "config.toml", "[tui]\ncompact_cmd = \"\"\n");
+        let cfg = TuiConfig::load(dir.path().join("config.toml").to_str().unwrap()).unwrap();
+        assert_eq!(cfg.compact_cmd, None);
+    }
+
+    #[test]
+    fn resolve_compact_prefers_the_configured_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "config.toml",
+            r#"
+[tui]
+compact_cmd = "/opt/kernel/bin/compact"
+"#,
+        );
+        let cfg = TuiConfig::load(dir.path().join("config.toml").to_str().unwrap()).unwrap();
+        assert_eq!(cfg.resolve_compact(), PathBuf::from("/opt/kernel/bin/compact"));
+    }
+
+    #[test]
+    fn resolve_compact_defaults_to_the_loop_command_sibling() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "config.toml",
+            r#"
+[loop]
+command = "/opt/kernel/bin/rushi"
+args = ["run"]
+"#,
+        );
+        let cfg = TuiConfig::load(dir.path().join("config.toml").to_str().unwrap()).unwrap();
+        assert_eq!(cfg.resolve_compact(), PathBuf::from("/opt/kernel/bin/compact"));
+    }
+
+    #[test]
+    fn resolve_compact_default_loop_is_bare_path_compact() {
+        // No `[loop]` and no `compact_cmd`: the default loop command is
+        // the bare PATH `rushi`, so its sibling is the bare PATH
+        // `compact` (the Nix/PATH layout ships both in one bin dir).
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("config.toml");
+        std::fs::write(&p, "").unwrap();
+        let cfg = TuiConfig::load(p.to_str().unwrap()).unwrap();
+        assert_eq!(cfg.resolve_compact(), PathBuf::from("compact"));
     }
 
     #[test]

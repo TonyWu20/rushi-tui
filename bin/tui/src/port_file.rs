@@ -926,6 +926,7 @@ mod tests {
                 args: a.into_iter().map(|s| s.to_string()).collect(),
                 arg_style: crate::config::ArgStyle::AppendSession,
             }),
+            compact_cmd: None,
             config_dir: root.clone(),
             config_path: root.join("config.toml"),
             active_model: None,

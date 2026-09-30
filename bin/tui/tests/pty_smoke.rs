@@ -1025,3 +1025,123 @@ fn r_pending_shows_label_and_s_completes_the_replace() {
     }
     pty.reap();
 }
+
+/// The branch-summarize outcome (docs/tree-ui-design-from-human.md):
+/// committing "Summarize the branch" from the tree options spawns
+/// `compact <session> --branch --config <cfg>` as a child process
+/// (kernel issue #22, PR #32). A stub `compact` on PATH records its
+/// argv and appends the branch `compaction_summary` marker, like the
+/// kernel does. The appended marker re-renders into the transcript as
+/// the "branch summarized" leaf.
+#[test]
+fn tree_summarize_branch_spawns_compact() {
+    let tmp = tmpdir();
+    let layer = empty_layer(&tmp);
+    let (cfg, sessions) = layer_cfg(&layer, None);
+    let ts = "2026-09-30T00:00:00Z";
+    let events: Vec<String> = [
+        serde_json::json!({"v":1,"type":"user_message","ts":ts,"id":"u1","content":"hello"}),
+        serde_json::json!({"v":1,"type":"assistant_message","ts":ts,"id":"a1","content":"hi","tool_calls":[],"stop_reason":"stop","usage":{"input_tokens":1,"output_tokens":1},"reasoning":{}}),
+        serde_json::json!({"v":1,"type":"user_message","ts":ts,"id":"u2","content":"question"}),
+        serde_json::json!({"v":1,"type":"assistant_message","ts":ts,"id":"a2","content":"answer","tool_calls":[],"stop_reason":"stop","usage":{"input_tokens":1,"output_tokens":1},"reasoning":{}}),
+        serde_json::json!({"v":1,"type":"rewind","ts":ts,"id":"w1","target_seq":3,"mode":"on","reason":"tui_pick"}),
+        serde_json::json!({"v":1,"type":"user_message","ts":ts,"id":"u3","content":"again"}),
+        serde_json::json!({"v":1,"type":"assistant_message","ts":ts,"id":"a3","content":"final","tool_calls":[],"stop_reason":"stop","usage":{"input_tokens":1,"output_tokens":1},"reasoning":{}}),
+    ]
+    .iter()
+    .map(|v| v.to_string())
+    .collect();
+    seed_session(&sessions, "summarize", &events);
+
+    // The stub `compact`: record its argv, then append the branch
+    // marker (the kernel's P2 shape, `branch_of` = the rewind seq 5).
+    let bindir = tmp.join("stub-bin");
+    std::fs::create_dir_all(&bindir).unwrap();
+    let inv = tmp.join("compact-invocation");
+    let marker = "{\"v\":1,\"type\":\"compaction_summary\",\"ts\":\"t\",\"summary\":\"stub branch summary\",\"first_kept_seq\":1,\"branch_of\":5,\"version\":1,\"reason\":\"branch\",\"diverge_seq\":5}";
+    let script = String::from("#!/bin/sh\n")
+        + &format!("echo \"$@\" > {inv}\n", inv = inv.display())
+        + "cat >> \"$1/events.jsonl\" <<'EOF'\n"
+        + marker
+        + "\nEOF\nexit 0\n";
+    let compact = bindir.join("compact");
+    std::fs::write(&compact, script).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&compact, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut pty = Pty::spawn(tui_bin(), "summarize", &cfg, Some(bindir.to_string_lossy().as_ref()));
+    // Wait for the seeded session transcript to render.
+    let missing = wait_markers(&mut pty, &["final"], 10.0, 10.0);
+    assert!(pty.alive(), "process died during startup");
+    assert!(
+        missing.is_empty(),
+        "the seeded session did not render: {missing:?}\n{}",
+        pty.screen.text()
+    );
+
+    // The tree flow: Esc -> normal mode, `:tree` + Enter -> the Tree
+    // List stage (filter focus). The tree renders the active path and,
+    // last, the abandoned tail, so the active leaf ("final", seq 7) is
+    // not the last row. Type "final" into the filter: the fuzzy filter
+    // narrows the tree to that one active-path event. Enter commits it
+    // to the four options. Down x2 -> "Summarize the branch". Enter ->
+    // commit -> spawn `compact --branch`.
+    pty.write_input(b"\x1b");
+    pty.pump(0.4);
+    pty.write_input(b":tree\r");
+    pty.pump(1.0);
+    pty.write_input(b"final"); // filter (still filter focus): only seq 7 matches
+    pty.pump(0.8);
+    pty.write_input(b"\r"); // Enter: commit the single filtered row -> the options
+    pty.pump(0.8);
+    pty.write_input(b"\x0a\x0a"); // Down x2: the "Summarize the branch" option
+    pty.pump(0.5);
+    pty.write_input(b"\r"); // Enter: commit -> spawn `compact --branch`
+    pty.pump(1.0);
+
+    // The stub recorded the exact argv the TUI spawned.
+    let screen = pty.screen.text();
+    let argv = std::fs::read_to_string(&inv).unwrap_or_default();
+    let want = format!(
+        "{} --branch --config {}",
+        sessions.join("summarize").display(),
+        cfg.display()
+    );
+    assert_eq!(
+        argv.trim(),
+        want,
+        "the TUI must spawn `compact <session> --branch --config <cfg>`;\nscreen:\n{screen}"
+    );
+
+    // The appended branch marker re-renders into the transcript as a
+    // branch leaf; the reaped child then settles the indicator. First
+    // confirm the stub actually landed the marker in the session log
+    // (separates "the stub ran" from "the TUI re-rendered it").
+    let log_path = sessions.join("summarize").join("events.jsonl");
+    let log_tail = std::fs::read_to_string(&log_path).unwrap_or_default();
+    let marker_in_file = log_tail.contains("\"branch_of\":5");
+    assert!(
+        marker_in_file,
+        "the stub did not append the branch marker to {};\nlast 400 bytes:\n{}",
+        log_path.display(),
+        log_tail.chars().rev().take(400).collect::<String>()
+    );
+
+    let missing = wait_markers(
+        &mut pty,
+        &["branch summarized (rewound marker seq 5)"],
+        10.0,
+        10.0,
+    );
+    let screen2 = pty.screen.text();
+    assert!(
+        missing.is_empty(),
+        "the branch summary leaf did not render in the transcript\n(marker present in file: {marker_in_file})\nscreen:\n{screen2}",
+    );
+    pty.kill(libc::SIGTERM);
+    let end = Instant::now() + Duration::from_secs(10);
+    while pty.alive() && Instant::now() < end {
+        pty.pump(0.2);
+    }
+    pty.reap();
+}

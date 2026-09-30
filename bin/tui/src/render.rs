@@ -871,14 +871,22 @@ fn event_lines<'a>(
             let summary = e.get_str("summary").unwrap_or("").to_string();
             // The pi `warning` accent (not a hard-coded yellow).
             let st = palette.style(crate::color::Role::Warning, Modifier::BOLD);
-            let spans = vec![Span::styled(
-                format!(
+            // A branch marker (docs/branch-summarize-cases.md) carries
+            // `branch_of`: it is the summary of the abandoned branch of
+            // that rewind marker, a new leaf on the active path, with
+            // the `first_kept_seq` no-op sentinel 1. It gets its own
+            // line; the auto-compact line keeps the old form.
+            let text = match e.get_i64("branch_of") {
+                Some(branch_of) => {
+                    format!("{LABEL}branch summarized (rewound marker seq {branch_of})")
+                }
+                None => format!(
                     "{LABEL}context compacted ({reason}): {} to {} tokens, keeping events from seq {first_kept}",
                     fmt_k(before),
                     fmt_k(after)
                 ),
-                st,
-            )];
+            };
+            let spans = vec![Span::styled(text, st)];
             out.push(Line::from(spans));
             owns.push(None);
             // The summary body rides under the gutter, available in
@@ -2817,6 +2825,14 @@ fn status_rows(
             dim,
         ))];
     }
+    // A TUI-spawned `bin/compact --branch` is in flight
+    // (docs/tree-ui-design-from-human.md): a compacting indicator on the
+    // status line for the whole run. The transient flash wins over it
+    // (it names the moment of the spawn); when the flash expires this
+    // line holds until the child reaps.
+    if app.branch_compacting() {
+        return vec![Line::from(Span::styled(" branch summarizing…", dim))];
+    }
     let last_line = app
         .active()
         .and_then(|s| app.loop_state(s))
@@ -3716,7 +3732,20 @@ pub fn build_transcript_input(input: &TranscriptBuildInput) -> TranscriptBuild {
         if off_path && !is_rewind {
             continue;
         }
-        if !is_rewind && !fold.visible(w) {
+        // A compaction marker (started, summary, failed) is also a
+        // structural boundary, not foldable conversation content. A
+        // collapsed turn must not hide it. The branch marker
+        // (`compaction_summary` carrying `branch_of`,
+        // docs/branch-summarize-cases.md) lands in the last turn, so
+        // without this it would be folded away and never render.
+        // docs/tree-ui-design-from-human.md "Summarize the branch".
+        let is_compaction = matches!(
+            e.kind(),
+            EventKind::CompactionStarted
+                | EventKind::CompactionSummary
+                | EventKind::CompactionFailed
+        );
+        if !is_rewind && !is_compaction && !fold.visible(w) {
             continue;
         }
         let turn_start_summary: Option<crate::fold::SummaryLine> = fold

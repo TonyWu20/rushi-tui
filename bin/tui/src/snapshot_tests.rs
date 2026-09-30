@@ -38,6 +38,7 @@ fn empty_host() -> (ExtHost, TempDir) {
         clipboard_unnamed: false,
         sessions_root: tmp.path().join("sessions"),
         loop_cmd: None,
+        compact_cmd: None,
         config_dir: tmp.path().to_path_buf(),
         config_path: tmp.path().join("config.toml"),
         ext_dirs: vec![tmp.path().join("ui_extensions")],
@@ -1079,21 +1080,151 @@ fn tree_rewind_blocked_while_loop_runs() {
     );
 }
 
-/// The two summarize options are shown but not wired yet: committing
-/// one keeps the options open and flashes the pending-kernel hint.
+/// A log with a fork: trunk seqs 1..=3, abandoned tail 4..=5 (the
+/// `rewind` marker sits at 5, targeting 3 in `on` mode), active path
+/// 6..=7. Summarizing it would compress the open span of marker 5.
+fn summarize_events() -> Vec<Event> {
+    vec![
+        ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u1","content":"hello"}"#),
+        ev(
+            r#"{"v":1,"type":"assistant_message","ts":"t","id":"a1","content":"hi","tool_calls":[],"stop_reason":"stop","usage":{"input_tokens":1,"output_tokens":1},"reasoning":{}}"#,
+        ),
+        ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u2","content":"question"}"#),
+        ev(
+            r#"{"v":1,"type":"assistant_message","ts":"t","id":"a2","content":"answer","tool_calls":[],"stop_reason":"stop","usage":{"input_tokens":1,"output_tokens":1},"reasoning":{}}"#,
+        ),
+        ev(r#"{"v":1,"type":"rewind","ts":"t","id":"w1","target_seq":3,"mode":"on","reason":"tui_pick"}"#),
+        ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u3","content":"again"}"#),
+        ev(
+            r#"{"v":1,"type":"assistant_message","ts":"t","id":"a3","content":"final","tool_calls":[],"stop_reason":"stop","usage":{"input_tokens":1,"output_tokens":1},"reasoning":{}}"#,
+        ),
+    ]
+}
+
+/// Committing "Summarize the branch" on an active-path pick closes the
+/// options and emits the `BranchSummarize` action with no prompt (the
+/// kernel's default summarize instruction).
 #[test]
-fn tree_summarize_options_flash_pending() {
+fn tree_summarize_branch_commits() {
+    use crate::app::Action;
+    let events = summarize_events();
+    let mut app = tree_options_at(events, 7, 2);
+    let actions = app.commit_palette();
+    assert_eq!(
+        actions,
+        vec![Action::BranchSummarize { prompt: None }]
+    );
+    assert!(
+        !app.palette_state().open,
+        "committing closes the options window"
+    );
+}
+
+/// "Summarize with custom prompt" arms the transient prompt capture:
+/// no action is emitted, the window closes, and the next Enter submits
+/// the draft as the `--prompt` instruction.
+#[test]
+fn tree_summarize_custom_arms_prompt_capture() {
+    use crate::app::Action;
+    let events = summarize_events();
+    let mut app = tree_options_at(events, 7, 3);
+    let actions = app.commit_palette();
+    assert!(
+        actions.is_empty(),
+        "arming the capture yields no port action: {actions:?}"
+    );
+    assert!(
+        !app.palette_state().open,
+        "the options window must close so the input box shows the hint"
+    );
+    // Enter with an empty draft keeps the capture live and flashes.
+    assert!(app.press(Key::Enter).is_empty());
+    assert!(app.status().is_some(), "the empty-prompt hint must flash");
+    // A typed instruction submits on Enter.
+    app.set_draft("note what was abandoned on the branch".to_string());
+    let actions = app.press(Key::Enter);
+    assert_eq!(
+        actions,
+        vec![Action::BranchSummarize {
+            prompt: Some("note what was abandoned on the branch".into()),
+        }]
+    );
+}
+
+/// Esc cancels the prompt capture, keeping the typed text as a plain
+/// draft.
+#[test]
+fn tree_summarize_custom_esc_cancels() {
+    let events = summarize_events();
+    let mut app = tree_options_at(events, 7, 3);
+    let _ = app.commit_palette();
+    app.set_draft("typed instruction".to_string());
+    let actions = app.press(Key::Esc);
+    assert!(
+        actions.is_empty(),
+        "a cancelled capture yields no port action: {actions:?}"
+    );
+    assert!(app.status().is_some(), "the cancel hint must flash");
+    assert_eq!(
+        app.draft(),
+        "typed instruction",
+        "the typed text stays in the input box"
+    );
+}
+
+/// Without a `rewind` marker there is no abandoned branch to
+/// summarize: committing either outcome keeps the options open.
+#[test]
+fn tree_summarize_without_rewind_marker_is_refused() {
     let events = two_events();
     let mut app = tree_options_at(events, 1, 2);
     let actions = app.commit_palette();
     assert!(
-        actions.is_empty(),
-        "summarize options yield no port action: {actions:?}"
+        matches!(&actions[..], []),
+        "no summarize is possible without a rewind marker: {actions:?}"
     );
-    assert!(app.status().is_some(), "the pending-kernel hint must flash");
+    assert!(app.status().is_some(), "the refusal hint must flash");
     assert!(
         app.palette_state().open,
         "the options must stay open for the fallback pick"
+    );
+}
+
+/// Picking an off-active-path event refuses the summarize: the
+/// branch is derived from the last rewind marker on the active path.
+#[test]
+fn tree_summarize_off_path_pick_is_refused() {
+    let events = summarize_events();
+    // Seq 4 is the abandoned assistant answer, off the active path.
+    let mut app = tree_options_at(events, 4, 2);
+    let actions = app.commit_palette();
+    assert!(
+        actions.is_empty(),
+        "an off-path pick yields no port action: {actions:?}"
+    );
+    assert!(app.status().is_some(), "the refusal hint must flash");
+    assert!(
+        app.palette_state().open,
+        "the options must stay open for the fallback pick"
+    );
+}
+
+/// A busy loop blocks the summarize outcomes, like the fork outcomes.
+#[test]
+fn tree_summarize_blocked_while_loop_runs() {
+    let events = summarize_events();
+    let mut app = tree_options_at(events, 7, 2);
+    let sid = app.active().cloned().unwrap();
+    app.attach_external_loop(sid);
+    let actions = app.commit_palette();
+    assert!(
+        actions.is_empty(),
+        "busy loop yields no port action: {actions:?}"
+    );
+    assert!(app.status().is_some(), "the busy hint must flash");
+    assert!(
+        app.palette_state().open,
+        "the options must stay open while the loop runs"
     );
 }
 
@@ -1265,6 +1396,42 @@ fn cached_transcript_drops_offpath_after_live_marker() {
     assert!(lines
         .iter()
         .any(|l| l.to_string().contains("rewound to seq 3")));
+}
+
+/// The kernel's branch marker (a `compaction_summary` carrying
+/// `branch_of`, docs/branch-summarize-cases.md P2) lands in the log and
+/// must render as a branch leaf on the active path. Delivered through
+/// the tailer path (`on_watch_item`), like the real watcher. The
+/// branch marker sits at seq 8, on the active path.
+#[test]
+fn branch_marker_delivered_via_watch_renders_leaf() {
+    use crate::port::{TailCursor, WatchItem};
+    use crate::render::build_transcript;
+    let mut app = app_with_session(summarize_events());
+    assert_eq!(
+        app.rewind_active_ranges(),
+        Some(vec![(1, 3), (6, 7)]),
+        "the active path before the marker"
+    );
+    // The kernel's branch marker (P2 shape) arrives at seq 8.
+    app.on_watch_item(WatchItem::Event {
+        event: ev(
+            r#"{"v":1,"type":"compaction_summary","ts":"t","summary":"branch notes","first_kept_seq":1,"branch_of":5,"version":2,"parent_version":0,"diverge_seq":5,"reason":"threshold","tokens_before":40000}"#,
+        ),
+        cursor: TailCursor::end(),
+    });
+    assert_eq!(
+        app.rewind_active_ranges(),
+        Some(vec![(1, 3), (6, 8)]),
+        "the marker extends the active path to seq 8"
+    );
+    let build = build_transcript(&app, 80, None);
+    let text: Vec<String> = build.lines.iter().map(|l| l.to_string()).collect();
+    assert!(
+        text.iter().any(|l| l.contains("branch summarized (rewound marker seq 5)")),
+        "the branch leaf line must render in the transcript:\n{}",
+        text.join("\n")
+    );
 }
 
 // ── tree phase 2: pane pipeline, filter hint, focus border ─────────
