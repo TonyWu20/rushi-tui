@@ -97,39 +97,6 @@
             # the target subdir). The kernel's side-by-side resolver
             # (<exe_dir>/rushi-tui) then finds $out/bin/rushi-tui.
           };
-          devShell = pkgs.mkShell {
-            buildInputs = with pkgs; [
-              rustToolchain
-              # The tree-sitter grammar crates (tui-highlight) compile
-              # C parser sources via the `cc` build-dep; the fenix
-              # Rust toolchain does not ship a C compiler.
-              stdenv.cc
-              jq
-              python3
-              file
-              # Lean toolchain for the DRT gate (`lake build` +
-              # `lean-verify` op=drt against bin/tui-stream-drt):
-              # `lean`, `lake`, and `z3` on PATH. `leanPackages.mathlib`
-              # exports LEAN_PATH with the Nix-prebuilt oleans.
-              lean4
-              z3
-              leanPackages.mathlib
-              # The Nix-built `rushi` launcher (kernel flake packages.default).
-              # The launcher finds `rushi-tui` on PATH after its
-              # side-by-side check (resolve_tui_binary); the .envrc export
-              # of target/release completes that contract.
-              rushiPkg
-            ];
-            shellHook = ''
-              echo "rushi-tui dev shell: rust + lean + Nix-built rushi on PATH."
-              echo "Build the TUI (rushi-common from crates.io):   cargo build --release"
-              echo "Ext-PTY tests: KERNEL_ROOT=<kernel abs path> EXTS_ROOT=<exts abs path> cargo test -p tui"
-              echo "DRT gate:  cd lean && lake build"
-              echo "Run the PTY smoke (two-repo):"
-              echo "  EXTS_ROOT=../rushi-exts python3 scripts/tui-pty-smoke.py \\"
-              echo "      target/debug/rushi-tui <kernel-root>"
-            '';
-          };
         in
         {
           # The TUI binary as a Nix package. A consumer (rushi-config,
@@ -143,7 +110,45 @@
 
           devShells = {
             default =
-              if pkgs.stdenv.hostPlatform.isLinux then devShell.override { stdenv = moldStdenv; } else devShell;
+              pkgs.mkShell.override
+                {
+
+                  stdenv = if pkgs.stdenv.hostPlatform.isLinux then moldStdenv else pkgs.stdenv;
+
+                }
+                {
+                  buildInputs = with pkgs; [
+                    rustToolchain
+                    # The tree-sitter grammar crates (tui-highlight) compile
+                    # C parser sources via the `cc` build-dep; the fenix
+                    # Rust toolchain does not ship a C compiler.
+                    stdenv.cc
+                    jq
+                    python3
+                    file
+                    # Lean toolchain for the DRT gate (`lake build` +
+                    # `lean-verify` op=drt against bin/tui-stream-drt):
+                    # `lean`, `lake`, and `z3` on PATH. `leanPackages.mathlib`
+                    # exports LEAN_PATH with the Nix-prebuilt oleans.
+                    lean4
+                    z3
+                    leanPackages.mathlib
+                    # The Nix-built `rushi` launcher (kernel flake packages.default).
+                    # The launcher finds `rushi-tui` on PATH after its
+                    # side-by-side check (resolve_tui_binary); the .envrc export
+                    # of target/release completes that contract.
+                    rushiPkg
+                  ];
+                  shellHook = ''
+                    echo "rushi-tui dev shell: rust + lean + Nix-built rushi on PATH."
+                    echo "Build the TUI (rushi-common from crates.io):   cargo build --release"
+                    echo "Ext-PTY tests: KERNEL_ROOT=<kernel abs path> EXTS_ROOT=<exts abs path> cargo test -p tui"
+                    echo "DRT gate:  cd lean && lake build"
+                    echo "Run the PTY smoke (two-repo):"
+                    echo "  EXTS_ROOT=../rushi-exts python3 scripts/tui-pty-smoke.py \\"
+                    echo "      target/debug/rushi-tui <kernel-root>"
+                  '';
+                };
           };
         };
     in
