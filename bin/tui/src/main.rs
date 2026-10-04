@@ -466,6 +466,14 @@ fn main() {
 
     let backend = CrosstermBackend::new(std::io::stdout());
     let mut term = Terminal::new(backend).expect("cannot create the terminal");
+    // Start from a clean alternate screen. tmux treats a nested
+    // `1049h` as a no-op and keeps the host's contents. A host may
+    // keep the alternate screen while forking us. Television's
+    // forked `open` action does this. The first differential frame
+    // would otherwise leave the host's stale text visible in cells
+    // the frame does not write. A direct terminal already clears on
+    // entry, so this is a no-op there.
+    let _ = term.clear();
     let mut app = App::new();
     // Stage 2 of the perf plan runs the transcript build on a
     // background worker. Docs: docs/tui-perf-background-build-plan.md.
