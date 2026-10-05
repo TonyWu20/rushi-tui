@@ -92,7 +92,7 @@ Method and conventions: `tui-insta-snapshot-testing.md`.
 | `tui-feature-requests/2026-09-03.md` | Detail | 2026-09-22 | Detail for the 2026-09-03 requests: the scroll position bar, the conversation browsing mode, and select-and-yank. |
 | `tui-feature-requests/2026-09-04.md` | Detail | 2026-09-22 | Detail for the 2026-09-04 requests: picker code highlight, session navigation, the `:` command palette, and pending-message recall. |
 | `tui-feature-requests/2026-09-06.md` | Detail | 2026-09-22 | Detail for the 2026-09-06 requests: table-pipe disambiguation, streaming response, thinking/text transition, stream pacing, message-panel redesign, browse pin, picker scope cycle, and path abbreviation. |
-| `tui-feature-requests/2026-09-07.md` | Detail | 2026-09-22 | Detail for the 2026-09-07 requests: the diff split/unified layout and the open visual-selection highlight bug. |
+| `tui-feature-requests/2026-09-07.md` | Detail | 2026-09-22 | Detail for the 2026-09-07 requests: the diff split/unified layout and the visual-selection highlight. |
 | `tui-feature-requests/2026-09-12.md` | Detail | 2026-09-22 | Detail for the 2026-09-12 requests: the open table-cell highlighting observation and the windowed picker preview pane. |
 | `tui-feature-requests/2026-09-13.md` | Detail | 2026-09-22 | Detail for the 2026-09-13 requests: preview-pane wrap, browse pin on settle, the no-event-cap, and raw-source yank. |
 | `tui-feature-requests/2026-09-14.md` | Detail | 2026-09-22 | Detail for the 2026-09-14 tool-panel pass: purple name, margin rows, no `tool:` prefix, full-width panel, header target, compact-label scope, and the live-stream simplify. |

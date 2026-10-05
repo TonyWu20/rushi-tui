@@ -546,6 +546,89 @@ impl Editor {
         total.max(1)
     }
 
+    /// The current visual-mode selection (the pi-vim
+    /// `getVisualRange`): the anchor and cursor ends, ordered;
+    /// line-wise covers whole lines. `None` outside the visual
+    /// modes. The host composer exposes this so the editor box can
+    /// shade the selected span, not just the caret cell (issue #8).
+    pub(crate) fn visual_range(&self) -> Option<OpRange> {
+        let in_visual = matches!(self.mode, Mode::Visual | Mode::VisualLine);
+        if !in_visual {
+            return None;
+        }
+        Some(self.visual_range_at((self.row, self.col)))
+    }
+
+    /// The visual selection on each display row of the window
+    /// [`Self::display_rows`] shows at the same `scroll` / `height` /
+    /// `width`: one entry per display row, each the half-open char
+    /// range `[start, end)` of that row's text covered by the
+    /// selection, or `None` when the row has no selected char.
+    /// Char-visual selections span their selected chars across the
+    /// wrapped display rows; line-visual selections shade whole
+    /// display rows. Empty outside the visual modes (issue #8: the
+    /// editor-box selection shading).
+    pub(crate) fn visual_row_spans(
+        &self,
+        scroll: usize,
+        height: usize,
+        width: usize,
+    ) -> Vec<Option<(usize, usize)>> {
+        let Some(range) = self.visual_range() else {
+            return Vec::new();
+        };
+        if width == 0 || height == 0 {
+            return Vec::new();
+        }
+        // Flatten the wrapped rows with their absolute display-row
+        // index, exactly like `display_rows`, so the two never
+        // disagree.
+        let mut all: Vec<Option<(usize, usize)>> = Vec::new();
+        for (i, line) in self.lines.iter().enumerate() {
+            let len = line.chars().count();
+            // The selected source columns of line `i`, half-open
+            // `[lo, hi)`: empty when the line is outside the
+            // selection. The char-wise end is inclusive, so it
+            // lands one past the last selected char.
+            let (lo, hi) = if range.linewise {
+                if i >= range.start.0 && i <= range.end.0 {
+                    (0, len)
+                } else {
+                    (0, 0)
+                }
+            } else if i < range.start.0 || i > range.end.0 {
+                (0, 0)
+            } else if i == range.start.0 && i == range.end.0 {
+                (range.start.1, range.end.1 + 1)
+            } else if i == range.start.0 {
+                (range.start.1, len)
+            } else if i == range.end.0 {
+                (0, range.end.1 + 1)
+            } else {
+                (0, len)
+            };
+            for (ci, chunk) in wrap_row(line, width).into_iter().enumerate() {
+                // Source cols of this display row: `[ci * width,
+                // ci * width + chunk_len)`. Intersect with the
+                // line's selected cols, back in row-relative cols.
+                let row_lo = ci * width;
+                let row_hi = row_lo + chunk.chars().count();
+                let sel_lo = lo.max(row_lo);
+                let sel_hi = hi.min(row_hi);
+                let span = if sel_lo < sel_hi {
+                    Some((sel_lo - row_lo, sel_hi - row_lo))
+                } else {
+                    None
+                };
+                all.push(span);
+            }
+        }
+        if scroll >= all.len() {
+            return Vec::new();
+        }
+        all[scroll..scroll.saturating_add(height).min(all.len())].to_vec()
+    }
+
     /// The current mode, for the status row and the border color.
     pub fn mode(&self) -> Mode {
         self.mode
@@ -2477,8 +2560,9 @@ impl Editor {
     }
 
     /// The visual range (the pi-vim `getVisualRange`): the anchor
-    /// and cursor ends, ordered; line-wise covers whole lines.
-    fn visual_range(&self, cursor: (usize, usize)) -> OpRange {
+    /// and cursor ends, ordered; line-wise covers whole lines. The
+    /// `cursor` is the active end; the stored anchor is the other.
+    fn visual_range_at(&self, cursor: (usize, usize)) -> OpRange {
         let anchor = self.visual_anchor.unwrap_or(cursor);
         let is_linewise = self.mode == Mode::VisualLine;
         let (start, end) = if anchor < cursor || (anchor.0 == cursor.0 && anchor.1 <= cursor.1) {
@@ -2512,7 +2596,7 @@ impl Editor {
     ) {
         let cursor = (self.row, self.col);
         let lines = self.lines.clone();
-        let range = self.visual_range(cursor);
+        let range = self.visual_range_at(cursor);
         let (new_lines, cur, enter_insert) =
             apply_operator(op, &lines, &range, registers, self.register);
         self.push_undo();
@@ -2539,7 +2623,7 @@ impl Editor {
         let _ = before; // visual p and P paste alike (reference rule)
         let cursor = (self.row, self.col);
         let lines = self.lines.clone();
-        let range = self.visual_range(cursor);
+        let range = self.visual_range_at(cursor);
         let deleted_text = extract_text(&lines, &range);
         let (mut new_lines, pos) = delete_range(&lines, &range);
         let reg = get_register(registers, self.register);
@@ -2606,7 +2690,7 @@ impl Editor {
     /// Join the selected lines (the pi-vim visual `J`).
     fn visual_join(&mut self) {
         let cursor = (self.row, self.col);
-        let range = self.visual_range(cursor);
+        let range = self.visual_range_at(cursor);
         let start = range.start.0;
         let end = range.end.0;
         if end > start {
@@ -2634,7 +2718,7 @@ impl Editor {
     /// Toggle the case in the selection (the pi-vim visual `~`).
     fn visual_toggle_case(&mut self) {
         let cursor = (self.row, self.col);
-        let range = self.visual_range(cursor);
+        let range = self.visual_range_at(cursor);
         self.push_undo();
         if range.linewise {
             for ln in range.start.0..=range.end.0 {
@@ -4772,5 +4856,141 @@ mod replace_char_tests {
         // replaced (only `Insert` / `CommandLine` put the caret
         // between chars).
         assert!(Mode::ReplaceChar.cursor_on_char());
+    }
+}
+
+#[cfg(test)]
+mod visual_selection_tests {
+    //! The exposed visual selection (issue #8): the ordered
+    //! anchor/cursor range and the per-display-row spans the editor
+    //! box shades.
+
+    use super::{Editor, Mode};
+    use crate::app::Key;
+
+    fn press(ed: &mut Editor, key: Key) {
+        let mut regs = std::collections::HashMap::new();
+        ed.press(key, &mut regs);
+    }
+
+    /// `rows` logical lines of `n` `x` chars, cursor at the first
+    /// char, in normal mode.
+    fn grid(rows: usize, n: usize) -> Editor {
+        let mut ed = Editor::new();
+        ed.lines = (0..rows).map(|_| "x".repeat(n)).collect();
+        ed.row = 0;
+        ed.col = 0;
+        ed.mode = Mode::Normal;
+        ed
+    }
+
+    #[test]
+    fn range_is_none_outside_the_visual_modes() {
+        let ed = grid(2, 5);
+        assert!(ed.visual_range().is_none(), "normal mode");
+        let mut ed = grid(2, 5);
+        ed.mode = Mode::Insert;
+        assert!(ed.visual_range().is_none(), "insert mode");
+    }
+
+    #[test]
+    fn char_visual_range_orders_the_ends() {
+        let mut ed = grid(2, 5);
+        press(&mut ed, Key::Char('v'));
+        press(&mut ed, Key::Char('l'));
+        press(&mut ed, Key::Char('l'));
+        let r = ed.visual_range().expect("visual mode");
+        assert_eq!((r.start, r.end), ((0, 0), (0, 2)));
+        assert!(!r.linewise);
+        assert!(r.inclusive);
+    }
+
+    #[test]
+    fn char_visual_range_orders_a_backward_selection() {
+        let mut ed = grid(2, 5);
+        ed.row = 1;
+        ed.col = 4;
+        press(&mut ed, Key::Char('v'));
+        press(&mut ed, Key::Char('h'));
+        let r = ed.visual_range().expect("visual mode");
+        assert_eq!((r.start, r.end), ((1, 3), (1, 4)));
+    }
+
+    #[test]
+    fn line_visual_range_covers_the_whole_lines() {
+        let mut ed = grid(3, 5);
+        ed.row = 2;
+        ed.col = 3;
+        press(&mut ed, Key::Char('V'));
+        press(&mut ed, Key::Char('k'));
+        let r = ed.visual_range().expect("visual mode");
+        assert_eq!(
+            (r.start, r.end),
+            ((1, 0), (2, 5)),
+            "the cols are the whole-line ends"
+        );
+        assert!(r.linewise);
+    }
+
+    #[test]
+    fn char_visual_spans_cross_the_wrapped_rows() {
+        let mut ed = grid(2, 12);
+        press(&mut ed, Key::Char('v'));
+        press(&mut ed, Key::Char('j'));
+        press(&mut ed, Key::Char('l'));
+        press(&mut ed, Key::Char('l'));
+        // The selection runs (0,0) to (1,2). At width 6 each 12-char
+        // line wraps to two rows: the first two rows are fully
+        // selected, the third to col 2, the fourth has none.
+        assert_eq!(
+            ed.visual_row_spans(0, 4, 6),
+            vec![Some((0, 6)), Some((0, 6)), Some((0, 3)), None]
+        );
+        // The same spans, one display row into the document.
+        assert_eq!(
+            ed.visual_row_spans(1, 3, 6),
+            vec![Some((0, 6)), Some((0, 3)), None]
+        );
+        // A scroll past the rows is empty.
+        assert!(ed.visual_row_spans(10, 4, 6).is_empty());
+    }
+
+    #[test]
+    fn line_visual_spans_shade_the_whole_wrapped_rows() {
+        let mut ed = grid(3, 12);
+        press(&mut ed, Key::Char('V'));
+        press(&mut ed, Key::Char('j'));
+        // Lines 0..=1 at width 6: four full display rows, then none.
+        assert_eq!(
+            ed.visual_row_spans(0, 6, 6),
+            vec![
+                Some((0, 6)),
+                Some((0, 6)),
+                Some((0, 6)),
+                Some((0, 6)),
+                None,
+                None
+            ]
+        );
+    }
+
+    #[test]
+    fn a_single_char_selection_shades_just_that_char() {
+        let mut ed = grid(1, 5);
+        press(&mut ed, Key::Char('v'));
+        // No motion: the anchor char only.
+        assert_eq!(ed.visual_row_spans(0, 1, 8), vec![Some((0, 1))]);
+        press(&mut ed, Key::Char('$'));
+        // To end of line: the whole line.
+        assert_eq!(ed.visual_row_spans(0, 1, 8), vec![Some((0, 5))]);
+    }
+
+    #[test]
+    fn spans_are_empty_outside_the_visual_modes() {
+        let ed = grid(2, 12);
+        assert!(ed.visual_row_spans(0, 4, 6).is_empty());
+        let mut ed = grid(2, 12);
+        ed.mode = Mode::Insert;
+        assert!(ed.visual_row_spans(0, 4, 6).is_empty());
     }
 }
