@@ -186,10 +186,13 @@ pub trait SessionPort: Send + Sync {
 
     /// Resolve the on-disk directory backing a session
     /// (docs/goal-ux.md section 1.7). The file-based implementation
-    /// maps it to `<sessions_root>/<session>`; a future daemon port
-    /// would return the daemon's working directory. Extensions use it
-    /// (via their own goal-state access) to locate the session's goal
-    /// files; the TUI itself never reads goal files.
+    /// maps a bare name to `<sessions_root>/<session>`; an absolute
+    /// path is an explicit session dir, used as-is (issue #31: the
+    /// tv `open` action hands the discovered dir to the TUI). A
+    /// future daemon port would return the daemon's working directory.
+    /// Extensions use it (via their own goal-state access) to find
+    /// the session's goal files; the TUI itself never reads goal
+    /// files.
     fn session_dir(&self, session: &SessionId) -> Result<std::path::PathBuf, BusError>;
 
     /// The session-local model stream channel file

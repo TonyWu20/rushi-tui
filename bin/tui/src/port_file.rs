@@ -41,6 +41,13 @@ const CWD_FILE: &str = "cwd";
 /// The session loop lock file name. The harness holds an exclusive
 /// `flock` on this file for the process life (phase-2 plan 4.6).
 const LOOP_LOCK_FILE: &str = ".loop.lock";
+/// The session-identity record file name (kernel issue #44, the
+/// `loop.meta` sidecar). The live loop writes it beside `loop.pid`
+/// after taking the lock. It is the authority for identity: the
+/// recorded pid, session name, and canonical dir. The lock stays the
+/// authority for liveness. A storage detail; never referenced above
+/// the port.
+const LOOP_META_FILE: &str = "loop.meta";
 /// The session-local model stream channel file name
 /// (docs/tui-streaming-response.md section 3.1).
 /// The harness creates and deletes it around each model call;
@@ -127,14 +134,44 @@ impl FileSessionPort {
     /// Probe for a live loop of this session. Lock-first: attempts a
     /// non-blocking `flock` on `sessions/<name>/.loop.lock`. If the
     /// lock is free, no live loop exists and the probe returns
-    /// `None`. If the lock is held, a live loop owns the session; the
-    /// `loop.pid` check (pid alive plus the session id in its command
-    /// line) names the group to report.
+    /// `None`.
+    ///
+    /// When the lock is held, the `loop.meta` identity record (kernel
+    /// issue #44) is preferred over the bare pid path: the recorded
+    /// pid must be alive (a `kill -0` on the resolved process group)
+    /// and its recorded name-or-dir must name this session. That
+    /// replaces the whole-arg cmdline check, which a loop started
+    /// with the absolute session dir fails (issue #31: a live pid
+    /// plus a held lock probed idle, and `stop_external_loop`
+    /// no-oped). When the record is absent, the probe falls back to
+    /// the bare `loop.pid` plus the session-id identity check, so
+    /// old loops keep working.
     pub fn external_loop_pid(&self, session: &SessionId) -> Result<Option<i32>, BusError> {
         let dir = self.session_dir(session)?;
         if loop_lock_is_free(&dir) {
             return Ok(None);
         }
+        // Prefer the identity record when present. A corrupt or
+        // unreadable record degrades to the fallback below, the same
+        // as an absent record: it must not masquerade as an
+        // identity.
+        let meta = read_loop_meta(&dir).unwrap_or_default();
+        if let Some(meta) = meta {
+            // The record's pid names the live loop. It may be a group
+            // member, not the leader, so liveness resolves the group.
+            let Some(pid) = i32::try_from(meta.pid).ok() else {
+                return Ok(None);
+            };
+            if group_alive(pid) && meta.matches_name_or_dir(session.as_str()) {
+                return Ok(Some(pid));
+            }
+            // The record is present but does not name this session, or
+            // its pid is gone: a held lock for another session, or a
+            // stale record. Do not claim it.
+            return Ok(None);
+        }
+        // No record (an old loop): the bare `loop.pid` plus the
+        // identity check names the group to report.
         let Some(pid) = self.read_loop_pid(session)? else {
             return Ok(None);
         };
@@ -148,15 +185,35 @@ impl FileSessionPort {
 
     /// Stop a loop this TUI did not start. Lock-first: attempts a
     /// non-blocking `flock` on `.loop.lock`. If the lock is free, no
-    /// live loop exists. If the lock is held, proceeds with the
-    /// pid-based stop via the persistent `loop.pid` artifact. Returns
-    /// a message on success, or `None` when no live loop matches this
-    /// session (FT-003).
+    /// live loop exists. If the lock is held, the `loop.meta`
+    /// identity record (kernel issue #44) is preferred: it names the
+    /// loop to stop by the recorded pid, even when that pid differs
+    /// from the bare `loop.pid` (issue #31). When the record is
+    /// absent, the stop proceeds with the bare pid-based path.
+    /// Returns a message on success, or `None` when no live loop
+    /// matches this session (FT-003).
     pub fn stop_external_loop(&self, session: &SessionId) -> Result<Option<String>, BusError> {
         let dir = self.session_dir(session)?;
         if loop_lock_is_free(&dir) {
             return Ok(None);
         }
+        // Prefer the identity record when present. A corrupt or
+        // unreadable record degrades to the bare pid path below, the
+        // same as an absent record: it must not masquerade as an
+        // identity.
+        let meta = read_loop_meta(&dir).unwrap_or_default();
+        if let Some(meta) = meta {
+            let Some(pid) = i32::try_from(meta.pid).ok() else {
+                return Ok(None);
+            };
+            if !group_alive(pid) || !meta.matches_name_or_dir(session.as_str()) {
+                return Ok(None);
+            }
+            group_stop(pid);
+            return Ok(Some(format!("stopped external loop pid {pid} (loop.meta)")));
+        }
+        // No record (an old loop): the bare `loop.pid` plus the
+        // identity check.
         let Some(pid) = self.read_loop_pid(session)? else {
             return Ok(None);
         };
@@ -419,14 +476,22 @@ impl SessionPort for FileSessionPort {
     fn session_dir(&self, session: &SessionId) -> Result<PathBuf, BusError> {
         let name = session.as_str();
         let p = Path::new(name);
+        // An empty name or a `..` component (any position) is an
+        // invalid session id: it can escape the session store.
         if name.is_empty()
-            || p.is_absolute()
             || p.components()
                 .any(|c| matches!(c, std::path::Component::ParentDir))
         {
             return Err(BusError::Io {
                 what: format!("invalid session id `{name}`"),
             });
+        }
+        // An absolute path is an explicit session dir (issue #31):
+        // the caller (the tv `open` action, or a human) resolved a
+        // session outside the configured sessions root. Use it as-is.
+        // Everything else is a name joined under the sessions root.
+        if p.is_absolute() {
+            return Ok(p.to_path_buf());
         }
         Ok(self.sessions_root.join(name))
     }
@@ -846,6 +911,100 @@ fn loop_lock_is_free(session_dir: &Path) -> bool {
     }
 }
 
+/// The `loop.meta` session-identity record written by the live loop
+/// (kernel issue #44, TUI consumer issue #31).
+///
+/// The record is a flat TOML file beside the bare `loop.pid`:
+///
+/// ```toml
+/// pid = 12345
+/// session = "issue-29"
+/// dir = "/abs/sessions/issue-29"
+/// binary = "rushi"
+/// started = 1758790200
+/// ```
+///
+/// The lock stays the authority for liveness. The record is the
+/// authority for identity: the probe and the stop match the recorded
+/// fields instead of re-deriving the session from a cmdline
+/// substring. `pid`, `session`, and `dir` carry the decision.
+/// `binary` and `started` are recorded facts the record keeps for
+/// other consumers (tv-rushi, `rq`).
+///
+/// The reader is local to this port: the pinned `rushi-common` 0.1.5
+/// predates the kernel-side module, and the flake builds the TUI
+/// against the crates.io kernel only. When the kernel publishes the
+/// shared reader, this type can move to it.
+#[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+struct LoopMeta {
+    /// The loop process pid. The same value the harness writes to
+    /// the bare `loop.pid`.
+    pub pid: u32,
+    /// The recorded session name: the bare name when the loop was
+    /// started with one, the last component of the dir when it was
+    /// started with a session dir.
+    pub session: String,
+    /// The canonical absolute session dir the loop runs.
+    pub dir: String,
+    /// The base name of the executable running the loop.
+    #[allow(dead_code)] // recorded fact; the TUI decides on pid + name-or-dir only
+    pub binary: String,
+    /// Unix time (seconds) the record was written.
+    #[allow(dead_code)] // recorded fact; the TUI decides on pid + name-or-dir only
+    pub started: i64,
+}
+
+impl LoopMeta {
+    /// Does `target` name this record's session?
+    ///
+    /// `target` is a bare session name or a session dir, as a
+    /// consumer probe resolves it. It matches when it equals the
+    /// recorded `session` name, or when it is the recorded `dir`
+    /// (or canonicalizes to it). This name-or-dir match replaces the
+    /// cmdline substring check (issue #44).
+    fn matches_name_or_dir(&self, target: &str) -> bool {
+        if target == self.session {
+            return true;
+        }
+        let target_path = Path::new(target);
+        if target_path == Path::new(&self.dir) {
+            return true;
+        }
+        // The target may differ from the recorded dir only in
+        // canonical form (a `..`-free relative prefix, a `.`
+        // component).
+        if target_path.is_dir() {
+            if let Ok(canonical) = target_path.canonicalize() {
+                if canonical.to_string_lossy() == self.dir {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+}
+
+/// Read `<dir>/loop.meta`.
+///
+/// - `Ok(None)`: the record is absent (an old loop or session). The
+///   caller falls back to the lock plus the bare `loop.pid` plus the
+///   identity check.
+/// - `Ok(Some(meta))`: the live loop recorded its identity.
+/// - `Err`: the record is present but unreadable or malformed. The
+///   caller falls back the same way. A corrupt record must not
+///   masquerade as an identity.
+fn read_loop_meta(dir: &Path) -> Result<Option<LoopMeta>, BusError> {
+    let data = match std::fs::read_to_string(dir.join(LOOP_META_FILE)) {
+        Ok(d) => d,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(BusError::from(e)),
+    };
+    let meta: LoopMeta = toml::from_str(&data).map_err(|e| BusError::Io {
+        what: format!("loop.meta is not a valid record: {e}"),
+    })?;
+    Ok(Some(meta))
+}
+
 /// The process group of `pid`, resolved portably via `getpgid`.
 /// Returns `None` when the pid is gone or unresolvable (`getpgid`
 /// yields `-1`). Works for a group *member* as well as the leader, so
@@ -1178,6 +1337,380 @@ mod tests {
             c.port.external_loop_pid(&SessionId::new("s1")).unwrap(),
             None,
             "a dead pid is not this session's loop"
+        );
+    }
+
+    // The `loop.meta` record (kernel issue #44, TUI consumer issue
+    // #31): the probe and the stop prefer the record over the bare
+    // pid plus cmdline path when it is present.
+
+    /// Hold the exclusive `flock` on a session lock file in the
+    /// calling process, so a probe sees a held lock without a
+    /// spawned loop group. The returned file holds the lock; the
+    /// lock releases when the file is dropped.
+    fn hold_session_lock(lock_path: &Path) -> File {
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(lock_path)
+            .expect("the session dir holds its lock file");
+        let fd = file.as_raw_fd();
+        assert_eq!(
+            unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) },
+            0,
+            "no other lock holds this file in the test"
+        );
+        file
+    }
+
+    fn write_meta(dir: &Path, pid: u32, session: &str, meta_dir: &Path) {
+        let meta = LoopMeta {
+            pid,
+            session: session.to_string(),
+            dir: meta_dir.to_string_lossy().into_owned(),
+            binary: "rushi".to_string(),
+            started: 0,
+        };
+        std::fs::write(dir.join(LOOP_META_FILE), toml::to_string(&meta).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn loop_meta_roundtrip_reads_back_and_matches_name_or_dir() {
+        let dir = TempDir::new().unwrap();
+        let meta = LoopMeta {
+            pid: 4242,
+            session: "s-meta".into(),
+            dir: "/abs/sessions/s-meta".into(),
+            binary: "rushi".into(),
+            started: 1758790200,
+        };
+        std::fs::write(
+            dir.path().join(LOOP_META_FILE),
+            toml::to_string(&meta).unwrap(),
+        )
+        .unwrap();
+        let read = read_loop_meta(dir.path())
+            .unwrap()
+            .expect("the record is present");
+        assert_eq!(read, meta);
+        assert!(read.matches_name_or_dir("s-meta"), "the recorded name");
+        assert!(
+            read.matches_name_or_dir("/abs/sessions/s-meta"),
+            "the recorded dir"
+        );
+        assert!(!read.matches_name_or_dir("other-1"), "a different name");
+        assert!(
+            !read.matches_name_or_dir("/abs/sessions/other-1"),
+            "a different dir"
+        );
+    }
+
+    #[test]
+    fn loop_meta_absent_reads_as_none() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("loop.pid"), "4242\n").unwrap();
+        assert!(
+            read_loop_meta(dir.path()).unwrap().is_none(),
+            "no record is the old-loop case: the fallback path"
+        );
+    }
+
+    #[test]
+    fn loop_meta_malformed_is_an_error() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join(LOOP_META_FILE), "pid = \n").unwrap();
+        assert!(
+            read_loop_meta(dir.path()).is_err(),
+            "a corrupt record must not masquerade as an identity"
+        );
+    }
+
+    #[test]
+    fn loop_meta_matches_a_noncanonical_dir_spelling() {
+        let root = TempDir::new().unwrap();
+        let sess = root.path().join("issue-29");
+        std::fs::create_dir_all(&sess).unwrap();
+        let canonical = sess.canonicalize().unwrap();
+        let meta = LoopMeta {
+            pid: 1,
+            session: "issue-29".into(),
+            dir: canonical.to_string_lossy().into_owned(),
+            binary: "rushi".into(),
+            started: 0,
+        };
+        // A `.` prefix is a non-canonical spelling of the same dir.
+        let noncanonical = canonical.parent().unwrap().join(".").join("issue-29");
+        assert!(
+            meta.matches_name_or_dir(noncanonical.to_str().unwrap()),
+            "the same dir in non-canonical form still matches"
+        );
+    }
+
+    #[test]
+    fn external_loop_pid_prefers_the_meta_record() {
+        let c = make_cfg(None);
+        let sid = SessionId::new("s-meta");
+        let dir = c.dir.path().join("sessions").join("s-meta");
+        std::fs::create_dir_all(&dir).unwrap();
+        // The lock is the liveness authority: hold it in this
+        // process so the probe sees a held lock.
+        let lock = hold_session_lock(&dir.join(LOOP_LOCK_FILE));
+        let self_pid = std::process::id() as i32;
+        // The record names the live process and the bare session
+        // name. Nothing in this process's command line names the
+        // session, so the legacy cmdline check cannot pass: the
+        // record is the only identity source here.
+        write_meta(&dir, self_pid as u32, "s-meta", &dir);
+        assert_eq!(
+            c.port.external_loop_pid(&sid).unwrap(),
+            Some(self_pid),
+            "the recorded pid passes the probe via the record"
+        );
+        // A record that names another session must not be claimed,
+        // even with the lock held and a live recorded pid.
+        write_meta(&dir, self_pid as u32, "s-recorded", &dir);
+        assert_eq!(
+            c.port.external_loop_pid(&sid).unwrap(),
+            None,
+            "a record naming another session is not claimed"
+        );
+        // A dead recorded pid is not a live loop, lock or not.
+        write_meta(&dir, 999_999_999, "s-meta", &dir);
+        assert_eq!(
+            c.port.external_loop_pid(&sid).unwrap(),
+            None,
+            "a dead recorded pid is not this session's loop"
+        );
+        // No record: the fallback path has no bare pid, so no loop.
+        std::fs::remove_file(dir.join(LOOP_META_FILE)).unwrap();
+        assert_eq!(
+            c.port.external_loop_pid(&sid).unwrap(),
+            None,
+            "an absent record probes the bare pid path"
+        );
+        // The lock releases on the guard drop: the probe clears.
+        drop(lock);
+        assert_eq!(c.port.external_loop_pid(&sid).unwrap(), None);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn external_loop_pid_matches_a_loop_started_with_an_abs_dir() {
+        // The issue #31 producer case: a live loop started with the
+        // absolute session dir. Its command line carries the dir, not
+        // the bare session name, so the legacy whole-arg cmdline check
+        // fails and the probe reports idle. The `loop.meta` record
+        // (the kernel's identity sidecar) closes the match.
+        let c = make_cfg(None);
+        let sid = SessionId::new("s-abs");
+        let dir = c.dir.path().join("sessions").join("s-abs");
+        std::fs::create_dir_all(&dir).unwrap();
+        let abs_dir = dir.canonicalize().unwrap();
+        let pid_file = dir.join("leader.pid");
+        let lock_path = dir.join(LOOP_LOCK_FILE);
+        let inner = format!(
+            "exec 9>'{}'; flock -x 9; echo $$ > {}; while :; do sleep 1; done",
+            lock_path.display(),
+            pid_file.display()
+        );
+        // The group's argument list carries the abs dir, like a
+        // `setsid rushi run /abs/sessions/s-abs` starter.
+        let child = std::process::Command::new("setsid")
+            .args(["bash", "-c", &inner, abs_dir.to_str().unwrap()])
+            .spawn()
+            .unwrap();
+        let mut guard = LoopGroupGuard {
+            child: Some(child),
+            leader: 0,
+        };
+        for _ in 0..100 {
+            if pid_file.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let pid = match std::fs::read_to_string(&pid_file)
+            .ok()
+            .and_then(|r| r.trim().parse::<i32>().ok())
+        {
+            // The group leader is live and its command line carries
+            // the abs dir (not the bare name).
+            Some(p) if proc_is_alive_group_leader_named(p, abs_dir.to_str().unwrap()) => p,
+            _ => {
+                eprintln!("SKIPPED: no live group leader was observable here");
+                return; // the guard kills the group on drop
+            }
+        };
+        guard.leader = pid;
+        // The kernel writer's record: the bare name plus the
+        // canonical dir.
+        write_meta(&dir, pid as u32, "s-abs", &abs_dir);
+        // The legacy check must fail here: the command line carries
+        // the abs dir, not the bare name. This is the bug the record
+        // fixes.
+        assert!(
+            !cmdline_names_session(pid, "s-abs"),
+            "the abs-dir loop's cmdline must not name the bare session"
+        );
+        assert_eq!(
+            c.port.external_loop_pid(&sid).unwrap(),
+            Some(pid),
+            "the probe claims the abs-dir loop via the record"
+        );
+        // The discovery half: probing with the abs dir itself (what
+        // the tv `open` action hands the TUI) matches the record's
+        // recorded dir.
+        assert_eq!(
+            c.port
+                .external_loop_pid(&SessionId::new(abs_dir.to_str().unwrap()))
+                .unwrap(),
+            Some(pid),
+            "the abs-dir probe matches the record's dir"
+        );
+        // The stop path kills the group via the recorded pid.
+        let msg = c.port.stop_external_loop(&sid).unwrap();
+        assert!(
+            msg.is_some() && msg.as_ref().unwrap().contains(&pid.to_string()),
+            "the stop names the record's pid: {msg:?}"
+        );
+        let mut dead = false;
+        for _ in 0..35 {
+            if proc_is_dead_or_zombie(pid) {
+                dead = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(
+            dead,
+            "the abs-dir loop must die within the escalation window"
+        );
+        // the guard kills the group and reaps the child on drop
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn stop_external_loop_uses_the_meta_pid_not_the_bare_pid_file() {
+        // The issue #31 stop case: the record names a pid that is not
+        // the bare `loop.pid` value. The stop kills the record's pid
+        // group, not the bare pid file's.
+        let c = make_cfg(None);
+        let sid = SessionId::new("s-meta-stop");
+        let dir = c.dir.path().join("sessions").join("s-meta-stop");
+        let _ = std::fs::create_dir_all(&dir);
+        let Some((leader, member, _guard)) = spawn_member_group(&dir, "s-meta-stop", true) else {
+            eprintln!("SKIPPED: the member group was not observable here");
+            return;
+        };
+        assert_ne!(member, leader, "the recorded pid must not be the leader");
+        // The bare pid file records the leader. The record records
+        // the member.
+        std::fs::write(dir.join("loop.pid"), format!("{leader}\n")).unwrap();
+        write_meta(&dir, member as u32, "s-meta-stop", &dir);
+        let msg = c.port.stop_external_loop(&sid).unwrap();
+        assert!(
+            msg.is_some(),
+            "the record's live pid passes the stop identity check"
+        );
+        assert!(
+            msg.as_ref().unwrap().contains(&member.to_string()),
+            "the stop reports the record's pid, not the bare pid file's: {msg:?}"
+        );
+        let mut dead = false;
+        for _ in 0..35 {
+            if proc_is_dead_or_zombie(member) && proc_is_dead_or_zombie(leader) {
+                dead = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(
+            dead,
+            "the record's pid group and its leader must die within the escalation window"
+        );
+        // the guard reaps the child on drop
+    }
+
+    // The discovery half (issue #31): the session argument may be an
+    // explicit session dir. The port maps an absolute path as-is;
+    // everything else joins under the sessions root.
+
+    #[test]
+    fn session_dir_accepts_an_explicit_abs_dir_and_rejects_traversal() {
+        let c = make_cfg(None);
+        let abs = c.dir.path().join("elsewhere").join("s-x");
+        std::fs::create_dir_all(&abs).unwrap();
+        assert_eq!(
+            c.port
+                .session_dir(&SessionId::new(abs.to_str().unwrap()))
+                .unwrap(),
+            abs,
+            "an explicit abs dir is used as-is"
+        );
+        assert_eq!(
+            c.port.session_dir(&SessionId::new("bare")).unwrap(),
+            c.dir.path().join("sessions").join("bare"),
+            "a bare name still joins under the sessions root"
+        );
+        assert!(
+            c.port.session_dir(&SessionId::new("../etc")).is_err(),
+            "a relative traversal is rejected"
+        );
+        assert!(
+            c.port.session_dir(&SessionId::new("/a/../../b")).is_err(),
+            "an absolute traversal is rejected"
+        );
+        assert!(
+            c.port.session_dir(&SessionId::new("")).is_err(),
+            "an empty id is rejected"
+        );
+    }
+
+    #[test]
+    fn read_events_reads_from_an_explicit_abs_dir() {
+        let c = make_cfg(None);
+        let rt = runtime();
+        let abs = c.dir.path().join("outside").join("s-out");
+        std::fs::create_dir_all(&abs).unwrap();
+        std::fs::write(
+            abs.join(LOG_FILE),
+            r#"{"v":1,"type":"user_message","ts":"t","content":"hi"}
+"#,
+        )
+        .unwrap();
+        let evs = block_on(
+            &rt,
+            c.port.read_events(&SessionId::new(abs.to_str().unwrap())),
+        )
+        .unwrap();
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].kind(), EventKind::UserMessage);
+    }
+
+    #[test]
+    fn append_event_creates_the_dir_for_an_explicit_session_dir() {
+        let c = make_cfg(None);
+        let rt = runtime();
+        let abs = c.dir.path().join("outside").join("s-new");
+        let ev = Event::Json {
+            obj: serde_json::json!({"v":1,"type":"user_message","ts":"t","content":"first"}),
+        };
+        block_on(
+            &rt,
+            c.port
+                .append_event(&SessionId::new(abs.to_str().unwrap()), &ev),
+        )
+        .unwrap();
+        let content = std::fs::read_to_string(abs.join(LOG_FILE)).unwrap();
+        assert!(
+            content.contains("\"content\":\"first\""),
+            "the event lands in the explicit dir, not the sessions root"
+        );
+        assert!(
+            !c.dir.path().join("sessions").exists()
+                || !c.dir.path().join("sessions").join("s-new").exists(),
+            "nothing leaks into the sessions root"
         );
     }
 
@@ -1879,7 +2412,7 @@ mod tests {
         let ev = Event::Json {
             obj: serde_json::json!({"v":1,"type":"user_message","ts":"t","content":"x"}),
         };
-        for evil in ["../etc", "a/../../b", "/abs", ""] {
+        for evil in ["../etc", "a/../../b", "/a/../../b", ""] {
             let err = block_on(&rt, c.port.append_event(&SessionId::new(evil), &ev)).unwrap_err();
             assert!(matches!(err, BusError::Io { .. }), "{evil}: {err:?}");
         }

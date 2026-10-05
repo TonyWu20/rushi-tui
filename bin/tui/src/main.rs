@@ -64,8 +64,12 @@ use port_file::FileSessionPort;
     about = "Terminal UI for the rushi harness session log"
 )]
 struct Args {
-    /// The session to open. If omitted, the TUI asks for a new session
-    /// name: the session is created on its first appended event.
+    /// The session to open: a bare session name (joined under the
+    /// configured sessions root), or an explicit session dir — an
+    /// absolute path used as-is (issue #31: the tv `open` action
+    /// hands the discovered dir to the TUI). If omitted, the TUI
+    /// asks for a new session name: the session is created on its
+    /// first appended event.
     session: Option<String>,
 
     /// Path to the harness config file. Resolved through
