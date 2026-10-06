@@ -1069,7 +1069,12 @@ fn tree_summarize_branch_spawns_compact() {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&compact, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-    let mut pty = Pty::spawn(tui_bin(), "summarize", &cfg, Some(bindir.to_string_lossy().as_ref()));
+    let mut pty = Pty::spawn(
+        tui_bin(),
+        "summarize",
+        &cfg,
+        Some(bindir.to_string_lossy().as_ref()),
+    );
     // Wait for the seeded session transcript to render.
     let missing = wait_markers(&mut pty, &["final"], 10.0, 10.0);
     assert!(pty.alive(), "process died during startup");

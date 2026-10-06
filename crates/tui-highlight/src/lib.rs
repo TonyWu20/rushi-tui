@@ -1031,12 +1031,7 @@ mod tests {
     /// string-colored run across lines, like the C block-comment test.
     #[test]
     fn nix_indented_string_stays_coherent() {
-        let src = concat!(
-            "# comment\n",
-            "text = ''\n",
-            "  hello ${name}\n",
-            "'';\n",
-        );
+        let src = concat!("# comment\n", "text = ''\n", "  hello ${name}\n", "'';\n",);
         let segs = highlight_lines(src, Some("nix"));
         assert_eq!(segs.len(), 4);
         let green = role_style(HlRole::StringLit);

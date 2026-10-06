@@ -2443,12 +2443,7 @@ impl Editor {
                 let ge = key == Key::Char('e');
                 let n = self.count.max(1);
                 let res = if ge {
-                    word_end_backward(
-                        &self.lines,
-                        (self.row, self.col),
-                        n,
-                        WordClass::Editor,
-                    )
+                    word_end_backward(&self.lines, (self.row, self.col), n, WordClass::Editor)
                 } else {
                     WORD_end_backward(&self.lines, (self.row, self.col), n)
                 };
@@ -4585,7 +4580,9 @@ fn find_next_match(
 
 #[cfg(test)]
 mod word_class_tests {
-    use super::{word_backward, word_end, word_end_backward, word_forward, WORD_end_backward, WordClass};
+    use super::{
+        word_backward, word_end, word_end_backward, word_forward, WORD_end_backward, WordClass,
+    };
 
     fn lines() -> Vec<String> {
         vec!["foo-bar baz".to_string()]

@@ -1686,7 +1686,13 @@ impl ExtHost {
     /// Send an `invoke` op to the extension that owns the given
     /// command. Returns the request id, or `None` when no extension
     /// is alive.
-    pub fn request_invoke(&self, ext: &str, id: &str, value: Option<&str>, session: Option<&str>) -> Option<u64> {
+    pub fn request_invoke(
+        &self,
+        ext: &str,
+        id: &str,
+        value: Option<&str>,
+        session: Option<&str>,
+    ) -> Option<u64> {
         let i = self.disc.index_by_name.get(ext)?;
         let s = &self.inner.slots[*i];
         if !matches!(

@@ -1490,7 +1490,12 @@ mod tests {
         let lines = wrap_cell_segments(segs, 6);
         let joined: Vec<String> = lines
             .iter()
-            .map(|l| l.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>().join(" "))
+            .map(|l| {
+                l.iter()
+                    .map(|(_, t)| t.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
             .collect();
         assert_eq!(joined, vec!["one", "two", "three"]);
     }
@@ -1501,7 +1506,12 @@ mod tests {
         let lines = wrap_cell_segments(segs, 7);
         let joined: Vec<String> = lines
             .iter()
-            .map(|l| l.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>().join(" "))
+            .map(|l| {
+                l.iter()
+                    .map(|(_, t)| t.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
             .collect();
         assert_eq!(joined, vec!["aa bb", "cc"]);
     }

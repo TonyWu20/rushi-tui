@@ -922,7 +922,9 @@ fn loop_identity_ok(pid: i32, session: &str, loop_name: &str) -> bool {
         let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
             return false;
         };
-        cmdline.split(|b| *b == 0).any(|arg| arg == session.as_bytes())
+        cmdline
+            .split(|b| *b == 0)
+            .any(|arg| arg == session.as_bytes())
     }
 }
 
@@ -951,7 +953,9 @@ fn proc_exec_path(pid: i32) -> Option<PathBuf> {
     if n <= 0 {
         return None;
     }
-    std::str::from_utf8(&buf[..n as usize]).ok().map(PathBuf::from)
+    std::str::from_utf8(&buf[..n as usize])
+        .ok()
+        .map(PathBuf::from)
 }
 
 impl TailCursor {

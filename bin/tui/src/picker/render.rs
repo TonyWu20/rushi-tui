@@ -263,13 +263,13 @@ fn render_preview(
         // The focused preview pane gets a green border
         // (docs/tree-ui-design-from-human-phase-2.md item 4).
         // Unfocused panes keep the `Status` border.
-        .border_style(Style::default().fg(
-            palette.color(if state.focus == crate::float::Focus::Preview {
+        .border_style(Style::default().fg(palette.color(
+            if state.focus == crate::float::Focus::Preview {
                 crate::color::Role::Success
             } else {
                 crate::color::Role::Status
-            }),
-        ))
+            },
+        )))
         .title(Line::from(Span::styled(
             header,
             Style::default().fg(palette.color(crate::color::Role::Hint)),

@@ -45,14 +45,12 @@ pub fn turns(events: &[Event], base_seq: usize, loop_running: bool) -> Vec<Turn>
         // results. A bare in-progress tool call is not a candidate, so
         // the tail holds until the result settles.
         let active_tail = if in_progress {
-            (start + 1..end).rev().find(|&i| {
-                match events[i].kind() {
-                    EventKind::AssistantMessage => events[i]
-                        .get_str("content")
-                        .is_some_and(|c| !c.is_empty()),
-                    EventKind::ToolResult => true,
-                    _ => false,
+            (start + 1..end).rev().find(|&i| match events[i].kind() {
+                EventKind::AssistantMessage => {
+                    events[i].get_str("content").is_some_and(|c| !c.is_empty())
                 }
+                EventKind::ToolResult => true,
+                _ => false,
             })
         } else {
             None
@@ -751,15 +749,15 @@ mod tests {
         // in-flight call is not a candidate, so the tail holds on the
         // previous message a1. This is the persistence fix: no flash
         // to the in-flight call.
-        let events = vec![
-            user("u1"),
-            asst("a1", "starting"),
-            call("c1", "bash"),
-        ];
+        let events = vec![user("u1"), asst("a1", "starting"), call("c1", "bash")];
         let st = FoldState::new(&events, 1, true, std::collections::HashSet::new());
         let t = st.turns[0].clone();
         assert!(t.in_progress);
-        assert_eq!(t.active_tail, Some(1), "the in-flight call does not advance the tail");
+        assert_eq!(
+            t.active_tail,
+            Some(1),
+            "the in-flight call does not advance the tail"
+        );
         assert!(st.visible(0));
         assert!(st.visible(1));
         assert!(!st.visible(2), "the in-flight call is not the tail");

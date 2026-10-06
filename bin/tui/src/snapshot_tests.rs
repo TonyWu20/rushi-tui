@@ -1093,7 +1093,9 @@ fn summarize_events() -> Vec<Event> {
         ev(
             r#"{"v":1,"type":"assistant_message","ts":"t","id":"a2","content":"answer","tool_calls":[],"stop_reason":"stop","usage":{"input_tokens":1,"output_tokens":1},"reasoning":{}}"#,
         ),
-        ev(r#"{"v":1,"type":"rewind","ts":"t","id":"w1","target_seq":3,"mode":"on","reason":"tui_pick"}"#),
+        ev(
+            r#"{"v":1,"type":"rewind","ts":"t","id":"w1","target_seq":3,"mode":"on","reason":"tui_pick"}"#,
+        ),
         ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u3","content":"again"}"#),
         ev(
             r#"{"v":1,"type":"assistant_message","ts":"t","id":"a3","content":"final","tool_calls":[],"stop_reason":"stop","usage":{"input_tokens":1,"output_tokens":1},"reasoning":{}}"#,
@@ -1110,10 +1112,7 @@ fn tree_summarize_branch_commits() {
     let events = summarize_events();
     let mut app = tree_options_at(events, 7, 2);
     let actions = app.commit_palette();
-    assert_eq!(
-        actions,
-        vec![Action::BranchSummarize { prompt: None }]
-    );
+    assert_eq!(actions, vec![Action::BranchSummarize { prompt: None }]);
     assert!(
         !app.palette_state().open,
         "committing closes the options window"
@@ -1428,7 +1427,8 @@ fn branch_marker_delivered_via_watch_renders_leaf() {
     let build = build_transcript(&app, 80, None);
     let text: Vec<String> = build.lines.iter().map(|l| l.to_string()).collect();
     assert!(
-        text.iter().any(|l| l.contains("branch summarized (rewound marker seq 5)")),
+        text.iter()
+            .any(|l| l.contains("branch summarized (rewound marker seq 5)")),
         "the branch leaf line must render in the transcript:\n{}",
         text.join("\n")
     );

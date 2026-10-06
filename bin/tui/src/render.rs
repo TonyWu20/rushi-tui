@@ -5776,8 +5776,7 @@ mod table_fix_tests {
             "| **bold** | `run.sh` |".to_string(),
         ];
         let grid = table_grid(&rows, 40, &palette);
-        let all_spans: Vec<(ratatui::style::Style, String)> =
-            grid.into_iter().flatten().collect();
+        let all_spans: Vec<(ratatui::style::Style, String)> = grid.into_iter().flatten().collect();
         let joined: String = all_spans
             .iter()
             .map(|(_, t)| t.as_str())
@@ -5791,8 +5790,7 @@ mod table_fix_tests {
         // The bold word keeps its BOLD modifier, the inline code word
         // keeps the InlineCode role color, and the plain runs take the
         // cell base style (all distinct from the token styles).
-        let bold = ratatui::style::Style::default()
-            .add_modifier(ratatui::style::Modifier::BOLD);
+        let bold = ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::BOLD);
         let code_style = palette.style(
             crate::color::Role::InlineCode,
             ratatui::style::Modifier::empty(),
@@ -5802,7 +5800,9 @@ mod table_fix_tests {
             "the bold word must carry the bold style:\n{joined}"
         );
         assert!(
-            all_spans.iter().any(|(s, t)| *t == "run.sh" && *s == code_style),
+            all_spans
+                .iter()
+                .any(|(s, t)| *t == "run.sh" && *s == code_style),
             "the inline code word must carry the InlineCode style:\n{joined}"
         );
     }
