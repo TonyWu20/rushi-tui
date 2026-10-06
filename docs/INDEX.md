@@ -6,6 +6,11 @@ shipped, and what is next.
 
 ## Repo state (2026-09-30)
 
+**`loop.meta` consumer (2026-10-05, implemented).** The external
+loop probe and stop prefer the kernel's `loop.meta` identity
+record (kernel issue #44, TUI issue #31). The session argument
+accepts an explicit session dir. See `tui-loop-meta-identity.md`.
+
 **Working.** `bin/tui` is the swappable Ratatui TUI front-end for
 the `rushi` kernel. It compiles and runs against the `rushi-common`
 crates.io dep, pinned to `0.1.3` in
@@ -112,6 +117,7 @@ Method and conventions: `tui-insta-snapshot-testing.md`.
 | `tui-handoff-turn-fold-rescope.md` | Closed | 2026-09-15 | Open items for the turn-fold re-scope. All items resolved on 2026-09-15: the `pty_perf` test is green (fine-grained 100 ms poll), the spec and index are updated, bookkeeping is recorded, diff churn is cleaned, clippy is clean across the workspace (the 33-warning backlog was cleared). |
 | `coauthor-guard.md` | Implemented | 2026-09-15 | Blocks co-author trailers not in `.githooks/coauthor-allowlist`, at commit time and at push time. The `commit-msg` and `pre-push` hooks plus the installer script. |
 | `tui-self-wired-entry.md` | Implemented | 2026-09-22 | Issue #22 adaptation: the `rushi-tui` entry command, the shared kernel config-path resolver (`rushi_common::paths`, kernel PR #30), and the self-wired Tier-1 loop (`rushi run <session>`, `--loop-cmd` override). |
+| `tui-loop-meta-identity.md` | Implemented | 2026-10-05 | Issue #31: the external loop probe and stop prefer the kernel's `loop.meta` identity record. The session argument accepts an explicit session dir (the tv `open` action). |
 
 ## Status legend
 
