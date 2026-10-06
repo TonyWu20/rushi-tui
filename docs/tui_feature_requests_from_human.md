@@ -230,11 +230,12 @@ macchiato` as the first internal color scheme. Shipped in
       Detail:
       `docs/tui-feature-requests/2026-09-07.md` (diff-split-layout).
 
-- [ ] The input box does not highlight the whole visual
+- [x] The input box does not highlight the whole visual
       selection in `VISUAL` / `V-LINE`.
       Detail:
       `docs/tui-feature-requests/2026-09-07.md` (visual-selection-highlight).
-      Open.
+      Shipped: the editor box shades the selected span with the
+      selection background; the caret block stays inverted on top.
 
 ## New requests (2026-09-14)
 

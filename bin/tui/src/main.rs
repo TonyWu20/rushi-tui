@@ -599,8 +599,7 @@ fn main() {
             .unwrap_or(80)
             .saturating_sub(16)
             .max(40);
-        host.send_history(&events, init_width,
-                         Some(id.as_str()));
+        host.send_history(&events, init_width, Some(id.as_str()));
     } else {
         // No session argument: ask for a new session name instead of
         // resuming the most recent session.
@@ -1200,8 +1199,11 @@ fn main() {
                             // reply caches and resend this session's
                             // history (docs/ui-extension.md section 4).
                             host.clear_replies();
-                            host.send_history(&events, last_width.saturating_sub(16).max(40),
-                                             Some(id.as_str()));
+                            host.send_history(
+                                &events,
+                                last_width.saturating_sub(16).max(40),
+                                Some(id.as_str()),
+                            );
                             resync_external_loop(&rt, &port, &mut app, &id);
                         }
                     } else {
@@ -1231,8 +1233,11 @@ fn main() {
                     }
                     app.flash(format!("session {name} opened"));
                     host.clear_replies();
-                    host.send_history(&events, last_width.saturating_sub(16).max(40),
-                                     Some(sid.as_str()));
+                    host.send_history(
+                        &events,
+                        last_width.saturating_sub(16).max(40),
+                        Some(sid.as_str()),
+                    );
                     resync_external_loop(&rt, &port, &mut app, &sid);
                 }
                 Action::Handoff(name) => {
@@ -1275,8 +1280,11 @@ fn main() {
                         app.set_sessions(list);
                     }
                     host.clear_replies();
-                    host.send_history(&events, last_width.saturating_sub(16).max(40),
-                                     Some(new_sid.as_str()));
+                    host.send_history(
+                        &events,
+                        last_width.saturating_sub(16).max(40),
+                        Some(new_sid.as_str()),
+                    );
                     // Reattach the target's persistent loop state.
                     // Also block a double start (FT-003): a live loop
                     // for the target would get a second start here.
@@ -1382,8 +1390,11 @@ fn main() {
                     app.set_active(sid.clone(), events.clone(), log_lines);
                     app.set_watch_rx(port.watch(&sid, TailCursor::end()));
                     host.clear_replies();
-                    host.send_history(&events, last_width.saturating_sub(16).max(40),
-                                     Some(sid.as_str()));
+                    host.send_history(
+                        &events,
+                        last_width.saturating_sub(16).max(40),
+                        Some(sid.as_str()),
+                    );
                     resync_external_loop(&rt, &port, &mut app, &sid);
                     app.flash(format!("switched to {name}"));
                 }
@@ -1391,8 +1402,12 @@ fn main() {
                     // Extension command (docs/tui-command-palette.md
                     // section 10): send an invoke op to the owning
                     // extension process.
-                    let req = host.request_invoke(&ext, &id, value.as_deref(),
-                                                   app.active().map(|s| s.as_str()));
+                    let req = host.request_invoke(
+                        &ext,
+                        &id,
+                        value.as_deref(),
+                        app.active().map(|s| s.as_str()),
+                    );
                     match req {
                         Some(req_id) => {
                             app.flash(format!("ext {ext}: {id} — pending (req {req_id})"));
@@ -1961,8 +1976,8 @@ mod resync_tests {
     use super::resync_external_loop;
     use crate::app::App;
     use crate::config::TuiConfig;
-    use crate::port_file::FileSessionPort;
     use crate::port::{LoopHandle, LoopLine, SessionId};
+    use crate::port_file::FileSessionPort;
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicI32, Ordering};

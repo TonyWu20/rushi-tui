@@ -796,7 +796,10 @@ compact_cmd = "/opt/kernel/bin/compact"
 "#,
         );
         let cfg = TuiConfig::load(dir.path().join("config.toml").to_str().unwrap()).unwrap();
-        assert_eq!(cfg.resolve_compact(), PathBuf::from("/opt/kernel/bin/compact"));
+        assert_eq!(
+            cfg.resolve_compact(),
+            PathBuf::from("/opt/kernel/bin/compact")
+        );
     }
 
     #[test]
@@ -812,7 +815,10 @@ args = ["run"]
 "#,
         );
         let cfg = TuiConfig::load(dir.path().join("config.toml").to_str().unwrap()).unwrap();
-        assert_eq!(cfg.resolve_compact(), PathBuf::from("/opt/kernel/bin/compact"));
+        assert_eq!(
+            cfg.resolve_compact(),
+            PathBuf::from("/opt/kernel/bin/compact")
+        );
     }
 
     #[test]
@@ -876,7 +882,11 @@ args = ["run"]
     #[test]
     fn tool_paths_absent_means_nothing_missing() {
         let dir = tempfile::tempdir().unwrap();
-        write(dir.path(), "config.toml", "[active]\nmodel = \"test-model\"\n");
+        write(
+            dir.path(),
+            "config.toml",
+            "[active]\nmodel = \"test-model\"\n",
+        );
         let cfg = TuiConfig::load(dir.path().join("config.toml").to_str().unwrap()).unwrap();
         assert!(cfg.tool_paths_missing.is_empty());
         assert_eq!(cfg.tool_dirs_found, 0);
@@ -887,12 +897,15 @@ args = ["run"]
         let dir = tempfile::tempdir().unwrap();
         let empty = dir.path().join("tools");
         std::fs::create_dir_all(&empty).unwrap(); // exists, but no tool.toml inside
-        write(dir.path(), "config.toml", "[paths]\nnative_tool_paths = [\"tools\"]\n");
+        write(
+            dir.path(),
+            "config.toml",
+            "[paths]\nnative_tool_paths = [\"tools\"]\n",
+        );
         let cfg = TuiConfig::load(dir.path().join("config.toml").to_str().unwrap()).unwrap();
         assert_eq!(cfg.tool_paths_missing, vec![empty]);
         assert_eq!(cfg.tool_dirs_found, 0);
     }
-
 
     #[test]
     fn bad_arg_style_rejected() {

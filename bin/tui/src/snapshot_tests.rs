@@ -1093,7 +1093,9 @@ fn summarize_events() -> Vec<Event> {
         ev(
             r#"{"v":1,"type":"assistant_message","ts":"t","id":"a2","content":"answer","tool_calls":[],"stop_reason":"stop","usage":{"input_tokens":1,"output_tokens":1},"reasoning":{}}"#,
         ),
-        ev(r#"{"v":1,"type":"rewind","ts":"t","id":"w1","target_seq":3,"mode":"on","reason":"tui_pick"}"#),
+        ev(
+            r#"{"v":1,"type":"rewind","ts":"t","id":"w1","target_seq":3,"mode":"on","reason":"tui_pick"}"#,
+        ),
         ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u3","content":"again"}"#),
         ev(
             r#"{"v":1,"type":"assistant_message","ts":"t","id":"a3","content":"final","tool_calls":[],"stop_reason":"stop","usage":{"input_tokens":1,"output_tokens":1},"reasoning":{}}"#,
@@ -1110,10 +1112,7 @@ fn tree_summarize_branch_commits() {
     let events = summarize_events();
     let mut app = tree_options_at(events, 7, 2);
     let actions = app.commit_palette();
-    assert_eq!(
-        actions,
-        vec![Action::BranchSummarize { prompt: None }]
-    );
+    assert_eq!(actions, vec![Action::BranchSummarize { prompt: None }]);
     assert!(
         !app.palette_state().open,
         "committing closes the options window"
@@ -1428,7 +1427,8 @@ fn branch_marker_delivered_via_watch_renders_leaf() {
     let build = build_transcript(&app, 80, None);
     let text: Vec<String> = build.lines.iter().map(|l| l.to_string()).collect();
     assert!(
-        text.iter().any(|l| l.contains("branch summarized (rewound marker seq 5)")),
+        text.iter()
+            .any(|l| l.contains("branch summarized (rewound marker seq 5)")),
         "the branch leaf line must render in the transcript:\n{}",
         text.join("\n")
     );
@@ -1637,5 +1637,127 @@ fn tree_row_tags_carry_the_class_fg_color() {
         buf[(tag_x, list.y + 4)].fg,
         report,
         "the unselected assistant row keeps the Report tone"
+    );
+}
+
+// ── editor visual selection (issue #8) ────────────────────────────
+
+// The editor box shades the whole visual selection, not just the
+// inverted caret cell (issue #8): the selected span takes the
+// `Role::Selection` background; the caret cell keeps its inverted
+// block on top of it.
+
+/// The terminal row that renders `text`, scanning the buffer rows.
+fn row_of(buf: &ratatui::buffer::Buffer, h: u16, text: &str) -> u16 {
+    let line = |y: u16| -> String {
+        (0..buf.area().width)
+            .map(|x| buf[(x, y)].symbol().chars().next().unwrap_or(' '))
+            .collect()
+    };
+    (0..h)
+        .find(|&y| line(y).contains(text))
+        .unwrap_or_else(|| panic!("no buffer row renders `{text}`"))
+}
+
+#[test]
+fn editor_char_visual_shades_the_selected_span() {
+    let mut app = App::new();
+    app.set_draft(String::from("hello world"));
+    app.editor_press(Key::Esc);
+    app.editor_press(Key::Char('0')); // col 0
+    app.editor_press(Key::Char('v'));
+    app.editor_press(Key::Char('w')); // cursor on the `o` of world
+    let (host, _tmp) = empty_host();
+    let sel_bg = app.palette().color(crate::color::Role::Selection);
+    let plain = app.palette().color(crate::color::Role::PlainText);
+    let buf = render_buffer(&mut app, &host, 80, 24);
+    let y = row_of(&buf, 24, "hello world");
+    // The draft text starts at x=2 (one margin col, one border col).
+    assert_eq!(
+        buf[(3, y)].bg,
+        sel_bg,
+        "the selected span carries the selection background"
+    );
+    assert_eq!(
+        buf[(3, y)].fg,
+        plain,
+        "the selected span keeps the prose foreground"
+    );
+    // The caret block on the cursor cell (col 6 -> x=8) stays
+    // inverted, not shaded.
+    assert_eq!(buf[(8, y)].bg, ratatui::style::Color::White);
+    assert_eq!(buf[(8, y)].fg, ratatui::style::Color::Black);
+    // The char past the selection (the `w`) stays unshaded.
+    assert_eq!(buf[(9, y)].bg, ratatui::style::Color::Reset);
+}
+
+#[test]
+fn editor_line_visual_shades_the_whole_display_rows() {
+    let mut app = App::new();
+    app.set_draft(String::from("hello world\nfoo bar"));
+    app.editor_press(Key::Esc);
+    app.editor_press(Key::Char('g'));
+    app.editor_press(Key::Char('g')); // line 0
+    app.editor_press(Key::Char('V')); // line-wise visual
+    let (host, _tmp) = empty_host();
+    let sel_bg = app.palette().color(crate::color::Role::Selection);
+    let buf = render_buffer(&mut app, &host, 80, 24);
+    let y0 = row_of(&buf, 24, "hello world");
+    let y1 = row_of(&buf, 24, "foo bar");
+    // "hello world" is 11 chars: text cols x=2..=12, the blank at
+    // x=13. The caret block on the `h` (x=2) stays inverted.
+    assert_eq!(buf[(2, y0)].bg, ratatui::style::Color::White);
+    assert_eq!(
+        buf[(3, y0)].bg,
+        sel_bg,
+        "the selected row keeps the selection background"
+    );
+    assert_eq!(buf[(12, y0)].bg, sel_bg);
+    // The blank past the text on a shaded row is not shaded.
+    assert_eq!(buf[(13, y0)].bg, ratatui::style::Color::Reset);
+    // The second row is outside the selection.
+    assert_eq!(
+        buf[(2, y1)].bg,
+        ratatui::style::Color::Reset,
+        "the unselected row keeps its plain background"
+    );
+}
+
+#[test]
+fn editor_char_visual_shades_across_wrapped_rows() {
+    // A 44-char draft line wraps to two display rows in the 36-col
+    // box interior at w=40; a `v` to `$` selection spans both.
+    let line = "aaaa bbbb cccc dddd eeee ffff gggg hhhh iiii";
+    assert_eq!(line.chars().count(), 44);
+    let mut app = App::new();
+    app.set_draft(line.to_string());
+    app.editor_press(Key::Esc);
+    app.editor_press(Key::Char('0'));
+    app.editor_press(Key::Char('v'));
+    app.editor_press(Key::Char('$')); // to end of line
+    let (host, _tmp) = empty_host();
+    let sel_bg = app.palette().color(crate::color::Role::Selection);
+    let buf = render_buffer(&mut app, &host, 40, 24);
+    let y0 = row_of(&buf, 24, "aaaa");
+    let y1 = row_of(&buf, 24, "iiii");
+    assert!(y0 < y1, "the wrapped fragment sits on a later row");
+    // Display row 0 holds source cols 0..35 (x=2..=37), all
+    // selected.
+    assert_eq!(buf[(3, y0)].bg, sel_bg);
+    assert_eq!(
+        buf[(37, y0)].bg,
+        sel_bg,
+        "the last selected char of the first row is shaded"
+    );
+    // Display row 1 holds source cols 36..43 ("hh iiii"), eight
+    // chars at x=2..=9. The cursor rests on the last `i` (the
+    // inverted block stays at x=9); the rest are shaded.
+    assert_eq!(buf[(2, y1)].bg, sel_bg);
+    assert_eq!(buf[(5, y1)].bg, sel_bg);
+    assert_eq!(buf[(9, y1)].bg, ratatui::style::Color::White);
+    assert_eq!(
+        buf[(10, y1)].bg,
+        ratatui::style::Color::Reset,
+        "the blank past the row text is not shaded"
     );
 }

@@ -4686,6 +4686,17 @@ pub fn draw(
             .map(|r| r.text)
             .collect()
     };
+    // The visual-selection shading of the editor box (issue #8): the
+    // selected span takes the `Role::Selection` background, the same
+    // tone as the browse overlay's selection. One entry per display
+    // row of the window, aligned to `ed_lines`.
+    let sel_bg = app.palette().color(crate::color::Role::Selection);
+    let visual_spans: Vec<Option<(usize, usize)>> = if naming {
+        Vec::new()
+    } else {
+        app.editor()
+            .visual_row_spans(scroll, input_interior, input_wrap_w)
+    };
     // One paragraph per editor line. No line-level highlight; the
     // cursor row shows a single inverted block cell at the caret
     // column so the position is always visible, and the hardware
@@ -4725,6 +4736,7 @@ pub fn draw(
             width: inner_i.width,
             height: 1,
         };
+        let sel = visual_spans.get(j).copied().flatten();
         let line = if naming && j == 0 {
             Line::from(vec![
                 Span::styled("> ", Style::default().add_modifier(Modifier::BOLD)),
@@ -4736,23 +4748,48 @@ pub fn draw(
             // in normal style, then one inverted block cell. Only
             // this one cell is inverted so the caret is always
             // visible even when the hardware cursor is not blinking.
-            // The rest of the line stays plain. In the on-char
-            // modes (normal, replace, visual) the block covers the
-            // char under the cursor, so that char is drawn exactly
-            // once (the highlighted cell); the insert caret is a
-            // blank block cell that keeps the char under it.
-            let (before, caret, after) =
-                cursor_line_spans(l, cursor_col, app.editor().mode().cursor_on_char());
+            // In the on-char modes (normal, replace, visual) the
+            // block covers the char under the cursor, so that char
+            // is drawn exactly once (the highlighted cell); the
+            // insert caret is a blank block cell that keeps the char
+            // under it. The visual selection shades the row around
+            // the block (issue #8); the block keeps its inverted
+            // style so the caret stays visible on the selection.
+            let on_char = app.editor().mode().cursor_on_char();
+            let (_before, caret, _after) = cursor_line_spans(l, cursor_col, on_char);
             let style = Style::default().bg(Color::White).fg(Color::Black);
-            let mut spans = Vec::new();
-            if !before.is_empty() {
-                spans.push(Span::styled(before.iter().collect::<String>(), prose));
-            }
+            let chars: Vec<char> = l.chars().collect();
+            // The block covers display column `cursor_col`; the
+            // on-char modes resume the text one cell later.
+            let caret_lo = cursor_col.min(chars.len());
+            let after_lo = if on_char {
+                caret_lo.saturating_add(1).min(chars.len())
+            } else {
+                caret_lo
+            };
+            let mut spans = shade_editor_segment(&chars, 0, caret_lo, sel, prose, sel_bg);
             spans.push(Span::styled(caret.to_string(), style));
-            if !after.is_empty() {
-                spans.push(Span::styled(after.iter().collect::<String>(), prose));
-            }
+            spans.extend(shade_editor_segment(
+                &chars,
+                after_lo,
+                chars.len(),
+                sel,
+                prose,
+                sel_bg,
+            ));
             Line::from(spans)
+        } else if sel.is_some() {
+            // A selected row without the caret: the selected span
+            // takes the selection background (issue #8).
+            let chars: Vec<char> = l.chars().collect();
+            Line::from(shade_editor_segment(
+                &chars,
+                0,
+                chars.len(),
+                sel,
+                prose,
+                sel_bg,
+            ))
         } else {
             Line::from(Span::styled(l.clone(), prose))
         };
@@ -4937,6 +4974,60 @@ fn cursor_line_spans(line: &str, col: usize, on_char: bool) -> (Vec<char>, char,
     } else {
         (chars[..cc].to_vec(), ' ', chars[cc..].to_vec())
     }
+}
+
+/// One editor row segment: `chars[lo..hi)` in `prose`, with the
+/// visual-selection range `sel` (a half-open char range, row-
+/// relative) shaded by the `Role::Selection` background (issue #8).
+/// The shaded span keeps the `prose` foreground so the draft text
+/// stays readable on the tone; the rest of the segment keeps
+/// `prose` as-is.
+fn shade_editor_segment(
+    chars: &[char],
+    lo: usize,
+    hi: usize,
+    sel: Option<(usize, usize)>,
+    prose: Style,
+    sel_bg: Color,
+) -> Vec<Span<'static>> {
+    let hi = hi.min(chars.len());
+    let lo = lo.min(hi);
+    if lo >= hi {
+        return Vec::new();
+    }
+    let Some((s, e)) = sel else {
+        return vec![Span::styled(
+            chars[lo..hi].iter().collect::<String>(),
+            prose,
+        )];
+    };
+    let s = s.min(chars.len());
+    let e = e.min(chars.len());
+    let shaded = prose.patch(Style::default().bg(sel_bg));
+    let mut out: Vec<Span<'static>> = Vec::new();
+    let head_end = s.min(hi);
+    if head_end > lo {
+        out.push(Span::styled(
+            chars[lo..head_end].iter().collect::<String>(),
+            prose,
+        ));
+    }
+    let mid_lo = s.max(lo);
+    let mid_end = e.min(hi);
+    if mid_end > mid_lo {
+        out.push(Span::styled(
+            chars[mid_lo..mid_end].iter().collect::<String>(),
+            shaded,
+        ));
+    }
+    let tail_start = e.max(lo);
+    if tail_start < hi {
+        out.push(Span::styled(
+            chars[tail_start..hi].iter().collect::<String>(),
+            prose,
+        ));
+    }
+    out
 }
 #[cfg(test)]
 mod cursor_span_tests {
@@ -5685,8 +5776,7 @@ mod table_fix_tests {
             "| **bold** | `run.sh` |".to_string(),
         ];
         let grid = table_grid(&rows, 40, &palette);
-        let all_spans: Vec<(ratatui::style::Style, String)> =
-            grid.into_iter().flatten().collect();
+        let all_spans: Vec<(ratatui::style::Style, String)> = grid.into_iter().flatten().collect();
         let joined: String = all_spans
             .iter()
             .map(|(_, t)| t.as_str())
@@ -5700,8 +5790,7 @@ mod table_fix_tests {
         // The bold word keeps its BOLD modifier, the inline code word
         // keeps the InlineCode role color, and the plain runs take the
         // cell base style (all distinct from the token styles).
-        let bold = ratatui::style::Style::default()
-            .add_modifier(ratatui::style::Modifier::BOLD);
+        let bold = ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::BOLD);
         let code_style = palette.style(
             crate::color::Role::InlineCode,
             ratatui::style::Modifier::empty(),
@@ -5711,7 +5800,9 @@ mod table_fix_tests {
             "the bold word must carry the bold style:\n{joined}"
         );
         assert!(
-            all_spans.iter().any(|(s, t)| *t == "run.sh" && *s == code_style),
+            all_spans
+                .iter()
+                .any(|(s, t)| *t == "run.sh" && *s == code_style),
             "the inline code word must carry the InlineCode style:\n{joined}"
         );
     }

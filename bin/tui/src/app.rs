@@ -3869,9 +3869,7 @@ impl App {
                     }
                     Some(ranges) => {
                         if !rushi_common::rewind::seq_in_ranges(seq, &ranges) {
-                            self.flash(
-                                "pick an active-path event to summarize its branch",
-                            );
+                            self.flash("pick an active-path event to summarize its branch");
                             return Vec::new();
                         }
                     }
@@ -4770,9 +4768,7 @@ impl App {
                     }
                     // Hand the instruction to main, which spawns
                     // `bin/compact --branch --prompt <text>`.
-                    return vec![Action::BranchSummarize {
-                        prompt: Some(text),
-                    }];
+                    return vec![Action::BranchSummarize { prompt: Some(text) }];
                 }
                 Key::Esc => {
                     self.branch_prompt_armed = false;
