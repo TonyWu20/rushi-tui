@@ -122,13 +122,21 @@ above.
 ## Final message panel
 
 The idle assistant reply of a completed turn sits in a rounded box.
-The box has no title. Only the `Report`-toned border marks it.
-The border color is distinct from the `Accent` user-box border.
-The thinking block renders inside the box. The panel is built by
-`report_box_rows` in `render.rs`.
+The box carries the bare event timestamp as its
+title: `YYYY-MM-DD HH:MM:SS` (the event `ts` in local time,
+no role
+word). The title is absent when the event has no parseable
+`ts`. Only the `Report`-toned border and the title mark
+the box. The border color is distinct from the `Accent` user-box
+border. The thinking block renders inside the box. The panel is
+built by `report_box_rows` in `render.rs`.
+(docs/tui-feature-requests/2026-10-07.md, message-panel-
+timestamps.)
 
-The user box keeps its rounded `Accent` border and its `User`
-title. It has no background fill. Only the border remains. Both
+The user box keeps its rounded `Accent` border. Its title reads
+`User · YYYY-MM-DD HH:MM:SS` with the event timestamp, or bare
+`User`
+without. It has no background fill. Only the border remains. Both
 boxes share the rounded shape via `message_box_rows`.
 
 ## Thinking block default
@@ -201,7 +209,8 @@ decision on 2026-09-30.
   and sessions.
 - The default on entering browse is all folded.
 - Thinking blocks start collapsed.
-- The final idle reply sits in a title-less `Report` panel.
+- The final idle reply sits in the `Report` panel, titled with the bare `YYYY-MM-DD HH:MM:SS` when the event
+carries a parseable `ts`.
 - `zM` and `zR` reset all levels at once.
 - `zj` and `zk` jump between turn tops only.
 - Extension tools join the tally through the event `name` field.

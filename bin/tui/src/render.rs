@@ -188,32 +188,61 @@ fn owns_raw_line(k: usize, prov: &[Option<usize>], hard: &[String]) -> Option<St
 /// `content` are the already-wrapped, styled message lines.
 /// The caller clamps them to the panel inner width. The panel
 /// spans the full `width`. An empty message renders a single empty
-/// interior row between the two border rows.
+/// interior row between the two border rows. The title is `User`
+/// plus the event timestamp when `ts` is set: `User · YYYY-MM-DD HH:MM:SS`
+/// (docs/tui-feature-requests/2026-10-07.md, message-panel-
+/// timestamps). `None` keeps the bare `User` title.
 fn user_box_rows(
     content: &[Line<'static>],
     width: usize,
     palette: &crate::color::Palette,
+    ts: Option<&str>,
 ) -> Vec<Line<'static>> {
+    let title = Some(match ts {
+        Some(t) => format!("User \u{00B7} {t}"),
+        None => "User".to_string(),
+    });
     message_box_rows(
         content,
         width,
         palette,
-        Some("User"),
+        title.as_deref(),
         crate::color::Role::Accent,
     )
 }
 
 /// The panel for the final idle assistant message of a completed
-/// turn. It is the same rounded shape as the user box. It carries no
-/// title. Only the `Report`-toned border marks the panel. The tone
-/// is distinct from the `Accent` user box. See docs/tui-turn-fold.md
-/// "Final message panel".
+/// turn. It is the same rounded shape as the user box. It carries
+/// the bare event timestamp as its title: `YYYY-MM-DD HH:MM:SS`
+/// when `ts` is set (the event timestamp,
+/// docs/tui-feature-requests/2026-10-07.md,
+/// message-panel-timestamps). No role word. `None` keeps the
+/// titleless box. Only the `Report`-toned border marks the panel.
+/// The tone is distinct from the `Accent` user box. See
+/// docs/tui-turn-fold.md "Final message panel".
 fn report_box_rows(
     content: &[Line<'static>],
     width: usize,
     palette: &crate::color::Palette,
+    ts: Option<&str>,
 ) -> Vec<Line<'static>> {
-    message_box_rows(content, width, palette, None, crate::color::Role::Report)
+    message_box_rows(content, width, palette, ts, crate::color::Role::Report)
+}
+
+/// The event log timestamp as the panel title time: the `ts` field
+/// (RFC 3339, UTC) rendered in local time as `YYYY-MM-DD HH:MM:SS`.
+/// `None` when the field is missing or the value does not parse, so
+/// old logs keep the titleless forms.
+/// (docs/tui-feature-requests/2026-10-07.md, message-panel-
+/// timestamps.)
+fn event_ts_local(e: &Event) -> Option<String> {
+    let ts = e.get_str("ts")?;
+    let dt = chrono::DateTime::parse_from_rfc3339(ts).ok()?;
+    Some(
+        dt.with_timezone(&chrono::Local)
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string(),
+    )
 }
 
 /// The rounded message panel with no background fill. The border
@@ -402,7 +431,8 @@ fn event_lines<'a>(
                 .split('\n')
                 .map(String::from)
                 .collect();
-            let panel = user_box_rows(&wrapped, box_w, palette);
+            let ts = event_ts_local(e);
+            let panel = user_box_rows(&wrapped, box_w, palette, ts.as_deref());
             out.extend(panel);
             // Ownership: the top and bottom border rows are UI chrome; the
             // interior rows keep the per-source-line yank ownership
@@ -543,7 +573,8 @@ fn event_lines<'a>(
                 // per-source-line yank ownership.
                 let mut panel_rows = think_rows;
                 panel_rows.extend(body_rows.iter().cloned());
-                let panel = report_box_rows(&panel_rows, width, palette);
+                let ts = event_ts_local(e);
+                let panel = report_box_rows(&panel_rows, width, palette, ts.as_deref());
                 out.extend(panel);
                 owns.push(None);
                 owns.extend(std::iter::repeat_n(None, n_think));
@@ -5478,7 +5509,7 @@ mod user_box_tests {
             Line::from(Span::raw("Hello, world")),
             Line::from(Span::raw("second line")),
         ];
-        let lines = user_box_rows(&content, 40, &palette);
+        let lines = user_box_rows(&content, 40, &palette, None);
         // Two content lines plus the top and bottom border rows.
         assert_eq!(lines.len(), 4, "got: {}", joined(&lines));
         let top = lines[0].to_string();
@@ -5507,7 +5538,7 @@ mod user_box_tests {
         use super::report_box_rows;
         let palette = Palette::builtin(Level::Rgb);
         let content = vec![Line::from(Span::raw("All done."))];
-        let lines = report_box_rows(&content, 40, &palette);
+        let lines = report_box_rows(&content, 40, &palette, None);
         assert_eq!(lines.len(), 3, "got: {}", joined(&lines));
         let top = lines[0].to_string();
         assert!(top.starts_with('╭'), "rounded top-left: {top:?}");
@@ -5534,8 +5565,82 @@ mod user_box_tests {
     #[test]
     fn empty_user_box_is_three_rows() {
         let palette = Palette::builtin(Level::Rgb);
-        let lines = user_box_rows(&[], 40, &palette);
+        let lines = user_box_rows(&[], 40, &palette, None);
         assert_eq!(lines.len(), 3, "top + empty interior + bottom: {lines:?}");
+    }
+
+    /// The user panel title carries the event timestamp:
+    /// `User · YYYY-MM-DD HH:MM:SS` on the top border.
+    #[test]
+    fn user_box_title_carries_the_event_timestamp() {
+        let palette = Palette::builtin(Level::Rgb);
+        let content = vec![Line::from(Span::raw("Hello, world"))];
+        let lines = user_box_rows(&content, 40, &palette, Some("2026-09-07 08:18:39"));
+        let top = lines[0].to_string();
+        assert!(
+            top.contains("User \u{00B7} 2026-09-07 08:18:39"),
+            "the titled top: {top:?}"
+        );
+        assert!(top.starts_with('\u{256D}'), "rounded top-left: {top:?}");
+        assert!(top.ends_with('\u{256E}'), "rounded top-right: {top:?}");
+    }
+
+    /// The report panel title carries the bare event timestamp:
+    /// `YYYY-MM-DD HH:MM:SS` on the top border, no role word.
+    #[test]
+    fn report_box_title_carries_the_event_timestamp() {
+        use super::report_box_rows;
+        let palette = Palette::builtin(Level::Rgb);
+        let content = vec![Line::from(Span::raw("All done."))];
+        let lines = report_box_rows(&content, 40, &palette, Some("2026-09-07 08:20:15"));
+        let top = lines[0].to_string();
+        assert!(
+            top.contains("2026-09-07 08:20:15"),
+            "the titled top: {top:?}"
+        );
+        assert!(!top.contains("Assistant"), "no role word: {top:?}");
+        // The title span sits between the two corner spans.
+        assert_eq!(
+            lines[0].spans.len(),
+            4,
+            "corner, title, fill, corner: {top:?}"
+        );
+    }
+
+    /// `event_ts_local` shapes the log `ts` into local
+    /// `YYYY-MM-DD HH:MM:SS`. The zone-dependent value keeps the
+    /// shape assertion: a 10-character date, a space, and an
+    /// 8-character time.
+    #[test]
+    fn event_ts_local_shapes_the_log_ts() {
+        use super::event_ts_local;
+        use crate::event::Event;
+
+        let e = Event::Json {
+            obj: serde_json::json!({"ts": "2026-10-07T00:00:00Z"}),
+        };
+        let got = event_ts_local(&e).expect("a valid ts parses");
+        assert_eq!(got.len(), 19, "YYYY-MM-DD HH:MM:SS: {got:?}");
+        let (date, time) = got.split_once(' ').expect("the space split");
+        assert_eq!(date.len(), 10, "the date: {date:?}");
+        assert_eq!(&date[4..5], "-", "dash at 4: {date:?}");
+        assert_eq!(&date[7..8], "-", "dash at 7: {date:?}");
+        assert_eq!(time.len(), 8, "the time: {time:?}");
+        assert_eq!(&time[2..3], ":", "colon at 2: {time:?}");
+        assert_eq!(&time[5..6], ":", "colon at 5: {time:?}");
+        for c in got.chars().filter(|c| !matches!(c, '-' | ' ' | ':')) {
+            assert!(c.is_ascii_digit(), "digits only: {got:?}");
+        }
+
+        let missing = Event::Json {
+            obj: serde_json::json!({"content": "x"}),
+        };
+        assert!(event_ts_local(&missing).is_none(), "a missing ts is None");
+
+        let bad = Event::Json {
+            obj: serde_json::json!({"ts": "t"}),
+        };
+        assert!(event_ts_local(&bad).is_none(), "an unparseable ts is None");
     }
 
     /// An assistant message carries no `assistant` marker and no content
