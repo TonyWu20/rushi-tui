@@ -123,7 +123,8 @@ above.
 
 The idle assistant reply of a completed turn sits in a rounded box.
 The box carries the bare event timestamp as its
-title: `HH:MM:SS` (the event `ts` in local time, no role
+title: `YYYY-MM-DD HH:MM:SS` (the event `ts` in local time,
+no role
 word). The title is absent when the event has no parseable
 `ts`. Only the `Report`-toned border and the title mark
 the box. The border color is distinct from the `Accent` user-box
@@ -133,7 +134,8 @@ built by `report_box_rows` in `render.rs`.
 timestamps.)
 
 The user box keeps its rounded `Accent` border. Its title reads
-`User · HH:MM:SS` with the event timestamp, or bare `User`
+`User · YYYY-MM-DD HH:MM:SS` with the event timestamp, or bare
+`User`
 without. It has no background fill. Only the border remains. Both
 boxes share the rounded shape via `message_box_rows`.
 
@@ -207,7 +209,8 @@ decision on 2026-09-30.
   and sessions.
 - The default on entering browse is all folded.
 - Thinking blocks start collapsed.
-- The final idle reply sits in the `Report` panel, titled with the bare `HH:MM:SS` when the event carries a parseable `ts`.
+- The final idle reply sits in the `Report` panel, titled with the bare `YYYY-MM-DD HH:MM:SS` when the event
+carries a parseable `ts`.
 - `zM` and `zR` reset all levels at once.
 - `zj` and `zk` jump between turn tops only.
 - Extension tools join the tally through the event `name` field.

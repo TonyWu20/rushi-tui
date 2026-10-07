@@ -457,9 +457,10 @@ macchiato` as the first internal color scheme. Shipped in
 
 - [x] Add the event timestamp to the user-message panel
       title and the assistant reply panel title. Shipped
-      2026-10-07: the user panel reads `User · HH:MM:SS`,
-      the reply panel reads the bare `HH:MM:SS` (local time,
-      the event `ts` field).
+      2026-10-07: the user panel reads
+      `User · YYYY-MM-DD HH:MM:SS`; the reply panel reads the
+      bare `YYYY-MM-DD HH:MM:SS` (local time, the event
+      `ts` field).
       Detail:
       `docs/tui-feature-requests/2026-10-07.md`
       (message-panel-timestamps).
