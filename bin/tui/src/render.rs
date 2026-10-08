@@ -4921,7 +4921,7 @@ pub fn draw(
         // scope (docs/tree-ui-design-from-human-phase-2.md item 5);
         // `Ctrl+Shift+P` toggles list/preview focus (item 4).
         let mut hints = String::from(
-            "enter ok · esc keep · ctrl-j/k move · ctrl-p preview · ctrl-shift-p focus · tab complete · ctrl-t scope",
+            "enter ok · esc keep · ctrl-j/k move · ctrl-p preview · shift-tab focus · tab complete · ctrl-t scope",
         );
         if app.picker_ref().focus == crate::float::Focus::Preview {
             hints.push_str(" · preview focus");

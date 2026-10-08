@@ -124,8 +124,9 @@ parts. Each part has one job.
   `PgUp` / `PgDn` page. `Home` / `End` jump. `Enter` commits. `Esc`
   closes.
 - `Ctrl+U` / `Ctrl+D` scroll the focused pane.
-- `Ctrl+Shift+P` toggles list/preview focus. `BackTab` is the legacy
-  fallback.
+- `BackTab` (`Shift+Tab`) toggles list/preview focus. It works on
+  every terminal. `Ctrl+Shift+P` does the same where the terminal
+  speaks the kitty keyboard protocol.
 - `Ctrl+P` toggles the preview pane.
 - `Tab` completes the highlighted item into the draft (tree-ui
   phase 2, item 5).

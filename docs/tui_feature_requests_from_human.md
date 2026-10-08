@@ -464,3 +464,14 @@ macchiato` as the first internal color scheme. Shipped in
       Detail:
       `docs/tui-feature-requests/2026-10-07.md`
       (message-panel-timestamps).
+
+## New requests (2026-10-08)
+
+- [x] The `Ctrl+Shift+P` focus switch in the tree-view palette
+      appears ineffective. Shipped 2026-10-08: the advertised
+      key is now `BackTab` (`Shift+Tab`), which works on every
+      terminal. The input-bar hints read `shift-tab focus`.
+      `Ctrl+Shift+P` stays bound for kitty-protocol terminals.
+      Detail:
+      `docs/tui-feature-requests/2026-10-08.md`
+      (focus-switch-regression).

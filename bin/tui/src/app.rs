@@ -3565,7 +3565,7 @@ impl App {
         // The input bar: the `:query` prompt and the tree-stage hints
         // (the active filter leads, like the flat renderer).
         let mut hints = String::from(
-            "enter ok · esc close · ctrl-j/k move · ctrl-p preview · ctrl-shift-p focus · tab complete",
+            "enter ok · esc close · ctrl-j/k move · ctrl-p preview · shift-tab focus · tab complete",
         );
         hints = format!("[f: {filter_label}] · {hints}");
         // The focus indicator

@@ -83,10 +83,11 @@ is not a text edit:
   - `Enter` commits the highlighted item
   - `Esc` closes, dropping any sub-stage
   - `Ctrl+P` toggles the preview pane
-  - `Ctrl+Shift+P` toggles list/preview focus (item 4). The TUI
-    requests the kitty keyboard protocol at startup so capable
-    terminals report the shift modifier; `BackTab` is the legacy
-    fallback where it arrives as plain byte 0x10. The focused
+  - `BackTab` (`Shift+Tab`) toggles list/preview focus (item 4) on
+    every terminal. `Ctrl+Shift+P` does the same where the terminal
+    speaks the kitty keyboard protocol (the TUI requests it at
+    startup); in a legacy terminal the press arrives as plain byte
+    0x10 and stays the `Ctrl+P` preview-pane toggle. The focused
     preview pane gets a green (`Success`) border.
   - `Ctrl+U` / `Ctrl+D` half-page scroll the focused pane (item 4)
   - `Ctrl+F` cycles the event-type filter in the tree stage only
@@ -346,7 +347,7 @@ P2. key-table: given the palette is open, observe printable characters
     and Backspace edit the query, `Ctrl+J`/`Ctrl+K` or the arrows
     move the cursor with ring wrap, `Enter` commits, `Esc` closes
     dropping any sub-stage, `Ctrl+P` toggles the preview pane,
-    `Ctrl+Shift+P` (or `BackTab`) toggles list/preview focus,
+    `BackTab` (`Shift+Tab`) (or `Ctrl+Shift+P` on a kitty-protocol terminal) toggles list/preview focus,
     `Ctrl+U`/`Ctrl+D` half-page scroll the focused pane, `Ctrl+F`
     cycles the event-type filter in the tree stage, and `Tab`
     replaces the typed filter text with the highlighted item's

@@ -1,6 +1,6 @@
 # Tree UI phase 2: navigation, filter, rows, pane
 
-Status: Implemented. Approved and shipped 2026-09-15. Refined 2026-09-16: tag colors (item 1), the kitty protocol enables `Ctrl+Shift+P` (item 4), and `Tab` replaces the typed text (item 5). Refined 2026-09-17: the tree-pane preview renders tool events through the transcript's tool display instead of `\n`-escaped JSON (item 2, below).
+Status: Implemented. Approved and shipped 2026-09-15. Refined 2026-09-16: tag colors (item 1), the kitty protocol enables `Ctrl+Shift+P` (item 4), and `Tab` replaces the typed text (item 5). Refined 2026-09-17: the tree-pane preview renders tool events through the transcript's tool display instead of `\n`-escaped JSON (item 2, below). Refined 2026-10-08: `BackTab` (`Shift+Tab`) is the advertised focus key; it works on every terminal. `Ctrl+Shift+P` stays bound but only reaches the toggle where the terminal speaks the kitty protocol. The input-bar hints now read `shift-tab focus`.
 Parent: `docs/tree-ui-design-from-human.md` ("Follow-up spec decisions
 (2026-09-15)"). Its open points are all resolved in this doc.
 Related: `docs/tui-preview-pane-plan.md` (the windowed pane model),
@@ -46,8 +46,8 @@ no longer move the cursor.
 
 | key | action |
 |---|---|
-| `Ctrl+Shift+P` | toggle focus between the list and the preview |
-| `BackTab` | same as `Ctrl+Shift+P`, the legacy fallback |
+| `BackTab` (`Shift+Tab`) | toggle focus between the list and the preview; works on every terminal |
+| `Ctrl+Shift+P` | the same toggle, only where the terminal speaks the kitty keyboard protocol. In a legacy terminal the press arrives as plain `Ctrl+P` (byte 0x10), the preview-pane toggle |
 | `Ctrl+U` / `Ctrl+D` | half-page scroll of the focused pane |
 
 - Default focus is the entry list.

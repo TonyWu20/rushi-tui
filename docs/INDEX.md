@@ -105,6 +105,9 @@ Method and conventions: `tui-insta-snapshot-testing.md`.
 | `tui-feature-requests/2026-09-16.md` | Detail | 2026-09-22 | Detail for the 2026-09-16 request and feedback: the `working` loop-phase status, tree tag colors, the `Ctrl+Shift+P` focus toggle, and palette `Tab` replace. |
 | `tui-feature-requests/2026-09-19.md` | Detail | 2026-09-22 | Detail for the 2026-09-19 request: the `ge`/`yge` motions in the editor and browse mode. |
 | `tui-feature-requests/2026-09-20.md` | Detail | 2026-09-22 | Detail for the 2026-09-20 requests: the fold-tally hook counters, the `[r-PENDING]` replace mode, and the open tally-inflation investigation. |
+| `tui-feature-requests/2026-09-23.md` | Detail | 2026-10-08 | Detail for the 2026-09-23 requests: the tree fold-and-jump keys (`z` arm, branch-boundary jumps) and the tree input-focus model (`Input` focus target, `Shift+Tab` / `Ctrl+Shift+P` cycler). |
+| `tui-feature-requests/2026-10-07.md` | Detail | 2026-10-08 | Detail for the 2026-10-07 request: the event timestamp in the user and reply panel titles. |
+| `tui-feature-requests/2026-10-08.md` | Detail | 2026-10-08 | Detail for the 2026-10-08 request: the tree-palette focus switch reads ineffective. `BackTab` (`Shift+Tab`) becomes the advertised key; the input-bar hints read `shift-tab focus`. |
 | `tui-ext-repo-split.md` | Historical | 2026-09-15 | The repo-split execution record. The TUI `rushi-common` git re-pointing (item A1) landed 2026-09-15. |
 | `tui-insta-snapshot-testing.md` | Implemented | 2026-09-11 | The insta-snapshot test method: harness, snapshot set, determinism rules. |
 | `tui-perf-freeze-investigation.md` | Investigation | 2026-09-13 | Freeze root cause: the synchronous full transcript build on each cache-key miss. |

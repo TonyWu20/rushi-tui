@@ -76,7 +76,7 @@ pub fn render_palette<'frame>(
     // reflect the new keys, the active filter, and the focused pane
     // (docs/tree-ui-design-from-human-phase-2.md items 3, 4, 5).
     let mut hints = String::from(
-        "enter ok · esc close · ctrl-j/k move · ctrl-p preview · ctrl-shift-p focus · tab complete",
+        "enter ok · esc close · ctrl-j/k move · ctrl-p preview · shift-tab focus · tab complete",
     );
     if state.stage == crate::palette::state::PaletteStage::TreeList {
         // The active filter shows in the hint, e.g. `[f: tool]`.
