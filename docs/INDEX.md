@@ -4,7 +4,17 @@ Authoritative entry point for any agent starting a new session in
 this repo. Read this first. It tells you what exists, what is
 shipped, and what is next.
 
-## Repo state (2026-09-30)
+## Repo state (2026-10-14)
+
+**Layered config load (2026-10-14, issue #35, implemented).** The
+TUI now reads the config through `rushi_common::config_layer`
+(kernel `0.1.6`): the resolved file is the top layer and, when the
+binary runs from a Nix package layout, the store `config.toml` is
+the base layer the top deep-merges over. TUI-only sections
+(`[tui]`, `[loop]`) inherit from the base through the same merge.
+Top-file resolution stays in `resolve_config_path`; layering happens
+at load, not resolution. The kernel dep is pinned to `0.1.6` in
+`bin/tui/Cargo.toml` + `Cargo.lock`.
 
 **`loop.meta` consumer (2026-10-05, implemented).** The external
 loop probe and stop prefer the kernel's `loop.meta` identity
