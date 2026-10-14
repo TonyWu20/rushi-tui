@@ -309,26 +309,51 @@ struct RawToolDisplay {
 }
 
 impl TuiConfig {
-    /// Load the config. A missing file yields defaults (sessions root
-    /// `sessions` next to the given path, no loop command) so the TUI
-    /// stays useful for viewing logs; a corrupt file is a hard error.
+    /// Load the config. A missing top file yields defaults (sessions
+    /// root `sessions` next to the given path, no loop command) so the
+    /// TUI stays useful for viewing logs; a corrupt file is a hard error.
+    ///
+    /// Layered load (issue #35): the resolved file is the top layer.
+    /// When the binary runs from a Nix package layout, the store
+    /// `config.toml` is the base layer and the top deep-merges over it
+    /// (`rushi_common::config_layer`, docs/project-config-precedence.md).
+    /// TUI-only sections (`[tui]`, `[loop]`) inherit from the base layer
+    /// through the same merge. Top-file resolution stays in
+    /// `resolve_config_path`; layering happens at load, not resolution.
     pub fn load(path: &str) -> Result<Self, String> {
+        Self::load_with_base(
+            path,
+            rushi_common::config_layer::find_base_layer().as_deref(),
+        )
+    }
+
+    /// The layered load core with an injectable base. Tests use a fake
+    /// layout instead of the test binary's real exe path. `load` is
+    /// `load_with_base` with the Nix base discovered from the running
+    /// executable: `load_layered_with_base(top, find_base_layer())`,
+    /// which is exactly `config_layer::load_layered(top)`.
+    pub(crate) fn load_with_base(path: &str, base: Option<&Path>) -> Result<Self, String> {
         use crate::color::Level;
         let path = PathBuf::from(path);
-        let content = match std::fs::read_to_string(&path) {
-            Ok(c) => c,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                eprintln!(
-                    "warning: config file {} not found; using defaults",
-                    path.display()
-                );
-                return Ok(Self::defaults_for(&path));
-            }
-            Err(e) => {
-                return Err(format!("cannot read config {}: {e}", path.display()));
-            }
-        };
-        let raw: RawConfig = toml::from_str(&content)
+        // A missing top layer yields defaults (the TUI stays useful for
+        // viewing logs). `load_layered_with_base` errors on a missing
+        // top, so short-circuit here to keep the defaults path.
+        if !path.exists() {
+            eprintln!(
+                "warning: config file {} not found; using defaults",
+                path.display()
+            );
+            return Ok(Self::defaults_for(&path));
+        }
+        // Layered load: when a base exists and differs from the top, the
+        // top deep-merges over the base. TUI-only sections inherit from
+        // the base layer. No base (dev checkout, plain install) is a no-op.
+        // The shared loader already names the failing file (top or base)
+        // in its error, so it propagates as-is.
+        let layers = rushi_common::config_layer::load_layered_with_base(&path, base)?;
+        let raw: RawConfig = layers
+            .value
+            .try_into()
             .map_err(|e| format!("invalid TOML in {}: {e}", path.display()))?;
         let canonical = std::fs::canonicalize(&path)
             .ok()
@@ -932,7 +957,7 @@ args = ["run"]
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "config.toml", "not toml [");
         let err = TuiConfig::load(dir.path().join("config.toml").to_str().unwrap()).unwrap_err();
-        assert!(err.contains("invalid TOML"), "{err}");
+        assert!(err.contains("invalid config TOML"), "{err}");
     }
 
     #[test]
@@ -965,6 +990,104 @@ args = ["run"]
             cfg.ext_dirs.is_empty(),
             "absent ext_dirs means the built-in default layer is used"
         );
+    }
+
+    // ── issue #35: layered config load (config_layer) ──
+    //
+    // A partial top (project) config deep-merges over a base (Nix store)
+    // config. TUI-only sections inherit from the base layer. These use
+    // `load_with_base` with a fake base, because the dev test binary
+    // has no Nix side-by-side base.
+
+    #[test]
+    fn partial_top_inherits_base_tui_and_loop() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "base.toml",
+            "[tui]\next_dirs = [\"store-exts\"]\n\n[loop]\ncommand = \"rushi\"\nargs = [\"run\"]\n",
+        );
+        write(dir.path(), "top.toml", "[active]\nmodel = \"proj-model\"\n");
+        let cfg = TuiConfig::load_with_base(
+            dir.path().join("top.toml").to_str().unwrap(),
+            Some(dir.path().join("base.toml").as_path()),
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.active_model.as_deref(),
+            Some("proj-model"),
+            "the top key wins"
+        );
+        assert_eq!(
+            cfg.ext_dirs,
+            vec![dir.path().join("store-exts")],
+            "the base [tui] ext_dirs survive into a top that omits [tui]"
+        );
+        let loop_cmd = cfg.loop_cmd.as_ref().expect("the base [loop] is inherited");
+        assert_eq!(loop_cmd.command, "rushi");
+        assert_eq!(loop_cmd.args, vec!["run".to_string()]);
+    }
+
+    #[test]
+    fn top_ext_dirs_replace_the_base_array() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "base.toml",
+            "[tui]\next_dirs = [\"store-exts\"]\n",
+        );
+        write(
+            dir.path(),
+            "top.toml",
+            "[tui]\next_dirs = [\"proj-exts\"]\n",
+        );
+        let cfg = TuiConfig::load_with_base(
+            dir.path().join("top.toml").to_str().unwrap(),
+            Some(dir.path().join("base.toml").as_path()),
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.ext_dirs,
+            vec![dir.path().join("proj-exts")],
+            "a top array replaces the base array, it never concats"
+        );
+    }
+
+    #[test]
+    fn top_loop_table_recurse_wins_over_base() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "base.toml",
+            "[loop]\ncommand = \"rushi\"\nargs = [\"run\"]\n",
+        );
+        write(dir.path(), "top.toml", "[loop]\nargs = [\"step\"]\n");
+        let cfg = TuiConfig::load_with_base(
+            dir.path().join("top.toml").to_str().unwrap(),
+            Some(dir.path().join("base.toml").as_path()),
+        )
+        .unwrap();
+        let loop_cmd = cfg.loop_cmd.as_ref().expect("the loop section loads");
+        assert_eq!(
+            loop_cmd.command, "rushi",
+            "the base [loop] command key survives when the top omits it"
+        );
+        assert_eq!(
+            loop_cmd.args,
+            vec!["step".to_string()],
+            "the top args array replaces the base args array"
+        );
+    }
+
+    #[test]
+    fn no_base_layer_is_a_verbatim_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "top.toml", "[active]\nmodel = \"only\"\n");
+        let cfg =
+            TuiConfig::load_with_base(dir.path().join("top.toml").to_str().unwrap(), None).unwrap();
+        assert_eq!(cfg.active_model.as_deref(), Some("only"));
+        assert!(cfg.ext_dirs.is_empty());
+        assert!(cfg.loop_cmd.is_none());
     }
 
     #[test]
