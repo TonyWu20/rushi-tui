@@ -175,13 +175,17 @@ pub enum Action {
         restore_text: Option<String>,
     },
     /// Branch-summarize outcome (docs/tree-ui-design-from-human.md):
-    /// spawn `bin/compact <session> --branch` to summarize the
-    /// abandoned branch of the last top-level `rewind` and append one
-    /// branch `compaction_summary` marker on the active path. `prompt`
-    /// is the user's custom summarize instruction when the
-    /// "Summarize with custom prompt" outcome was picked; `None` uses
-    /// the kernel's default instruction.
+    /// the one-shot fork-and-summarize. Main appends the `rewind`
+    /// marker at `target_seq` (reason tui_pick, mode on: the picked
+    /// event stays in the context), then spawns `bin/compact
+    /// <session> --branch`, which summarizes the open span the
+    /// marker abandoned and appends one branch `compaction_summary`
+    /// marker on the active path. `prompt` is the user's custom
+    /// summarize instruction when the "Summarize with custom prompt"
+    /// outcome was picked; `None` uses the kernel's default
+    /// instruction.
     BranchSummarize {
+        target_seq: u64,
         prompt: Option<String>,
     },
 }
@@ -509,6 +513,11 @@ pub struct App {
     /// draft as the `--prompt` text, Esc cancels. No port action is
     /// emitted while it is armed: the options window is already closed.
     branch_prompt_armed: bool,
+    /// The picked log seq armed with the branch-summarize prompt
+    /// capture (docs/tree-ui-design-from-human.md, "Summarize with
+    /// custom prompt"). The one-shot flow appends the rewind marker
+    /// at this seq before spawning the compact.
+    branch_prompt_target: Option<u64>,
     /// True while a TUI-spawned `bin/compact --branch` child is
     /// running (docs/tree-ui-design-from-human.md). The status line
     /// shows a "branch summarizing" indicator for as long as this is
@@ -834,6 +843,7 @@ impl App {
             events_base_seq: 1,
             view_only_target: None,
             branch_prompt_armed: false,
+            branch_prompt_target: None,
             branch_compacting: false,
             transcript_cache: None,
             stream_block_cache: None,
@@ -3632,7 +3642,7 @@ impl App {
                 label: "Summarize the branch".into(),
                 kind: CmdKind::Run,
                 hint: String::new(),
-                help: "Summarize the abandoned branch and append the summary as a new leaf on the active path. Spawns `bin/compact --branch`. Requires the loop to be idle.".into(),
+                help: "One-shot: append a rewind marker here, then summarize the abandoned branch. The summary lands as a new leaf on the active path. Spawns `bin/compact --branch`. Requires the loop to be idle.".into(),
                 options: Vec::new(),
                 ext: None,
                 preview_kind: crate::palette::items::PreviewKind::Plain,
@@ -3644,7 +3654,7 @@ impl App {
                 label: "Summarize with custom prompt".into(),
                 kind: CmdKind::Run,
                 hint: String::new(),
-                help: "Type a custom summarize instruction; the next Enter sends it to `bin/compact --branch --prompt`, Esc cancels. Requires the loop to be idle.".into(),
+                help: "Type a custom summarize instruction; the next Enter sends it to the one-shot rewind + `bin/compact --branch --prompt`, Esc cancels. Requires the loop to be idle.".into(),
                 options: Vec::new(),
                 ext: None,
                 preview_kind: crate::palette::items::PreviewKind::Plain,
@@ -3848,8 +3858,11 @@ impl App {
                 }]
             }
             "summarize-branch" | "summarize-custom" => {
-                // The two summarize outcomes append a log event and
-                // need an idle loop (docs/tree-ui-design-from-human.md).
+                // The one-shot fork-and-summarize
+                // (docs/tree-ui-design-from-human.md): the picked event
+                // becomes the rewind target. No pre-existing marker is
+                // needed. Both outcomes append log events, so they need
+                // an idle loop.
                 let busy = self
                     .active
                     .as_ref()
@@ -3858,28 +3871,17 @@ impl App {
                     self.flash("loop busy, wait for the step");
                     return Vec::new();
                 }
-                // Summarize targets the abandoned branch of the last
-                // top-level rewind, so the picked event must sit on the
-                // active path (pi-alignment correction). No rewind marker
-                // means no abandoned branch to summarize.
-                match self.rewind_active_ranges() {
-                    None => {
-                        self.flash("no abandoned branch to summarize (no rewind marker)");
-                        return Vec::new();
-                    }
-                    Some(ranges) => {
-                        if !rushi_common::rewind::seq_in_ranges(seq, &ranges) {
-                            self.flash("pick an active-path event to summarize its branch");
-                            return Vec::new();
-                        }
-                    }
-                }
                 match id {
                     "summarize-branch" => {
-                        // Default instruction: close the options and let
-                        // main spawn `bin/compact --branch`.
+                        // Default instruction: close the options,
+                        // scroll to the picked event once the marker
+                        // lands, and let main run the one-shot fork.
                         self.palette_state_mut().close();
-                        vec![Action::BranchSummarize { prompt: None }]
+                        self.view_only_target = Some(idx);
+                        vec![Action::BranchSummarize {
+                            target_seq: seq as u64,
+                            prompt: None,
+                        }]
                     }
                     "summarize-custom" => {
                         // Enter the transient prompt-capture state: the
@@ -3891,6 +3893,7 @@ impl App {
                         self.palette_state_mut().close();
                         self.editor.mode = Mode::Insert;
                         self.branch_prompt_armed = true;
+                        self.branch_prompt_target = Some(seq as u64);
                         self.flash(
                             "branch summarize: type the instruction, Enter sends, Esc cancels",
                         );
@@ -4355,6 +4358,7 @@ impl App {
     /// new session so a stale armed state cannot leak across sessions).
     pub fn disarm_branch_prompt(&mut self) {
         self.branch_prompt_armed = false;
+        self.branch_prompt_target = None;
     }
 
     // ── key handling ────────────────────────────────────────────
@@ -4758,17 +4762,33 @@ impl App {
             match key {
                 Key::Enter => {
                     let text = self.take_draft();
+                    let target = self.branch_prompt_target;
                     self.branch_prompt_armed = false;
+                    self.branch_prompt_target = None;
                     if text.is_empty() {
                         // Nothing typed: keep the capture live so the
                         // user can still type an instruction.
                         self.branch_prompt_armed = true;
+                        self.branch_prompt_target = target;
                         self.flash("empty prompt — type a summarize instruction, Enter sends");
                         return Vec::new();
                     }
-                    // Hand the instruction to main, which spawns
+                    // Scroll to the picked event once the marker lands,
+                    // like the rewind commit path.
+                    if let Some(t) = target {
+                        let base = self.events_base_seq();
+                        let idx = (t as usize)
+                            .saturating_sub(base)
+                            .min(self.events().len().saturating_sub(1));
+                        self.view_only_target = Some(idx);
+                    }
+                    // Hand the instruction to main, which appends the
+                    // rewind marker at the armed target and spawns
                     // `bin/compact --branch --prompt <text>`.
-                    return vec![Action::BranchSummarize { prompt: Some(text) }];
+                    return vec![Action::BranchSummarize {
+                        target_seq: target.unwrap_or(0),
+                        prompt: Some(text),
+                    }];
                 }
                 Key::Esc => {
                     self.branch_prompt_armed = false;

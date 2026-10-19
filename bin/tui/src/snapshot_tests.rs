@@ -1103,25 +1103,35 @@ fn summarize_events() -> Vec<Event> {
     ]
 }
 
-/// Committing "Summarize the branch" on an active-path pick closes the
-/// options and emits the `BranchSummarize` action with no prompt (the
-/// kernel's default summarize instruction).
+/// Committing "Summarize the branch" is the one-shot fork-and-
+/// summarize: the picked event becomes the rewind target. The action
+/// carries that target; main appends the marker, then spawns the
+/// compact. No prompt uses the kernel's default instruction.
 #[test]
 fn tree_summarize_branch_commits() {
     use crate::app::Action;
     let events = summarize_events();
     let mut app = tree_options_at(events, 7, 2);
     let actions = app.commit_palette();
-    assert_eq!(actions, vec![Action::BranchSummarize { prompt: None }]);
+    assert_eq!(
+        actions,
+        vec![Action::BranchSummarize {
+            target_seq: 7,
+            prompt: None,
+        }]
+    );
     assert!(
         !app.palette_state().open,
         "committing closes the options window"
     );
+    // The commit pins the viewport to the picked event (index 6).
+    assert_eq!(app.take_view_only_target(), Some(6));
 }
 
 /// "Summarize with custom prompt" arms the transient prompt capture:
 /// no action is emitted, the window closes, and the next Enter submits
-/// the draft as the `--prompt` instruction.
+/// the draft as the `--prompt` instruction. The armed capture carries
+/// the picked log seq: the one-shot marker lands there.
 #[test]
 fn tree_summarize_custom_arms_prompt_capture() {
     use crate::app::Action;
@@ -1145,9 +1155,12 @@ fn tree_summarize_custom_arms_prompt_capture() {
     assert_eq!(
         actions,
         vec![Action::BranchSummarize {
+            target_seq: 7,
             prompt: Some("note what was abandoned on the branch".into()),
         }]
     );
+    // The submit pins the viewport to the picked event (index 6).
+    assert_eq!(app.take_view_only_target(), Some(6));
 }
 
 /// Esc cancels the prompt capture, keeping the typed text as a plain
@@ -1171,40 +1184,48 @@ fn tree_summarize_custom_esc_cancels() {
     );
 }
 
-/// Without a `rewind` marker there is no abandoned branch to
-/// summarize: committing either outcome keeps the options open.
+/// Without a pre-existing `rewind` marker the one-shot still
+/// commits: the picked event becomes the rewind target. Main appends
+/// the marker, then spawns the compact on its open span.
 #[test]
-fn tree_summarize_without_rewind_marker_is_refused() {
+fn tree_summarize_without_rewind_marker_commits() {
+    use crate::app::Action;
     let events = two_events();
     let mut app = tree_options_at(events, 1, 2);
     let actions = app.commit_palette();
-    assert!(
-        matches!(&actions[..], []),
-        "no summarize is possible without a rewind marker: {actions:?}"
+    assert_eq!(
+        actions,
+        vec![Action::BranchSummarize {
+            target_seq: 1,
+            prompt: None,
+        }]
     );
-    assert!(app.status().is_some(), "the refusal hint must flash");
     assert!(
-        app.palette_state().open,
-        "the options must stay open for the fallback pick"
+        !app.palette_state().open,
+        "committing closes the options window"
     );
 }
 
-/// Picking an off-active-path event refuses the summarize: the
-/// branch is derived from the last rewind marker on the active path.
+/// An off-active-path pick still commits: the picked event becomes
+/// the rewind target. The kernel re-enters the abandoned branch, and
+/// the one-shot span runs from that target to the log end.
 #[test]
-fn tree_summarize_off_path_pick_is_refused() {
+fn tree_summarize_off_path_pick_commits() {
+    use crate::app::Action;
     let events = summarize_events();
     // Seq 4 is the abandoned assistant answer, off the active path.
     let mut app = tree_options_at(events, 4, 2);
     let actions = app.commit_palette();
-    assert!(
-        actions.is_empty(),
-        "an off-path pick yields no port action: {actions:?}"
+    assert_eq!(
+        actions,
+        vec![Action::BranchSummarize {
+            target_seq: 4,
+            prompt: None,
+        }]
     );
-    assert!(app.status().is_some(), "the refusal hint must flash");
     assert!(
-        app.palette_state().open,
-        "the options must stay open for the fallback pick"
+        !app.palette_state().open,
+        "committing closes the options window"
     );
 }
 

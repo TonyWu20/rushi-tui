@@ -1526,13 +1526,18 @@ fn main() {
                     }
                 }
                 // Branch-summarize outcome (docs/tree-ui-design-from-
-                // human.md): spawn the kernel's `bin/compact --branch`,
-                // which summarizes the open span abandoned by the last
-                // top-level `rewind` and appends one branch
-                // `compaction_summary` marker on the active path (with
-                // `--prompt` replacing the default instruction). No
-                // `rewind` marker is appended.
-                Action::BranchSummarize { prompt } => {
+                // human.md): the one-shot fork-and-summarize. First
+                // append the `rewind` marker at the picked event
+                // (reason tui_pick, mode on: the picked event stays in
+                // the context). Then spawn the kernel's `bin/compact
+                // --branch`, which summarizes the open span the marker
+                // abandoned and appends one branch `compaction_summary`
+                // marker on the active path (`--prompt` replacing the
+                // default instruction).
+                Action::BranchSummarize {
+                    target_seq,
+                    prompt,
+                } => {
                     let Some(sid) = app.active().cloned() else {
                         continue;
                     };
@@ -1541,6 +1546,26 @@ fn main() {
                     if app.loop_running(&sid) {
                         app.flash("loop busy, wait for the step");
                         continue;
+                    }
+                    // The one-shot fork: the marker must land in the
+                    // log before the compact child reads it.
+                    let marker =
+                        event::produce::rewind(target_seq, "on", Some("tui_pick"));
+                    match rt.block_on(port.append_event(&sid, &marker)) {
+                        Ok(()) => {}
+                        Err(e) => {
+                            trace(
+                                &rt,
+                                &port,
+                                Some(&sid),
+                                "port",
+                                &format!(
+                                    "branch-summarize rewind marker append failed: {e}"
+                                ),
+                            );
+                            app.flash(e.to_string());
+                            continue;
+                        }
                     }
                     let session_dir = match port.session_dir(&sid) {
                         Ok(d) => d,

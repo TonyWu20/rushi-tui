@@ -1027,12 +1027,14 @@ fn r_pending_shows_label_and_s_completes_the_replace() {
 }
 
 /// The branch-summarize outcome (docs/tree-ui-design-from-human.md):
-/// committing "Summarize the branch" from the tree options spawns
-/// `compact <session> --branch --config <cfg>` as a child process
-/// (kernel issue #22, PR #32). A stub `compact` on PATH records its
-/// argv and appends the branch `compaction_summary` marker, like the
-/// kernel does. The appended marker re-renders into the transcript as
-/// the "branch summarized" leaf.
+/// committing "Summarize the branch" from the tree options is the
+/// one-shot fork-and-summarize. The TUI appends the `rewind` marker
+/// at the picked event, then spawns `compact <session> --branch
+/// --config <cfg>` as a child process (kernel issue #22, PR #32). A
+/// stub `compact` on PATH records its argv and appends the branch
+/// `compaction_summary` marker, like the kernel does. The appended
+/// marker re-renders into the transcript as the "branch summarized"
+/// leaf.
 #[test]
 fn tree_summarize_branch_spawns_compact() {
     let tmp = tmpdir();
@@ -1044,7 +1046,6 @@ fn tree_summarize_branch_spawns_compact() {
         serde_json::json!({"v":1,"type":"assistant_message","ts":ts,"id":"a1","content":"hi","tool_calls":[],"stop_reason":"stop","usage":{"input_tokens":1,"output_tokens":1},"reasoning":{}}),
         serde_json::json!({"v":1,"type":"user_message","ts":ts,"id":"u2","content":"question"}),
         serde_json::json!({"v":1,"type":"assistant_message","ts":ts,"id":"a2","content":"answer","tool_calls":[],"stop_reason":"stop","usage":{"input_tokens":1,"output_tokens":1},"reasoning":{}}),
-        serde_json::json!({"v":1,"type":"rewind","ts":ts,"id":"w1","target_seq":3,"mode":"on","reason":"tui_pick"}),
         serde_json::json!({"v":1,"type":"user_message","ts":ts,"id":"u3","content":"again"}),
         serde_json::json!({"v":1,"type":"assistant_message","ts":ts,"id":"a3","content":"final","tool_calls":[],"stop_reason":"stop","usage":{"input_tokens":1,"output_tokens":1},"reasoning":{}}),
     ]
@@ -1054,11 +1055,12 @@ fn tree_summarize_branch_spawns_compact() {
     seed_session(&sessions, "summarize", &events);
 
     // The stub `compact`: record its argv, then append the branch
-    // marker (the kernel's P2 shape, `branch_of` = the rewind seq 5).
+    // marker (the kernel's P2 shape, `branch_of` = the one-shot
+    // rewind seq 7, the marker the TUI appends at the picked event).
     let bindir = tmp.join("stub-bin");
     std::fs::create_dir_all(&bindir).unwrap();
     let inv = tmp.join("compact-invocation");
-    let marker = "{\"v\":1,\"type\":\"compaction_summary\",\"ts\":\"t\",\"summary\":\"stub branch summary\",\"first_kept_seq\":1,\"branch_of\":5,\"version\":1,\"reason\":\"branch\",\"diverge_seq\":5}";
+    let marker = "{\"v\":1,\"type\":\"compaction_summary\",\"ts\":\"t\",\"summary\":\"stub branch summary\",\"first_kept_seq\":1,\"branch_of\":7,\"version\":1,\"reason\":\"branch\",\"diverge_seq\":7}";
     let script = String::from("#!/bin/sh\n")
         + &format!("echo \"$@\" > {inv}\n", inv = inv.display())
         + "cat >> \"$1/events.jsonl\" <<'EOF'\n"
@@ -1085,23 +1087,23 @@ fn tree_summarize_branch_spawns_compact() {
     );
 
     // The tree flow: Esc -> normal mode, `:tree` + Enter -> the Tree
-    // List stage (filter focus). The tree renders the active path and,
-    // last, the abandoned tail, so the active leaf ("final", seq 7) is
-    // not the last row. Type "final" into the filter: the fuzzy filter
-    // narrows the tree to that one active-path event. Enter commits it
-    // to the four options. Down x2 -> "Summarize the branch". Enter ->
-    // commit -> spawn `compact --branch`.
+    // List stage (filter focus). Type "again" into the filter: the
+    // fuzzy filter narrows the linear log to that one event (seq 5,
+    // not the tail, so the one-shot has an open span to summarize).
+    // Enter commits it to the four options. Down x2 -> "Summarize the
+    // branch". Enter -> commit: the one-shot appends the rewind
+    // marker at seq 5, then spawns `compact --branch`.
     pty.write_input(b"\x1b");
     pty.pump(0.4);
     pty.write_input(b":tree\r");
     pty.pump(1.0);
-    pty.write_input(b"final"); // filter (still filter focus): only seq 7 matches
+    pty.write_input(b"again"); // filter (still filter focus): only seq 5 matches
     pty.pump(0.8);
     pty.write_input(b"\r"); // Enter: commit the single filtered row -> the options
     pty.pump(0.8);
     pty.write_input(b"\x0a\x0a"); // Down x2: the "Summarize the branch" option
     pty.pump(0.5);
-    pty.write_input(b"\r"); // Enter: commit -> spawn `compact --branch`
+    pty.write_input(b"\r"); // Enter: commit -> the one-shot fork
     pty.pump(1.0);
 
     // The stub recorded the exact argv the TUI spawned.
@@ -1124,7 +1126,17 @@ fn tree_summarize_branch_spawns_compact() {
     // (separates "the stub ran" from "the TUI re-rendered it").
     let log_path = sessions.join("summarize").join("events.jsonl");
     let log_tail = std::fs::read_to_string(&log_path).unwrap_or_default();
-    let marker_in_file = log_tail.contains("\"branch_of\":5");
+    // The one-shot fork: the TUI appended the rewind marker at the
+    // picked seq 5 before the spawn (the linear seed carries none).
+    let oneshot_marker = log_tail.contains(r#""type":"rewind""#)
+        && log_tail.contains(r#""target_seq":5"#);
+    assert!(
+        oneshot_marker,
+        "the one-shot rewind marker did not land in {};\nlast 400 bytes:\n{}",
+        log_path.display(),
+        log_tail.chars().rev().take(400).collect::<String>()
+    );
+    let marker_in_file = log_tail.contains("\"branch_of\":7");
     assert!(
         marker_in_file,
         "the stub did not append the branch marker to {};\nlast 400 bytes:\n{}",
@@ -1134,7 +1146,7 @@ fn tree_summarize_branch_spawns_compact() {
 
     let missing = wait_markers(
         &mut pty,
-        &["branch summarized (rewound marker seq 5)"],
+        &["branch summarized (rewound marker seq 7)"],
         10.0,
         10.0,
     );
