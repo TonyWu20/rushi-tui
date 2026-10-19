@@ -8,11 +8,11 @@
         "rust-analyzer-src": "rust-analyzer-src"
       },
       "locked": {
-        "lastModified": 1791115502,
-        "narHash": "sha256-aVTOHyf6BmkMvHThIerMWfUyNe1uCb99rBtWidWeHOE=",
+        "lastModified": 1791899674,
+        "narHash": "sha256-oNKkrIt4ZDapeLTGaeU1URTmk7x90mcH+8vrDwUq5Pg=",
         "owner": "nix-community",
         "repo": "fenix",
-        "rev": "6598f619e53297ea2328ddd40d431c7bc41f7bc1",
+        "rev": "04b421dace0f5bf18d3ca363e95e59395d4cc680",
         "type": "github"
       },
       "original": {
@@ -49,10 +49,38 @@
           "rushi-config",
           "rushi-kernel",
           "rushiTui",
-          "rushi-kernel",
+          "rushi-config",
           "nixpkgs"
         ],
         "rust-analyzer-src": "rust-analyzer-src_3"
+      },
+      "locked": {
+        "lastModified": 1790684979,
+        "narHash": "sha256-vsUeGN4sI81IxNei+4uXatmkCDpMK3Q6l/rtxc1JeEU=",
+        "owner": "nix-community",
+        "repo": "fenix",
+        "rev": "d30cd5c9c2d376fbecb7cabf999270b62b51dda3",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nix-community",
+        "repo": "fenix",
+        "type": "github"
+      }
+    },
+    "fenix_4": {
+      "inputs": {
+        "nixpkgs": [
+          "rushi-config",
+          "rushi-kernel",
+          "rushiTui",
+          "rushi-config",
+          "rushi-kernel",
+          "rushiTui",
+          "rushi-kernel",
+          "nixpkgs"
+        ],
+        "rust-analyzer-src": "rust-analyzer-src_4"
       },
       "locked": {
         "lastModified": 1788603547,
@@ -70,11 +98,11 @@
     },
     "nixpkgs": {
       "locked": {
-        "lastModified": 1791048980,
-        "narHash": "sha256-KgItSKML8Xvte0B7/uGnBDsYzSnnKHcOaiUbgWBXLXw=",
+        "lastModified": 1791734076,
+        "narHash": "sha256-i5qk1kLiit98rRbh1AXmWBNT9QXC/y4l5Wk/u5EdpDQ=",
         "owner": "NixOS",
         "repo": "nixpkgs",
-        "rev": "a7868a727837f3c09cee2ce0ca671c76b1589fed",
+        "rev": "7fd4004d0511991fff3a0524856a9be09e28c5f0",
         "type": "github"
       },
       "original": {
@@ -101,6 +129,22 @@
       }
     },
     "nixpkgs_3": {
+      "locked": {
+        "lastModified": 1790578696,
+        "narHash": "sha256-ZoxIApko70jCdbH3l20HWXOBaT2HZd87orzd2yJ9dVE=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "7a0f122f5090cf4c2ade2a13a0e229d4e19ba71f",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixos-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "nixpkgs_4": {
       "locked": {
         "lastModified": 1788531059,
         "narHash": "sha256-hLD4l3QOGBQhkVp3mQ2lJ/YbEi99qUgKapb40KovZ88=",
@@ -141,6 +185,37 @@
         "type": "github"
       }
     },
+    "no-find-grep_2": {
+      "inputs": {
+        "fenix": [
+          "rushi-config",
+          "rushi-kernel",
+          "rushiTui",
+          "rushi-config",
+          "fenix"
+        ],
+        "nixpkgs": [
+          "rushi-config",
+          "rushi-kernel",
+          "rushiTui",
+          "rushi-config",
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1790613251,
+        "narHash": "sha256-LGV++LEUHdZSXDJBLxJXXiqaFgPmAo0SMLpZsXEVz30=",
+        "owner": "TonyWu20",
+        "repo": "no-find-grep-rushi",
+        "rev": "2e8caff50423b7e609e20c46551841707529cbcb",
+        "type": "github"
+      },
+      "original": {
+        "owner": "TonyWu20",
+        "repo": "no-find-grep-rushi",
+        "type": "github"
+      }
+    },
     "root": {
       "inputs": {
         "fenix": "fenix",
@@ -154,7 +229,37 @@
         "nixpkgs": "nixpkgs_2",
         "no-find-grep": "no-find-grep",
         "rushi-goal-mode": "rushi-goal-mode",
+        "rushi-image-read": "rushi-image-read",
         "rushi-kernel": "rushi-kernel",
+        "rushi-mineru-pdf": "rushi-mineru-pdf",
+        "rushi-obscura-web-access": "rushi-obscura-web-access_2",
+        "rushi-simple-english": "rushi-simple-english_2",
+        "rushi-statusline": "rushi-statusline_2",
+        "rushi-tui": "rushi-tui_2",
+        "rushi-tui-mermaid-ext": "rushi-tui-mermaid-ext_2",
+        "terminal-browser-agent": "terminal-browser-agent"
+      },
+      "locked": {
+        "lastModified": 1792280014,
+        "narHash": "sha256-k8px6siiTmxHJqZ64iKWPJHJHlX0pgiJqpW9kAk9cLw=",
+        "ref": "refs/heads/main",
+        "rev": "1e16da9ac757bfd7137f166f137cbd0e6955199e",
+        "revCount": 113,
+        "type": "git",
+        "url": "ssh://git@github.com/TonyWu20/rushi-config"
+      },
+      "original": {
+        "type": "git",
+        "url": "ssh://git@github.com/TonyWu20/rushi-config"
+      }
+    },
+    "rushi-config_2": {
+      "inputs": {
+        "fenix": "fenix_3",
+        "nixpkgs": "nixpkgs_3",
+        "no-find-grep": "no-find-grep_2",
+        "rushi-goal-mode": "rushi-goal-mode_2",
+        "rushi-kernel": "rushi-kernel_2",
         "rushi-obscura-web-access": "rushi-obscura-web-access",
         "rushi-simple-english": "rushi-simple-english",
         "rushi-statusline": "rushi-statusline",
@@ -187,6 +292,37 @@
         ]
       },
       "locked": {
+        "lastModified": 1790751280,
+        "narHash": "sha256-2mE7Hf0aDlIhdJHbIxSGREvSzZeyeELrqBJEPrUN7ko=",
+        "owner": "TonyWu20",
+        "repo": "rushi-goal-mode",
+        "rev": "9901ddfe27ae92f62334d76218f71a3952213508",
+        "type": "github"
+      },
+      "original": {
+        "owner": "TonyWu20",
+        "repo": "rushi-goal-mode",
+        "type": "github"
+      }
+    },
+    "rushi-goal-mode_2": {
+      "inputs": {
+        "fenix": [
+          "rushi-config",
+          "rushi-kernel",
+          "rushiTui",
+          "rushi-config",
+          "fenix"
+        ],
+        "nixpkgs": [
+          "rushi-config",
+          "rushi-kernel",
+          "rushiTui",
+          "rushi-config",
+          "nixpkgs"
+        ]
+      },
+      "locked": {
         "lastModified": 1790582925,
         "narHash": "sha256-xH3qn9teTxhTxli6Ns5XfHhXpehsFXP2d0B6MLZ79/E=",
         "owner": "TonyWu20",
@@ -197,6 +333,31 @@
       "original": {
         "owner": "TonyWu20",
         "repo": "rushi-goal-mode",
+        "type": "github"
+      }
+    },
+    "rushi-image-read": {
+      "inputs": {
+        "fenix": [
+          "rushi-config",
+          "fenix"
+        ],
+        "nixpkgs": [
+          "rushi-config",
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1791645344,
+        "narHash": "sha256-iO3YaBB7hQNT5lz/urzjFyKBWBJNbig6yxB6DCHoBNY=",
+        "owner": "TonyWu20",
+        "repo": "rushi-image-read",
+        "rev": "cac75a25984b1e5d78f23ea248d48810a431d95b",
+        "type": "github"
+      },
+      "original": {
+        "owner": "TonyWu20",
+        "repo": "rushi-image-read",
         "type": "github"
       }
     },
@@ -213,6 +374,38 @@
         "rushiTui": "rushiTui"
       },
       "locked": {
+        "lastModified": 1792276633,
+        "narHash": "sha256-1eTpR6oWARiM773ljXXXKvw6jy2ZoSU7ev5XIxFA5YM=",
+        "owner": "TonyWu20",
+        "repo": "rushi",
+        "rev": "9336a86fca118aad9b70110d209ed2506ed65411",
+        "type": "github"
+      },
+      "original": {
+        "owner": "TonyWu20",
+        "repo": "rushi",
+        "type": "github"
+      }
+    },
+    "rushi-kernel_2": {
+      "inputs": {
+        "fenix": [
+          "rushi-config",
+          "rushi-kernel",
+          "rushiTui",
+          "rushi-config",
+          "fenix"
+        ],
+        "nixpkgs": [
+          "rushi-config",
+          "rushi-kernel",
+          "rushiTui",
+          "rushi-config",
+          "nixpkgs"
+        ],
+        "rushiTui": "rushiTui_2"
+      },
+      "locked": {
         "lastModified": 1790739719,
         "narHash": "sha256-XBrIQUERhEOpFjc/LUfd+Sz9XLAmoBhREijk6jMPM8c=",
         "owner": "TonyWu20",
@@ -226,10 +419,10 @@
         "type": "github"
       }
     },
-    "rushi-kernel_2": {
+    "rushi-kernel_3": {
       "inputs": {
-        "fenix": "fenix_3",
-        "nixpkgs": "nixpkgs_3"
+        "fenix": "fenix_4",
+        "nixpkgs": "nixpkgs_4"
       },
       "locked": {
         "lastModified": 1789978327,
@@ -245,7 +438,63 @@
         "type": "github"
       }
     },
+    "rushi-mineru-pdf": {
+      "inputs": {
+        "fenix": [
+          "rushi-config",
+          "fenix"
+        ],
+        "nixpkgs": [
+          "rushi-config",
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1791267122,
+        "narHash": "sha256-zsbwHhzUn/uxbTYPoXSlcZ8tSCVusXUbFDuP1swg+Lk=",
+        "owner": "TonyWu20",
+        "repo": "rushi-mineru-pdf",
+        "rev": "5e0b37c0b767a5e593be47d6e7ee5caf21ab66d7",
+        "type": "github"
+      },
+      "original": {
+        "owner": "TonyWu20",
+        "repo": "rushi-mineru-pdf",
+        "type": "github"
+      }
+    },
     "rushi-obscura-web-access": {
+      "inputs": {
+        "fenix": [
+          "rushi-config",
+          "rushi-kernel",
+          "rushiTui",
+          "rushi-config",
+          "fenix"
+        ],
+        "nixpkgs": [
+          "rushi-config",
+          "rushi-kernel",
+          "rushiTui",
+          "rushi-config",
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1789724554,
+        "narHash": "sha256-ZB4HHfR+4kCoiVA8F0qcW78tAp0HzhSK9hxHDFSJZ8w=",
+        "owner": "TonyWu20",
+        "repo": "rushi-obscura-web-access",
+        "rev": "7550aa2707c2d05b8a6097c8557fad55fea83b63",
+        "type": "github"
+      },
+      "original": {
+        "owner": "TonyWu20",
+        "repo": "rushi-obscura-web-access",
+        "type": "github"
+      }
+    },
+    "rushi-obscura-web-access_2": {
       "inputs": {
         "fenix": [
           "rushi-config",
@@ -274,9 +523,15 @@
       "inputs": {
         "fenix": [
           "rushi-config",
+          "rushi-kernel",
+          "rushiTui",
+          "rushi-config",
           "fenix"
         ],
         "nixpkgs": [
+          "rushi-config",
+          "rushi-kernel",
+          "rushiTui",
           "rushi-config",
           "nixpkgs"
         ]
@@ -295,7 +550,63 @@
         "type": "github"
       }
     },
+    "rushi-simple-english_2": {
+      "inputs": {
+        "fenix": [
+          "rushi-config",
+          "fenix"
+        ],
+        "nixpkgs": [
+          "rushi-config",
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1792005295,
+        "narHash": "sha256-/MLsO1maLDXH5B/H9N0IOY/sK6rVMIb47uJm/5KSby8=",
+        "owner": "TonyWu20",
+        "repo": "rushi-simple-english",
+        "rev": "f4dee6867f9db4a62ded4569f00a8887f3db0fc0",
+        "type": "github"
+      },
+      "original": {
+        "owner": "TonyWu20",
+        "repo": "rushi-simple-english",
+        "type": "github"
+      }
+    },
     "rushi-statusline": {
+      "inputs": {
+        "fenix": [
+          "rushi-config",
+          "rushi-kernel",
+          "rushiTui",
+          "rushi-config",
+          "fenix"
+        ],
+        "nixpkgs": [
+          "rushi-config",
+          "rushi-kernel",
+          "rushiTui",
+          "rushi-config",
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1789724629,
+        "narHash": "sha256-bY/dyErzjVzSJXYaVO4bl/62pjWr/EXcWg3xp9JkcJo=",
+        "owner": "TonyWu20",
+        "repo": "rushi-statusline",
+        "rev": "e198f61e77ae8baf244e57da699044524ecfabf2",
+        "type": "github"
+      },
+      "original": {
+        "owner": "TonyWu20",
+        "repo": "rushi-statusline",
+        "type": "github"
+      }
+    },
+    "rushi-statusline_2": {
       "inputs": {
         "fenix": [
           "rushi-config",
@@ -324,13 +635,22 @@
       "inputs": {
         "fenix": [
           "rushi-config",
+          "rushi-kernel",
+          "rushiTui",
+          "rushi-config",
           "fenix"
         ],
         "nixpkgs": [
           "rushi-config",
+          "rushi-kernel",
+          "rushiTui",
+          "rushi-config",
           "nixpkgs"
         ],
         "rushi-config": [
+          "rushi-config",
+          "rushi-kernel",
+          "rushiTui",
           "rushi-config"
         ]
       },
@@ -349,6 +669,37 @@
       }
     },
     "rushi-tui-mermaid-ext": {
+      "inputs": {
+        "fenix": [
+          "rushi-config",
+          "rushi-kernel",
+          "rushiTui",
+          "rushi-config",
+          "fenix"
+        ],
+        "nixpkgs": [
+          "rushi-config",
+          "rushi-kernel",
+          "rushiTui",
+          "rushi-config",
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1789955176,
+        "narHash": "sha256-cp2sfJOFL2gsavIwqiB8uxWjfqEfSRzMPzDlCLrItsA=",
+        "owner": "TonyWu20",
+        "repo": "rushi-tui-mermaid-ext",
+        "rev": "987058ee22a313e16fae1727a947370efad14cf9",
+        "type": "github"
+      },
+      "original": {
+        "owner": "TonyWu20",
+        "repo": "rushi-tui-mermaid-ext",
+        "type": "github"
+      }
+    },
+    "rushi-tui-mermaid-ext_2": {
       "inputs": {
         "fenix": [
           "rushi-config",
@@ -373,6 +724,34 @@
         "type": "github"
       }
     },
+    "rushi-tui_2": {
+      "inputs": {
+        "fenix": [
+          "rushi-config",
+          "fenix"
+        ],
+        "nixpkgs": [
+          "rushi-config",
+          "nixpkgs"
+        ],
+        "rushi-config": [
+          "rushi-config"
+        ]
+      },
+      "locked": {
+        "lastModified": 1791966052,
+        "narHash": "sha256-iZ/zYtKzlSbbditYBG7MWdCvlWhG2oJBcs6XMpFtPaE=",
+        "owner": "TonyWu20",
+        "repo": "rushi-tui",
+        "rev": "4be0ed2fdb20aa0752414424713fba50f07530a5",
+        "type": "github"
+      },
+      "original": {
+        "owner": "TonyWu20",
+        "repo": "rushi-tui",
+        "type": "github"
+      }
+    },
     "rushiTui": {
       "inputs": {
         "fenix": [
@@ -385,7 +764,41 @@
           "rushi-kernel",
           "nixpkgs"
         ],
-        "rushi-kernel": "rushi-kernel_2"
+        "rushi-config": "rushi-config_2"
+      },
+      "locked": {
+        "lastModified": 1790772343,
+        "narHash": "sha256-zs7FyddNbe+gyno6msTEl+OXzp7iSMPTcdjCukN7uws=",
+        "owner": "TonyWu20",
+        "repo": "rushi-tui",
+        "rev": "e66a604b3b2049c57d36c18e563793b5217ff9dc",
+        "type": "github"
+      },
+      "original": {
+        "owner": "TonyWu20",
+        "repo": "rushi-tui",
+        "type": "github"
+      }
+    },
+    "rushiTui_2": {
+      "inputs": {
+        "fenix": [
+          "rushi-config",
+          "rushi-kernel",
+          "rushiTui",
+          "rushi-config",
+          "rushi-kernel",
+          "fenix"
+        ],
+        "nixpkgs": [
+          "rushi-config",
+          "rushi-kernel",
+          "rushiTui",
+          "rushi-config",
+          "rushi-kernel",
+          "nixpkgs"
+        ],
+        "rushi-kernel": "rushi-kernel_3"
       },
       "locked": {
         "lastModified": 1790213725,
@@ -404,11 +817,11 @@
     "rust-analyzer-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1790991460,
-        "narHash": "sha256-88lguqQwNBIQAd7hzxFMMg4LaPiJuvBTTbyCDDltGiQ=",
+        "lastModified": 1791835614,
+        "narHash": "sha256-CMXY9x3W43sVW8G7IhXAi3vNqkbWwbsxtKldef8Jar0=",
         "owner": "rust-lang",
         "repo": "rust-analyzer",
-        "rev": "3332931d313fad08166571c05d7237d3a4d77ac2",
+        "rev": "dd5ed69d4b5b26fe7f91013b1d02608cd37ae199",
         "type": "github"
       },
       "original": {
@@ -438,6 +851,23 @@
     "rust-analyzer-src_3": {
       "flake": false,
       "locked": {
+        "lastModified": 1790532271,
+        "narHash": "sha256-j8y/AO3AMDF9p+11aIDhnA21JnNj5PjvcejTI43vI8Q=",
+        "owner": "rust-lang",
+        "repo": "rust-analyzer",
+        "rev": "03fcb77246f2568adb0e9b2fa60d19c6cc1686f4",
+        "type": "github"
+      },
+      "original": {
+        "owner": "rust-lang",
+        "ref": "nightly",
+        "repo": "rust-analyzer",
+        "type": "github"
+      }
+    },
+    "rust-analyzer-src_4": {
+      "flake": false,
+      "locked": {
         "lastModified": 1788445421,
         "narHash": "sha256-sKEuAgygSpMZFvrj7IcCPm+3al2bQWukulM6pMEpCcc=",
         "owner": "rust-lang",
@@ -449,6 +879,27 @@
         "owner": "rust-lang",
         "ref": "nightly",
         "repo": "rust-analyzer",
+        "type": "github"
+      }
+    },
+    "terminal-browser-agent": {
+      "inputs": {
+        "nixpkgs": [
+          "rushi-config",
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1791635980,
+        "narHash": "sha256-W5uYV05XC41gAbo+GO80TVF9KH00KNwAYNO7kUQ00V8=",
+        "owner": "TonyWu20",
+        "repo": "terminal-browser-agent",
+        "rev": "544a3726552e36afe6cba695615c0cfd2648673d",
+        "type": "github"
+      },
+      "original": {
+        "owner": "TonyWu20",
+        "repo": "terminal-browser-agent",
         "type": "github"
       }
     }
