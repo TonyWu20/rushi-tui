@@ -63,24 +63,34 @@ Target behaviors:
   show history up to the picked event. Off-path events are dropped from
   the main transcript. The rewind marker stays as the fork-boundary line.
   Branch visibility is owned by the `tree` palette and its preview.
-- `Summarize the branch`: Close the palette floating window. The TUI sends
-  the kernel the branch-summarize primitive (see `Kernel-side changes`). The
-  picked event must be on the active path.
-  - The kernel summarizes the **abandoned branch**, the events abandoned when
-    the fork was made.
+- `Summarize the branch`: the one-shot fork-and-summarize
+  (2026-10-19 decision). Close the palette floating window. The TUI
+  appends a `rewind` marker at the picked event (mode `on`: the picked
+  event stays in the context), then sends the kernel the
+  branch-summarize primitive (see `Kernel-side changes`). No
+  pre-existing marker is needed.
+  - The kernel summarizes the **abandoned branch**, the events after
+    the picked event up to the log end, the open span the new marker
+    abandons.
   - The summary is appended as a new leaf on the active path.
-  - The active-path events are NOT compacted. The abandoned branch stays in
-    the log.
-  - The summary carries what was done on the other branch and why it was
-    abandoned. The current branch's "why" gets context. See the
-    `pi-alignment correction` decision at the end of this doc.
-- `Summarize with custom prompt`: Close the palette floating window. The user
-  writes a prompt in the input box and presses Enter to send it. The prompt
-  replaces the default branch-summarize instruction. The user's text is the
-  entire instruction.
-  - The kernel summarizes the abandoned branch with the user's prompt.
-  - The summary is appended as a new leaf on the active path. This is the
-    same flow as `Summarize the branch`, with a custom instruction.
+  - The active-path events are NOT compacted. The abandoned branch
+    stays in the log.
+  - The model context at the marker reads: the system prompt, the
+    context up to the picked event, the branch summary, then the new
+    user context that follows.
+  - The summary carries what was done on the abandoned branch. The
+    continuing branch's "why" gets context. See the `pi-alignment
+    correction` decision at the end of this doc.
+- `Summarize with custom prompt`: the same one-shot flow, with a
+  custom instruction. Close the palette floating window. The user
+  writes a prompt in the input box and presses Enter to send it. The
+  prompt replaces the default branch-summarize instruction. The
+  user's text is the entire instruction.
+  - The TUI appends the `rewind` marker at the picked event, then the
+    kernel summarizes the abandoned branch with the user's prompt.
+  - The summary is appended as a new leaf on the active path. This is
+    the same flow as `Summarize the branch`, with a custom
+    instruction.
 
 ## Spec decisions (from discussion)
 
@@ -165,11 +175,11 @@ All open points below were decided by discussion with the author.
 
 ### Action flows (the four outcomes)
 
-Only `Rewind without summary` forks. It appends a `rewind` marker.
-`View-only` changes nothing. It only scrolls the viewport. The two
-summarize outcomes do not fork. They spawn the branch-summarize
-primitive, which appends a `compaction_summary` leaf on the active
-path.
+`Rewind without summary` and the two summarize outcomes fork. They
+append a `rewind` marker. The two summarize outcomes are one-shot:
+they append the marker, then spawn the branch-summarize primitive,
+which appends a `compaction_summary` leaf on the active path.
+`View-only` changes nothing. It only scrolls the viewport.
 
 - The two summarize outcomes need the loop to be idle. They append
   log events.
@@ -188,18 +198,19 @@ path.
   dropped from the main transcript. The rewind marker stays as the
   fork-boundary line. Branch visibility is owned by the `tree`
   palette and its preview pane.
-- `Summarize the branch`: close the palette. Spawn
-  `bin/compact <session> --branch` as a child process. No `rewind`
-  marker is appended. The status line shows a compacting indicator
-  while it runs. On the `compaction_summary` marker the TUI re-renders
-  and the summary leaf appears on the active path. On
+- `Summarize the branch`: close the palette. The one-shot: append
+  the `rewind` marker at the picked event (mode `on`, reason
+  `tui_pick`), then spawn `bin/compact <session> --branch` as a
+  child process. The status line shows a compacting indicator while
+  it runs. On the `compaction_summary` marker the TUI re-renders and
+  the summary leaf appears on the active path. On
   `compaction_failed` it shows the error in the status line.
 - `Summarize with custom prompt`: close the palette, enter a
   transient compact-prompt state. The input box shows a hint that the
   next Enter submits the custom summarize instruction. Esc cancels
-  back to normal input. On Enter, spawn
-  `bin/compact <session> --branch --prompt <text>`. No `rewind`
-  marker is appended.
+  back to normal input. On Enter, append the `rewind` marker at the
+  armed target, then spawn `bin/compact <session> --branch
+  --prompt <text>`.
 
 ### Preview pane
 
@@ -257,11 +268,12 @@ path.
   Committing `Summarize with custom prompt` arms a transient prompt
   capture. The next Enter submits the typed text as the `--prompt`
   instruction. Esc cancels and keeps the typed text as a plain draft.
-  - Guards: both outcomes need the loop to be idle. A busy loop
-    flashes "loop busy, wait for the step". The picked event must
-    sit on the active path. The kernel derives the abandoned span
-    from the last top-level `rewind` marker on that path. No
-    `rewind` marker is appended.
+  - One-shot (2026-10-19 decision): committing either outcome
+    appends the `rewind` marker at the picked event (mode `on`,
+    reason `tui_pick`), then spawns the compact. The kernel derives
+    the abandoned span from the open span of that marker. No
+    pre-existing marker is needed. Both outcomes need the loop to be
+    idle. A busy loop flashes "loop busy, wait for the step".
   - Run: while the child runs, the status line shows a "branch
     summarizing" indicator. On success the kernel appends a
     `compaction_summary` marker carrying `branch_of`. The log watcher
@@ -497,6 +509,10 @@ compressed into a single summary leaf appended to the active path.
   marker carries the summary text.
 - The picked target must be on the active path. The abandoned branch
   is derived from the last `rewind` marker on that path.
+- Superseded 2026-10-19: the one-shot decision. The summarize
+  outcomes fork. They append the `rewind` marker at the picked event
+  and then spawn the branch compact. See the decision record at the
+  end of this doc.
 
 ### Decided (2026-09-16, via `refinement-policy.md`)
 
@@ -564,3 +580,60 @@ These decisions apply the kernel's `refinement-policy.md`
 - **Filed 2026-09-16.** This kernel delta is tracked as
   `github.com/TonyWu20/rushi` issue #22. The TUI summarize outcomes
   stay "pending kernel" until that lands.
+
+## Spec decision: one-shot fork-and-summarize (2026-10-19)
+
+This decision supersedes the 2026-09-16 consequence "the summarize
+outcomes do not fork". It was learned from the reporter.
+
+### The problem
+
+The 2026-09-16 design left the fork to a separate step. To get a
+branch summary the user had to commit `Rewind without summary` first,
+then `Summarize the branch`. That two-step flow does not produce the
+summary:
+
+- A user-message pick rewinds in `before` mode, so the picked event
+  leaves the active path. The active-path guard then refuses the
+  summarize on the same entry.
+- A tail pick abandons an empty open span. The kernel no-ops, and no
+  summary marker lands.
+
+The feature was reachable only after a fork already existed in the
+log, and even then it summarized the span of an older marker, not
+the branch the user meant to ditch.
+
+### The decision
+
+`Summarize the branch` and `Summarize with custom prompt` are
+one-shot on the picked event:
+
+1. The TUI appends the `rewind` marker at the picked event. Mode `on`
+   for every event kind: the picked event stays in the context. No
+   text is restored to the input box (that stays a
+   `Rewind without summary` behavior).
+2. The TUI spawns `bin/compact <session> --branch`. The kernel finds
+   the marker it just appended, summarizes the open span after the
+   picked event, and appends the branch `compaction_summary` marker.
+
+The model context at the marker reads:
+
+```
+- [system prompt]
+- [user context up to the picked event]
+- [branch summary]
+- [new user context ...]
+```
+
+An off-active-path pick is allowed: the picked event becomes the
+rewind target and the kernel re-enters the abandoned branch. The
+`seq_in_ranges` commit guard is removed with the marker
+prerequisite.
+
+### Why no kernel change
+
+The kernel `--branch` primitive already summarizes the open span of
+the most recent `rewind` marker. The one-shot flow is a TUI
+composition: append the marker, then spawn the primitive. The
+marker must land before the compact child reads the log, so the
+append runs before the spawn in the TUI main loop.

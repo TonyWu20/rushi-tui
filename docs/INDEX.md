@@ -4,7 +4,15 @@ Authoritative entry point for any agent starting a new session in
 this repo. Read this first. It tells you what exists, what is
 shipped, and what is next.
 
-## Repo state (2026-10-14)
+## Repo state (2026-10-19)
+
+**One-shot branch summarize (2026-10-19, implemented).** The tree
+options `Summarize the branch` and `Summarize with custom prompt` are
+now one-shot: the TUI appends the `rewind` marker at the picked event
+(mode on, reason tui_pick), then spawns `bin/compact --branch` on the
+open span the marker abandons. No pre-existing marker is needed, and
+the picked event stays in the context. The kernel primitive is
+unchanged. Detail: `docs/tui-feature-requests/2026-10-19.md`.
 
 **Layered config load (2026-10-14, issue #35, implemented).** The
 TUI now reads the config through `rushi_common::config_layer`
@@ -101,7 +109,7 @@ Method and conventions: `tui-insta-snapshot-testing.md`.
 | `vim-editor-design.md` | Implemented | 2026-09-10 | Vim modal input: modes, motions, operators, registers. |
 | `goal-ux.md` | Spec | 2026-09-08 | Goal UX: prompt template, TUI status, `goal pause` / `goal clear`. |
 | `goal-ui_feedback_from_human.md` | Draft | 2026-09-10 | Human-reported goal UI bugs and feature requests. |
-| `tree-ui-design-from-human.md` | Draft | 2026-09-16 | Draft for the rewind/tree browse UI. Follow-up decisions 2026-09-15: float navigation and focus, `Tab` completion, the event-type filter, prettified tool rows, pane parse + highlight. 2026-09-16: `Summarize the branch` / `Summarize with custom prompt` corrected to pi's semantics — summarize the abandoned branch and append it as a new active leaf, not compact the active prefix. Decided via the kernel `refinement-policy.md`: a branch mode of `bin/compact`, a reused `compaction_summary` marker (additive `branch_of` field), the summary written to its own versioned `branch-summary/v<N>.md` (never the auto-compact `handoff/` dir), no new event type or binary. |
+| `tree-ui-design-from-human.md` | Draft | 2026-10-19 | Draft for the rewind/tree browse UI. Follow-up decisions 2026-09-15: float navigation and focus, `Tab` completion, the event-type filter, prettified tool rows, pane parse + highlight. 2026-09-16: `Summarize the branch` / `Summarize with custom prompt` corrected to pi's semantics — summarize the abandoned branch and append it as a new active leaf, not compact the active prefix. Decided via the kernel `refinement-policy.md`: a branch mode of `bin/compact`, a reused `compaction_summary` marker (additive `branch_of` field), the summary written to its own versioned `branch-summary/v<N>.md` (never the auto-compact `handoff/` dir), no new event type or binary. 2026-10-19: the two summarize options are one-shot — the TUI appends the `rewind` marker at the picked event, then spawns the branch compact. |
 | `tree-ui-design-from-human-phase-2.md` | Implemented | 2026-09-17 | Build-ready spec for the four follow-up work items plus the `Tab` reservation. Key contract, row shapes, filter cycle, pane parse + highlight, test plan. Implemented 2026-09-15: prettified tool rows, pane parse + highlight, event-type filter, float focus and wrap navigation, `Tab` completion. Refined 2026-09-16: row tag class colors, the kitty keyboard protocol for `Ctrl+Shift+P`, and `Tab` replacing the typed text. |
 | `tui_feature_requests_from_human.md` | Active | 2026-09-22 | Slim index of all TUI feature requests with ship status. From 2026-09-03 on, each request points to its detail in the dated docs under `docs/tui-feature-requests/`. |
 | `tui-feature-requests/2026-09-03.md` | Detail | 2026-09-22 | Detail for the 2026-09-03 requests: the scroll position bar, the conversation browsing mode, and select-and-yank. |
@@ -118,6 +126,7 @@ Method and conventions: `tui-insta-snapshot-testing.md`.
 | `tui-feature-requests/2026-09-23.md` | Detail | 2026-10-08 | Detail for the 2026-09-23 requests: the tree fold-and-jump keys (`z` arm, branch-boundary jumps) and the tree input-focus model (`Input` focus target, `Shift+Tab` / `Ctrl+Shift+P` cycler). |
 | `tui-feature-requests/2026-10-07.md` | Detail | 2026-10-08 | Detail for the 2026-10-07 request: the event timestamp in the user and reply panel titles. |
 | `tui-feature-requests/2026-10-08.md` | Detail | 2026-10-08 | Detail for the 2026-10-08 request: the tree-palette focus switch reads ineffective. `BackTab` (`Shift+Tab`) becomes the advertised key; the input-bar hints read `shift-tab focus`. |
+| `tui-feature-requests/2026-10-19.md` | Detail | 2026-10-19 | Detail for the 2026-10-19 request: `Summarize the branch` needs no pre-existing `rewind` marker. The option is one-shot: the TUI appends the marker at the picked event and spawns the branch compact on the open span. |
 | `tui-ext-repo-split.md` | Historical | 2026-09-15 | The repo-split execution record. The TUI `rushi-common` git re-pointing (item A1) landed 2026-09-15. |
 | `tui-insta-snapshot-testing.md` | Implemented | 2026-09-11 | The insta-snapshot test method: harness, snapshot set, determinism rules. |
 | `tui-perf-freeze-investigation.md` | Investigation | 2026-09-13 | Freeze root cause: the synchronous full transcript build on each cache-key miss. |

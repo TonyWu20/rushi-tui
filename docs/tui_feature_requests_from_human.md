@@ -475,3 +475,15 @@ macchiato` as the first internal color scheme. Shipped in
       Detail:
       `docs/tui-feature-requests/2026-10-08.md`
       (focus-switch-regression).
+
+## New requests (2026-10-19)
+
+- [x] `Summarize the branch` needs no pre-existing `rewind` marker.
+      Shipped 2026-10-19: the option is one-shot on the picked
+      event. The TUI appends the `rewind` marker at the picked event
+      (mode on, the picked event stays in the context), then spawns
+      `bin/compact --branch` on the open span the marker abandons.
+      `Summarize with custom prompt` follows the same one-shot flow
+      with a custom instruction. Detail:
+      `docs/tui-feature-requests/2026-10-19.md`
+      (oneshot-branch-summarize).
