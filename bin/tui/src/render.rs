@@ -3429,6 +3429,13 @@ pub struct TranscriptBuildInput {
     /// Pre-resolved ext reply lines, keyed by event id.
     /// The key is the in-memory event index.
     pub ext_lines: std::collections::HashMap<u64, Vec<crate::ext::ExtLine>>,
+    /// The keys of the unconsumed `user_message` events
+    /// (docs/tui-pending-user-messages.md): the transcript omits
+    /// their user panels; the pending block previews them until the
+    /// loop answers. Derived from the full in-memory log before any
+    /// tail-window slice, so a message answered earlier in the log
+    /// is never suppressed by the slice.
+    pub pending_user_keys: std::collections::HashSet<String>,
     /// The open turns of the turn fold (docs/tui-turn-fold.md).
     /// A turn in the set renders its full body. A turn outside the
     /// set is collapsed to its user box and tally. The fold applies
@@ -3499,6 +3506,7 @@ impl TranscriptBuildInput {
             }),
             ext_lines: resolve_ext_lines_at(ext, events, offset),
             turn_fold: app.fold_input(),
+            pending_user_keys: app.pending_user_keys(),
         }
     }
 }
@@ -3783,6 +3791,31 @@ pub fn build_transcript_input(input: &TranscriptBuildInput) -> TranscriptBuild {
             .turn_for_event(w)
             .filter(|t| w == t.start)
             .and_then(|t| fold.collapsed_summary(events, t, tally_budget));
+        // An unconsumed `user_message` (docs/tui-pending-user-
+        // messages.md): the pending block previews it, so the
+        // transcript omits its user panel until the loop answers
+        // it and the key leaves the set. The event keeps its
+        // collapsed-turn tally row, when one exists. Its
+        // `event_line_starts` entry stays `None`, the "not rendered
+        // in the transcript" marker.
+        // The empty-set fast path: most builds have nothing
+        // pending, and the key stays uncomputed.
+        let user_pending = e.kind() == EventKind::UserMessage
+            && !input.pending_user_keys.is_empty()
+            && input
+                .pending_user_keys
+                .contains(&crate::app::user_message_key(e));
+        if user_pending {
+            if let Some(sl) = turn_start_summary {
+                if !all.is_empty() {
+                    all.push(Line::from(""));
+                    line_raw.push(None);
+                }
+                all.push(fold_summary_line(&sl, &state, input.width));
+                line_raw.push(None);
+            }
+            continue;
+        }
         if !all.is_empty() {
             all.push(Line::from(""));
             line_raw.push(None);
@@ -4483,7 +4516,12 @@ pub fn draw(
     // settled cache slice and the stream tail. `start` is the global
     // index of the first window row.
     let window = view_lines;
-    if window.is_empty() {
+    // The placeholder needs an empty event log, not an empty window:
+    // a log of unconsumed user messages renders nothing in the
+    // transcript (the pending block previews them, docs/tui-pending-
+    // user-messages.md). A blank window over a non-empty log stays
+    // blank; no placeholder.
+    if window.is_empty() && app.events().is_empty() {
         let placeholder = match app.active() {
             // The placeholder in the pi `dim` tone (not a hard-coded gray).
             Some(_) => Line::from(Span::styled(
@@ -7371,5 +7409,136 @@ mod working_status_tests {
             row, "model working · 1m 30s",
             "the P5 format holds for working"
         );
+    }
+}
+
+// ── pending user message suppression ────────────────────────────────
+//
+// The transcript omits the user panel of an unconsumed
+// `user_message`; the pending block previews it until the loop
+// answers it (docs/tui-pending-user-messages.md). One appearance
+// per message: pending block while waiting, transcript panel once
+// answered.
+
+#[cfg(test)]
+mod pending_user_suppression_tests {
+    use crate::app::App;
+    use crate::event::Event;
+    use crate::port::SessionId;
+    use crate::render::{build_transcript_lines, build_transcript_tail};
+
+    fn ev(json: &str) -> Event {
+        Event::parse_line(json).expect("test event parses")
+    }
+
+    const A1: &str = r#"{"v":1,"type":"assistant_message","ts":"t","id":"a1","content":"first answer","tool_calls":[],"stop_reason":"stop","usage":{"input_tokens":10,"output_tokens":5},"reasoning":{}}"#;
+    const A2: &str = r#"{"v":1,"type":"assistant_message","ts":"t","id":"a2","content":"second answer","tool_calls":[],"stop_reason":"stop","usage":{"input_tokens":10,"output_tokens":5},"reasoning":{}}"#;
+
+    fn app(events: Vec<Event>) -> App {
+        let mut app = App::new();
+        let log_lines = events.len() as u64;
+        app.set_active(SessionId::new("s1"), events, log_lines);
+        app
+    }
+
+    #[test]
+    fn pending_user_message_is_suppressed_from_the_transcript() {
+        let app = app(vec![
+            ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u1","content":"first question"}"#),
+            ev(A1),
+            ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u2","content":"waiting message"}"#),
+        ]);
+        let lines = build_transcript_lines(&app, 80, None);
+        let text: String = lines.iter().map(|l| l.to_string()).collect();
+        assert!(
+            text.contains("first question"),
+            "the answered user message renders: {text}"
+        );
+        assert!(
+            !text.contains("waiting message"),
+            "the pending user message stays out of the transcript: {text}"
+        );
+        assert_eq!(app.pending_user_messages().len(), 1);
+    }
+
+    #[test]
+    fn answered_user_message_renders_in_the_transcript() {
+        let app = app(vec![
+            ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u1","content":"first question"}"#),
+            ev(A1),
+            ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u2","content":"waiting message"}"#),
+            ev(A2),
+        ]);
+        let lines = build_transcript_lines(&app, 80, None);
+        let text: String = lines.iter().map(|l| l.to_string()).collect();
+        assert!(
+            text.contains("waiting message"),
+            "the answered message renders once the loop replies: {text}"
+        );
+        assert!(app.pending_user_messages().is_empty());
+    }
+
+    #[test]
+    fn pending_user_message_without_an_id_is_suppressed_by_content() {
+        let app = app(vec![
+            ev(r#"{"v":1,"type":"user_message","ts":"t","content":"legacy line"}"#),
+            ev(A1),
+            ev(r#"{"v":1,"type":"user_message","ts":"t","content":"legacy waiting"}"#),
+        ]);
+        let lines = build_transcript_lines(&app, 80, None);
+        let text: String = lines.iter().map(|l| l.to_string()).collect();
+        assert!(
+            text.contains("legacy line"),
+            "the answered message without an id renders: {text}"
+        );
+        assert!(
+            !text.contains("legacy waiting"),
+            "the pending message without an id is suppressed: {text}"
+        );
+    }
+
+    #[test]
+    fn the_tail_build_suppresses_the_pending_message_too() {
+        let app = app(vec![
+            ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u1","content":"first question"}"#),
+            ev(A1),
+            ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u2","content":"waiting message"}"#),
+            ev(A2),
+            ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u3","content":"tail pending"}"#),
+        ]);
+        // The newest two events: the answered `A2` and the pending
+        // `u3`. The suppression is derived from the full log, so the
+        // tail build hides `u3` exactly as the full build does.
+        let build = build_transcript_tail(&app, 80, None, 2);
+        let text: String = build.lines.iter().map(|l| l.to_string()).collect();
+        assert!(
+            text.contains("second answer"),
+            "the answered message in the tail renders: {text}"
+        );
+        assert!(
+            !text.contains("tail pending"),
+            "the pending message is suppressed in the tail build: {text}"
+        );
+    }
+
+    #[test]
+    fn a_retracted_pending_message_is_not_in_the_pending_set() {
+        let app = app(vec![
+            ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u1","content":"draft one"}"#),
+            ev(A1),
+            ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u2","content":"draft two"}"#),
+            ev(
+                r#"{"v":1,"type":"user_message_retract","ts":"t","target":"u2","reason":"user_edit"}"#,
+            ),
+        ]);
+        // `u2` was retracted and re-sent elsewhere: it is out of the
+        // pending set, so its panel renders next to the retract row.
+        let lines = build_transcript_lines(&app, 80, None);
+        let text: String = lines.iter().map(|l| l.to_string()).collect();
+        assert!(
+            text.contains("draft two"),
+            "the retracted message keeps its panel: {text}"
+        );
+        assert!(app.pending_user_messages().is_empty());
     }
 }

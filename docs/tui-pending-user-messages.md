@@ -1,9 +1,11 @@
 # TUI pending user messages
 
-Status: shipped (stage 2, 2026-09-03 pass). Stage 1 shipped in
-commit `fc51f71`. The request lives in
-`docs/tui_feature_requests_from_human.md` (2026-08-31 item).
-Stage 2, the loop-side split, shipped in the same pass.
+Status: shipped (stage 3, 2026-10-22). Stage 1 shipped in
+commit `fc51f71`. Stage 2, the loop-side split, shipped in the
+2026-09-03 pass. Stage 3, the transcript suppression of pending
+user messages, shipped 2026-10-22: the message shows once. The
+request lives in `docs/tui_feature_requests_from_human.md`
+(2026-08-31 item).
 
 ## 1. Request
 
@@ -93,7 +95,41 @@ How `pi` splits the two queues (reference,
       stage-1 labels and the follow block renders its own header
       (`follow-up — run after the loop stops`).
 
-## 5. Notes
+## 5. Stage 3: transcript suppression (2026-10-22)
+
+The report: sending a message shows two appearances of the
+single message, while the log holds one. The first is the
+pending block preview. The second is the transcript user panel
+of the same unconsumed event.
+
+Decision: one appearance per message. While the message waits
+for the loop, the pending block previews it and the transcript
+omits its user panel. When the loop answers it, the panel
+renders in the transcript and the message leaves the pending
+set. The full content of a pending message renders in the
+transcript when the loop answers it (the stage-2 note); stage 3
+keeps that true: pending, preview only; answered, full panel.
+
+Mechanics:
+
+- `App::pending_user_keys` derives the pending set from the full
+  in-memory log: `user_message` events after the last
+  `assistant_message`, minus the retracted ids. The key is the
+  event `id`; a legacy line without an `id` keys on a hash of
+  its content.
+- `TranscriptBuildInput::pending_user_keys` carries the set into
+  the build, full and tail alike. The tail build derives it
+  from the full log, so a message answered before the tail
+  window never suppresses.
+- The build loop skips the user panel of a pending message. It
+  keeps the collapsed-turn tally row, when one exists. The
+  `event_line_starts` entry stays `None`, the not-rendered
+  marker.
+- The `(no events yet)` placeholder needs an empty event log,
+  not an empty window: a log of only pending user messages stays
+  blank in the transcript, with the pending block listing them.
+
+## 6. Notes
 
 - Stage 2 ships drain mode `all` first. The `one-at-a-time`
   mode is a later refinement.
@@ -127,6 +163,11 @@ P5. follow-turn: given the step exits `idle` while follow-ups wait,
 P6. composer-toggle: given the user toggles the composer queue with
     Ctrl+F, observe the next draft sends to the follow queue and the
     active queue flashes on the status row.
+P7. transcript-suppression: given an unconsumed `user_message`
+    event, observe the transcript omits its user panel and the
+    pending block previews it; given the loop answers the message
+    (an `assistant_message` follows it), observe the panel renders
+    in the transcript and the message leaves the pending block.
 
 ## Verification
 
@@ -142,6 +183,7 @@ it.
 | P4 | claim-state | `follow_message_keeps_idle_and_counts`, `steer_message_wakes_the_model` in `bin/claim/src/main.rs` | proven |
 | P5 | follow-turn | `turn_boundary_consumes_the_follow_ups` in `bin/claim/src/main.rs`, `user_event_rides_by_queue` in `bin/assemble/src/main.rs` | proven |
 | P6 | composer-toggle | Blocked: no test drives the Ctrl+F composer toggle. Unblock with a test that dispatches `Key::CtrlF` and asserts `follow_queue` flips and the status-row flash fires | open |
+| P7 | transcript-suppression | `pending_user_suppression_tests` in `bin/tui/src/render.rs` (`pending_user_message_is_suppressed_from_the_transcript`, `answered_user_message_renders_in_the_transcript`, `the_tail_build_suppresses_the_pending_message_too`), plus the snapshot updates in `bin/tui/src/snapshot_tests.rs` | proven |
 
 ## Gate
 

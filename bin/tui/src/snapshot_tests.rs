@@ -127,8 +127,15 @@ fn snap_running_loop_indicator() {
 
 #[test]
 fn snap_pending_approval_banner() {
+    // The assistant reply carries the tool call: the user panel
+    // renders, and the approval banner is the point of the test.
+    // docs/tui-pending-user-messages.md: a pending user message would
+    // sit in the pending block instead.
     let events = vec![
         ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u1","content":"delete file"}"#),
+        ev(
+            r#"{"v":1,"type":"assistant_message","ts":"t","id":"a1","content":"","tool_calls":[{"id":"c1","name":"bash","arguments":{"command":"rm -rf /tmp/x"}}],"stop_reason":"tool_calls","usage":{"input_tokens":10,"output_tokens":5},"reasoning":{}}"#,
+        ),
         ev(
             r#"{"v":1,"type":"tool_call","ts":"t","id":"c1","name":"bash","arguments":{"command":"rm -rf /tmp/x"}}"#,
         ),
@@ -261,8 +268,15 @@ fn snap_tool_result_edit() {
 
 #[test]
 fn snap_error_event() {
+    // The user message is answered by an assistant reply: the panel
+    // renders. A pending message would move to the pending block
+    // (docs/tui-pending-user-messages.md) and leave the transcript
+    // blank, which is not this test's point.
     let events = vec![
         ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u1","content":"do something"}"#),
+        ev(
+            r#"{"v":1,"type":"assistant_message","ts":"t","id":"a1","content":"Ok","tool_calls":[],"stop_reason":"stop","usage":{"input_tokens":10,"output_tokens":5},"reasoning":{}}"#,
+        ),
         ev(
             r#"{"v":1,"type":"error","ts":"t","message":{"code":"E404","detail":"file not found"}}"#,
         ),
@@ -275,11 +289,19 @@ fn snap_error_event() {
 
 #[test]
 fn snap_long_transcript_scrolled_back() {
+    // Pairs of user and assistant messages: every user panel is
+    // answered and renders. A trailing pending message would sit in
+    // the pending block instead (docs/tui-pending-user-messages.md).
     let events: Vec<Event> = (0..20)
-        .map(|i| {
-            ev(&format!(
-                r#"{{"v":1,"type":"user_message","ts":"t","id":"u{i}","content":"message {i}"}}"#
-            ))
+        .flat_map(|i| {
+            vec![
+                ev(&format!(
+                    r#"{{"v":1,"type":"user_message","ts":"t","id":"u{i}","content":"message {i}"}}"#
+                )),
+                ev(&format!(
+                    r#"{{"v":1,"type":"assistant_message","ts":"t","id":"a{i}","content":"answer {i}","tool_calls":[],"stop_reason":"stop","usage":{{"input_tokens":10,"output_tokens":5}},"reasoning":{{}}}}"#
+                )),
+            ]
         })
         .collect();
     let mut app = app_with_session(events);
@@ -292,9 +314,16 @@ fn snap_long_transcript_scrolled_back() {
 
 #[test]
 fn snap_narrow_terminal() {
-    let events = vec![ev(
-        r#"{"v":1,"type":"user_message","ts":"t","id":"u1","content":"Hello in a narrow pane"}"#,
-    )];
+    // Answered user message: the panel renders. A pending one would
+    // move to the pending block (docs/tui-pending-user-messages.md).
+    let events = vec![
+        ev(
+            r#"{"v":1,"type":"user_message","ts":"t","id":"u1","content":"Hello in a narrow pane"}"#,
+        ),
+        ev(
+            r#"{"v":1,"type":"assistant_message","ts":"t","id":"a1","content":"Ok","tool_calls":[],"stop_reason":"stop","usage":{"input_tokens":10,"output_tokens":5},"reasoning":{}}"#,
+        ),
+    ];
     let mut app = app_with_session(events);
     let (host, _tmp) = empty_host();
     let out = render(&mut app, &host, 60, 20);
@@ -385,11 +414,20 @@ fn snap_editor_w_motion() {
 
 #[test]
 fn snap_browse_mode_active() {
+    // Alternating user and assistant messages: the user panels are
+    // answered and render. The last event is the assistant reply, so
+    // nothing is pending (docs/tui-pending-user-messages.md).
     let events: Vec<Event> = (0..50)
         .map(|i| {
-            ev(&format!(
-                r#"{{"v":1,"type":"user_message","ts":"t","id":"u{i}","content":"line {i}"}}"#
-            ))
+            if i % 2 == 0 {
+                ev(&format!(
+                    r#"{{"v":1,"type":"user_message","ts":"t","id":"u{i}","content":"line {i}"}}"#
+                ))
+            } else {
+                ev(&format!(
+                    r#"{{"v":1,"type":"assistant_message","ts":"t","id":"a{i}","content":"line {i}","tool_calls":[],"stop_reason":"stop","usage":{{"input_tokens":10,"output_tokens":5}},"reasoning":{{}}}}"#
+                ))
+            }
         })
         .collect();
     let mut app = app_with_session(events);
@@ -603,9 +641,15 @@ fn snap_tree_options_screen() {
 
 #[test]
 fn snap_palette_dark() {
-    let events = vec![ev(
-        r#"{"v":1,"type":"user_message","ts":"t","id":"u1","content":"colored"}"#,
-    )];
+    // Answered user message: the panel renders (docs/tui-pending-
+    // user-messages.md: a pending one would move to the pending
+    // block).
+    let events = vec![
+        ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u1","content":"colored"}"#),
+        ev(
+            r#"{"v":1,"type":"assistant_message","ts":"t","id":"a1","content":"Ok","tool_calls":[],"stop_reason":"stop","usage":{"input_tokens":10,"output_tokens":5},"reasoning":{}}"#,
+        ),
+    ];
     let mut app = app_with_session(events);
     app.set_palette(Palette::builtin(Level::Rgb));
     let (host, _tmp) = empty_host();
@@ -615,9 +659,15 @@ fn snap_palette_dark() {
 
 #[test]
 fn snap_palette_light() {
-    let events = vec![ev(
-        r#"{"v":1,"type":"user_message","ts":"t","id":"u1","content":"colored"}"#,
-    )];
+    // Answered user message: the panel renders (docs/tui-pending-
+    // user-messages.md: a pending one would move to the pending
+    // block).
+    let events = vec![
+        ev(r#"{"v":1,"type":"user_message","ts":"t","id":"u1","content":"colored"}"#),
+        ev(
+            r#"{"v":1,"type":"assistant_message","ts":"t","id":"a1","content":"Ok","tool_calls":[],"stop_reason":"stop","usage":{"input_tokens":10,"output_tokens":5},"reasoning":{}}"#,
+        ),
+    ];
     let mut app = app_with_session(events);
     app.set_palette(Palette::builtin(Level::C16));
     let (host, _tmp) = empty_host();
