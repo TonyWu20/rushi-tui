@@ -5659,7 +5659,9 @@ mod full_history_tests {
         use crate::event::EventKind;
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../sessions/browse-mode-issues/events.jsonl");
-        let Ok(text) = std::fs::read_to_string(&path) else {
+        // The shared reader (issue #39, kernel P3): plain legacy and
+        // zstd stream logs both decode.
+        let Ok(text) = rushi_common::logstream::read_log_text(&path) else {
             return;
         };
         let events: Vec<Event> = text
@@ -6347,7 +6349,9 @@ mod perf_bgbuild_tests {
     /// Load the real 24 MB session log, or None when no candidate exists.
     fn fixture_events() -> Option<(std::path::PathBuf, Vec<Event>)> {
         for p in fixture_paths() {
-            let Ok(text) = std::fs::read_to_string(&p) else {
+            // The shared reader (issue #39, kernel P3): plain legacy
+            // and zstd stream logs both decode.
+            let Ok(text) = rushi_common::logstream::read_log_text(&p) else {
                 continue;
             };
             let evts: Vec<Event> = text

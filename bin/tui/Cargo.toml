@@ -59,13 +59,14 @@ ratatui-markdown = { git = "https://github.com/celestia-island/ratatui-markdown"
 regex = "1.13"
 # Kernel dep (docs/tui-ext-repo-split.md section 4, item A1):
 # `rushi-common` is the kernel crate `crates/rushi` in the public kernel
-# repo, published to crates.io. Pinned to `0.1.6` (issue #35), which
-# adds the layered config loader `rushi_common::config_layer` on top
-# of the 0.1.5 surface: the shared `rushi_common::paths` config-path
-# resolver, `resolved_exe` (kernel PR #30), and the tool-entry helpers
-# (`resolve_tool_entry`, `tool_dirs_in`). To move to a newer kernel,
-# bump the version here and re-run all gates.
-rushi-common = "0.1.6"
+# repo, published to crates.io. Pinned to `0.1.7` (issue #39, kernel
+# PR #54: the zstd session log), which pub-exports the `logstream`
+# module (`rushi_common::logstream::read_log_text`) the session-log
+# read sites use. 0.1.6 added the layered config loader
+# `rushi_common::config_layer` (issue #35); 0.1.5 adds the shared
+# tool-entry helpers (`resolve_tool_entry`, `tool_dirs_in`). To move
+# to a newer kernel, bump the version here and re-run all gates.
+rushi-common = "0.1.7"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1.53", features = [

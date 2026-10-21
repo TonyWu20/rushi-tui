@@ -7,7 +7,9 @@
 //! - `append_event`: schema-validated before append; one locked
 //!   `write(2)` per line via `LogLine` (FT-005)
 //! - `spawn_loop`: run the opaque `[loop]` command in its own process group
-//! - `watch`: a dedicated thread tails the log by byte offset
+//! - `watch`: a dedicated thread tails the log: plain legacy logs by
+//!   byte offset, zstd streams by decoded line (kernel docs/session-
+//!   log-compression.md, issue #39)
 //!
 //! This module is the *only* place the TUI source knows the storage
 //! layout (docs/tui.md section 10, guardrail 3). A source-scan test in
@@ -230,9 +232,15 @@ impl FileSessionPort {
     }
 }
 
-/// One session log tailer: reads complete lines after a byte offset,
-/// keeps the unterminated tail between polls, survives truncation and
+/// One session log tailer: reads complete lines after a position,
+/// keeps the unemitted tail between polls, survives truncation and
 /// removal of the log file, and never blocks the reader.
+///
+/// The position is layout-specific (kernel docs/session-log-
+/// compression.md, P2): a legacy plain-text log tails by byte offset
+/// in the file; a zstd stream tails by decoded-line position, since
+/// a consolidation rewrite (P5) keeps the decoded text intact and
+/// the line position survives it.
 ///
 /// Wake source is the `tail -f` mechanism: an inotify watcher (via
 /// `notify`) fires on file activity, so appends drain as fast as the
@@ -240,11 +248,7 @@ impl FileSessionPort {
 /// rare inotify gaps; when the inotify backend is unavailable the
 /// tailer degrades to plain interval polling.
 fn tail_session(path: PathBuf, start: TailCursor, tx: SyncSender<WatchItem>) {
-    let mut offset: u64 = match start.offset() {
-        Some(n) => n,
-        None => file_len_or_zero(&path),
-    };
-    let mut carry: Vec<u8> = Vec::new();
+    let mut pos = TailPos::new();
     let mut present = path.exists();
 
     // Debounced inotify wake source. The debouncer coalesces rapid
@@ -261,7 +265,7 @@ fn tail_session(path: PathBuf, start: TailCursor, tx: SyncSender<WatchItem>) {
     }
 
     loop {
-        match read_tail(&path, &mut offset, &mut carry, &tx) {
+        match poll_once(&path, &start, &mut pos, &tx) {
             Ok(()) => {
                 if !present {
                     present = true;
@@ -271,6 +275,19 @@ fn tail_session(path: PathBuf, start: TailCursor, tx: SyncSender<WatchItem>) {
                     // re-register it.
                     if let Some(d) = debouncer.as_mut() {
                         register_watches(d.watcher(), &path);
+                    }
+                    // A reappearing log is a new inode. For a zstd
+                    // stream the recorded line position belongs to
+                    // the dead file: re-decide on the fresh head
+                    // from zero. For a plain tail the byte position
+                    // is kept (the alignment check handles the new
+                    // inode) unless the recreate changed the layout:
+                    // a session recreated under a newer kernel
+                    // carries the zstd layout.
+                    let fresh = sniff_log_layout(&path);
+                    if fresh != pos.layout || pos.layout == LogLayout::Zstd {
+                        pos.reset();
+                        pos.decided = false;
                     }
                 }
             }
@@ -302,7 +319,7 @@ fn tail_session(path: PathBuf, start: TailCursor, tx: SyncSender<WatchItem>) {
         // interval so a draining consumer catches up; otherwise we
         // sleep on the long fallback to keep idle CPU near zero.
         if debouncer.is_some() {
-            let tick = if carry.is_empty() {
+            let tick = if pos.carry.is_empty() {
                 NOTIFY_FALLBACK_INTERVAL
             } else {
                 TAIL_INTERVAL
@@ -344,19 +361,115 @@ enum TailErr {
     Disconnected,
 }
 
-/// Read newly appended bytes after `offset`, emit each complete line as
-/// a [`WatchItem::Event`], keep the unterminated tail in `carry`.
-///
-/// Invariant: `offset` is the file position just past the last byte
-/// *read* from the file, and `carry` holds the read-but-unemitted bytes,
-/// which occupy `[offset - carry.len(), offset)`. Each poll advances
-/// `offset` by the bytes actually read and never re-reads bytes already
-/// in `carry`, so a full channel (backpressure) or a mid-line torn read
-/// cannot duplicate or lose events.
-fn read_tail(
+/// The on-disk layout of a session log (kernel docs/session-log-
+/// compression.md, P2): decided at creation and held for the file's
+/// life. A legacy plain-text log stays plain for its life; a new log
+/// is a zstd stream. The tailer sniffs the head to tell them apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LogLayout {
+    /// A legacy plain-text log (or a file with no bytes yet).
+    Plain,
+    /// A zstd stream: one frame per commit while active, one
+    /// level-19 frame after the idle consolidation.
+    Zstd,
+}
+
+/// Sniff the layout from the head bytes. A file with fewer than four
+/// bytes, or a head that is not the zstd magic, reads plain. A new
+/// log takes its layout at first commit (P2), so re-sniffing is
+/// safe: on an existing file the answer is stable.
+fn sniff_log_layout(path: &Path) -> LogLayout {
+    let Ok(mut f) = File::open(path) else {
+        return LogLayout::Plain;
+    };
+    let mut head = [0u8; 4];
+    let Ok(n) = std::io::Read::read(&mut f, &mut head) else {
+        return LogLayout::Plain;
+    };
+    if n >= 4 && rushi_common::logstream::is_zstd_stream(&head) {
+        LogLayout::Zstd
+    } else {
+        LogLayout::Plain
+    }
+}
+
+/// The complete-line count of the current zstd log, 0 when the file
+/// is absent. The zstd analogue of [`file_len_or_zero`] for the
+/// plain tailer's byte offset: it is where a "from the end" cursor
+/// resolves.
+fn zstd_line_count(path: &Path) -> u64 {
+    match rushi_common::logstream::read_log_text(path) {
+        Ok(text) => text.matches('\n').count() as u64,
+        Err(_) => 0,
+    }
+}
+
+/// The tailer's position state. The plain path tracks a byte position
+/// in the file; the zstd path tracks a position in decoded-line space,
+/// where a consolidation rewrite (P5) moves nothing: the rewrite
+/// keeps the decoded text byte-identical, so the line position
+/// survives it. A true rotation (a replacement, shorter log) shows
+/// as a shrunken byte length or line count and resets to the start.
+struct TailPos {
+    layout: LogLayout,
+    /// Undecided: no bytes observed yet. The format is decided at
+    /// creation (P2), so the first bytes decide it.
+    decided: bool,
+    /// Plain: the file position just past the last byte read.
+    byte_offset: u64,
+    /// Plain: read-but-unemitted bytes (the partial line held between
+    /// polls).
+    carry: Vec<u8>,
+    /// Zstd: the complete decoded lines emitted so far.
+    lines: u64,
+    /// Zstd: the file length at the last decode.
+    len: u64,
+}
+
+impl TailPos {
+    fn new() -> Self {
+        TailPos {
+            layout: LogLayout::Plain,
+            decided: false,
+            byte_offset: 0,
+            carry: Vec::new(),
+            lines: 0,
+            len: 0,
+        }
+    }
+
+    /// Zero every position. Used when a zstd log reappears under a
+    /// new inode (the recorded line position belongs to the dead
+    /// file).
+    fn reset(&mut self) {
+        self.byte_offset = 0;
+        self.carry.clear();
+        self.lines = 0;
+        self.len = 0;
+    }
+
+    /// Decide the layout on the current head and resolve the watch
+    /// start position in the layout's own units: the byte offset for
+    /// plain, the line position for zstd. On the first decision
+    /// `start` was resolved by [`FileSessionPort::watch`] in the
+    /// sniffed layout's units, so both read the same number. On a
+    /// rotation re-decision the start position keeps its old-layout
+    /// units; the position checks converge it (a stale "end" number
+    /// only ever costs one reread from the start).
+    fn decide(&mut self, path: &Path, start: &TailCursor) {
+        self.layout = sniff_log_layout(path);
+        self.byte_offset = start.offset().unwrap_or(0);
+        self.lines = start.offset().unwrap_or(0);
+        self.decided = true;
+    }
+}
+
+/// One tailer poll: decide the layout on the first bytes, dispatch
+/// to the layout's read path, and handle rotation.
+fn poll_once(
     path: &Path,
-    offset: &mut u64,
-    carry: &mut Vec<u8>,
+    start: &TailCursor,
+    pos: &mut TailPos,
     tx: &SyncSender<WatchItem>,
 ) -> Result<(), TailErr> {
     let meta = match std::fs::metadata(path) {
@@ -365,38 +478,88 @@ fn read_tail(
         Err(e) => return Err(TailErr::Io(e)),
     };
     let len = meta.len();
-    if len < *offset {
+
+    if !pos.decided {
+        // No bytes observed yet: the layout is undecided and the file
+        // takes it at first commit (P2). Reread on the next poll.
+        if len == 0 {
+            return Ok(());
+        }
+        pos.decide(path, start);
+    }
+
+    match pos.layout {
+        LogLayout::Plain => {
+            if len < pos.byte_offset {
+                // Log was truncated or rotated: reread from the
+                // start. The replacement file may carry the zstd
+                // layout (a session recreated under a newer kernel):
+                // re-decide on the fresh head.
+                pos.reset();
+                pos.decided = false;
+                if len > 0 {
+                    pos.decide(path, start);
+                }
+            }
+            match pos.layout {
+                LogLayout::Plain => read_tail(path, pos, tx),
+                LogLayout::Zstd => read_tail_zstd(path, start, len, pos, tx),
+            }
+        }
+        LogLayout::Zstd => read_tail_zstd(path, start, len, pos, tx),
+    }
+}
+
+/// The plain read path: read newly appended bytes after the byte
+/// offset, emit each complete line as a [`WatchItem::Event`], keep
+/// the unterminated tail in `carry`.
+///
+/// Invariant: `byte_offset` is the file position just past the last
+/// byte *read* from the file, and `carry` holds the read-but-
+/// unemitted bytes, which occupy
+/// `[byte_offset - carry.len(), byte_offset)`. Each poll advances
+/// `byte_offset` by the bytes actually read and never re-reads bytes
+/// already in `carry`, so a full channel (backpressure) or a
+/// mid-line torn read cannot duplicate or lose events.
+fn read_tail(path: &Path, pos: &mut TailPos, tx: &SyncSender<WatchItem>) -> Result<(), TailErr> {
+    let meta = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(TailErr::NotFound),
+        Err(e) => return Err(TailErr::Io(e)),
+    };
+    let len = meta.len();
+    if len < pos.byte_offset {
         // Log was truncated or rotated: reread from the start.
-        *offset = 0;
-        carry.clear();
+        pos.byte_offset = 0;
+        pos.carry.clear();
     }
     // Alignment check: the log is append-only, so when we are at a clean
     // line boundary (no partial bytes held in `carry`) the byte just
     // before the read position must be a newline. A file rewritten
     // underneath the tailer breaks that; reread from the start. While a
-    // partial line sits in `carry` the byte before `offset` is the
+    // partial line sits in `carry` the byte before `byte_offset` is the
     // partial's last byte, not a newline, so the check is skipped.
-    if *offset > 0 && carry.is_empty() {
+    if pos.byte_offset > 0 && pos.carry.is_empty() {
         if let Ok(mut probe) = File::open(path) {
-            if probe.seek(SeekFrom::Start(*offset - 1)).is_ok() {
+            if probe.seek(SeekFrom::Start(pos.byte_offset - 1)).is_ok() {
                 let mut b = [0u8; 1];
                 if probe.read_exact(&mut b).is_ok() && b[0] != b'\n' {
-                    *offset = 0;
-                    carry.clear();
+                    pos.byte_offset = 0;
+                    pos.carry.clear();
                 }
             }
         }
     }
-    let want = len.saturating_sub(*offset);
+    let want = len.saturating_sub(pos.byte_offset);
     // No new bytes and no complete line held in carry: nothing to do
     // this poll. A partial tail (no newline yet) cannot make progress
     // until new bytes arrive, so skip the clone-and-retry work that
     // would spin on an idle file.
-    if want == 0 && !carry.contains(&b'\n') {
+    if want == 0 && !pos.carry.contains(&b'\n') {
         return Ok(());
     }
 
-    let old_offset = *offset;
+    let old_offset = pos.byte_offset;
     // `fresh` holds only the bytes appended to the file since the last
     // poll; `carry` already holds the earlier read-but-unemitted bytes.
     let mut fresh: Vec<u8> = Vec::new();
@@ -405,7 +568,7 @@ fn read_tail(
             Ok(f) => f,
             Err(e) => return Err(TailErr::Io(e)),
         };
-        if file.seek(SeekFrom::Start(*offset)).is_err() {
+        if file.seek(SeekFrom::Start(pos.byte_offset)).is_err() {
             // Race with removal; the next poll handles it.
             return Ok(());
         }
@@ -425,8 +588,8 @@ fn read_tail(
     // `carry` spans `[carry_start, old_offset)` in the file; `candidate`
     // is those bytes plus the freshly read ones, so candidate position `p`
     // maps to file position `carry_start + p`.
-    let carry_start = old_offset.saturating_sub(carry.len() as u64);
-    let mut candidate = carry.clone();
+    let carry_start = old_offset.saturating_sub(pos.carry.len() as u64);
+    let mut candidate = pos.carry.clone();
     candidate.extend_from_slice(&fresh);
 
     // Position just past the last complete newline, or 0 when none.
@@ -439,8 +602,8 @@ fn read_tail(
     // position just past the last line this poll got out; the rest stays
     // in `carry` for the next poll. When the channel is full we stop at
     // the first failed send and keep our place: no event is lost and no
-    // event is re-emitted, because `offset` advances past every read byte
-    // exactly once.
+    // event is re-emitted, because `byte_offset` advances past every
+    // read byte exactly once.
     let mut emitted = 0usize;
     for line in candidate[..complete_end].split_inclusive(|b| *b == b'\n') {
         let line_end = emitted + line.len();
@@ -463,8 +626,81 @@ fn read_tail(
     }
 
     // Advance past every byte read this poll, whatever was emitted.
-    *offset = old_offset + fresh.len() as u64;
-    *carry = candidate[emitted..].to_vec();
+    pos.byte_offset = old_offset + fresh.len() as u64;
+    pos.carry = candidate[emitted..].to_vec();
+    Ok(())
+}
+
+/// The zstd read path: decode the whole stream (P4: a torn tail frame
+/// stops at the last complete frame) and emit the complete lines
+/// past the recorded line position. The position is in decoded-line
+/// space, so the idle consolidation (P5) moves nothing. A
+/// replacement by a shorter log (a rotation) shrinks the line count:
+/// reset to the start, re-decide the layout on the fresh head, and
+/// reread from zero like the plain path.
+///
+/// Skip: when the file length is unchanged since the last decode, no
+/// new complete line can exist. A torn frame stalls progress only
+/// while its write is in flight, and that write grows the file, so
+/// an unchanged length means nothing to emit.
+fn read_tail_zstd(
+    path: &Path,
+    start: &TailCursor,
+    len: u64,
+    pos: &mut TailPos,
+    tx: &SyncSender<WatchItem>,
+) -> Result<(), TailErr> {
+    if len == pos.len {
+        return Ok(());
+    }
+    let text = match rushi_common::logstream::read_log_text(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(TailErr::NotFound),
+        Err(e) => return Err(TailErr::Io(e)),
+    };
+    let complete = text.matches('\n').count();
+    pos.len = len;
+    if (complete as u64) < pos.lines {
+        // Rotation: the stream was replaced by a shorter log. Reread
+        // from the start. The replacement may carry the plain layout
+        // (a legacy log restored over a zstd one): re-decide on the
+        // fresh head.
+        pos.reset();
+        pos.decided = false;
+        if len > 0 {
+            pos.decide(path, start);
+        }
+        if pos.layout == LogLayout::Plain {
+            return read_tail(path, pos, tx);
+        }
+    }
+    // Walk the new complete lines, emitting each. Backpressure keeps
+    // the line position: `pos.lines` advances past a line only once
+    // it emitted (or was blank), so the next poll rereads the stream
+    // and picks up where this one stopped. No event duplicates and
+    // no event is lost.
+    let mut i = pos.lines;
+    for line in text.lines().take(complete).skip(i as usize) {
+        i += 1;
+        if let Some(event) = Event::parse_line(line) {
+            match tx.try_send(WatchItem::Event {
+                event,
+                // The cursor is the line position just past the
+                // emitted line (the zstd analogue of the plain path's
+                // byte offset).
+                cursor: TailCursor::at(i),
+            }) {
+                Ok(()) => pos.lines = i,
+                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                    return Err(TailErr::Disconnected);
+                }
+                Err(std::sync::mpsc::TrySendError::Full(_)) => break,
+            }
+        } else {
+            // Blank line: skip it, but keep the position moving.
+            pos.lines = i;
+        }
+    }
     Ok(())
 }
 
@@ -535,7 +771,11 @@ impl SessionPort for FileSessionPort {
     async fn read_events(&self, session: &SessionId) -> Result<Vec<Event>, BusError> {
         let path = self.log_path(session)?;
         let res = tokio::task::spawn_blocking(move || -> Result<Vec<Event>, BusError> {
-            let data = match std::fs::read(&path) {
+            // The shared reader (issue #39, kernel P3): plain-text
+            // legacy logs read verbatim, zstd streams decompress in
+            // frame order, and a torn tail frame stops at the last
+            // complete frame (P4).
+            let data = match rushi_common::logstream::read_log_text(&path) {
                 Ok(d) => d,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
                 Err(e) => return Err(BusError::from(e)),
@@ -543,21 +783,21 @@ impl SessionPort for FileSessionPort {
             // No byte cap: the whole log is replayed so the session
             // beginning stays reachable (docs/tui-conversation-
             // browsing.md section 4.6, no replay cap).
-            let chunk = &data[..];
-            // A read that races an in-flight append leaves the last line
-            // without its trailing newline. That tail segment is still
-            // being written, not a persisted malformed line. Drop it; the
-            // next read shows it in full.
-            let tail_in_progress = chunk.last() != Some(&b'\n');
-            let segs: Vec<&[u8]> = chunk.split(|b| *b == b'\n').collect();
+            // A read that races an in-flight append leaves the last
+            // line without its trailing newline (a zstd torn-tail
+            // frame shows the same shape: a partial final line). That
+            // tail segment is still being written, not a persisted
+            // malformed line. Drop it; the next read shows it in
+            // full.
+            let tail_in_progress = !data.ends_with('\n');
+            let segs: Vec<&str> = data.split('\n').collect();
             let last_idx = segs.len().saturating_sub(1);
             let mut events = Vec::new();
             for (i, seg) in segs.iter().enumerate() {
                 if i == last_idx && tail_in_progress {
                     continue;
                 }
-                let text = String::from_utf8_lossy(seg);
-                if let Some(ev) = Event::parse_line(&text) {
+                if let Some(ev) = Event::parse_line(seg) {
                     events.push(ev);
                 }
             }
@@ -572,7 +812,10 @@ impl SessionPort for FileSessionPort {
     async fn log_line_count(&self, session: &SessionId) -> Result<u64, BusError> {
         let path = self.log_path(session)?;
         let inner = tokio::task::spawn_blocking(move || -> Result<u64, BusError> {
-            let data = match std::fs::read(&path) {
+            // The shared reader (issue #39, kernel P3): a zstd log
+            // counts its decoded lines, a legacy plain log its raw
+            // lines.
+            let data = match rushi_common::logstream::read_log_text(&path) {
                 Ok(d) => d,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
                 Err(e) => return Err(BusError::from(e)),
@@ -580,7 +823,7 @@ impl SessionPort for FileSessionPort {
             // A complete line ends in a newline. An in-progress tail
             // (no trailing newline) is not yet a written event, so it
             // does not count.
-            Ok(data.iter().filter(|b| **b == b'\n').count() as u64)
+            Ok(data.matches('\n').count() as u64)
         })
         .await
         .map_err(|e| BusError::Io {
@@ -795,7 +1038,15 @@ impl SessionPort for FileSessionPort {
         let start = if from.is_start() {
             TailCursor::start()
         } else {
-            TailCursor::at(file_len_or_zero(&path))
+            // Resolve "from the end" in the log's own position units:
+            // the byte offset for a plain log, the decoded-line
+            // position for a zstd stream (issue #39, kernel P2). The
+            // tailer re-decides on rotation, so a stale resolution
+            // only ever costs one reread from the start.
+            match sniff_log_layout(&path) {
+                LogLayout::Zstd => TailCursor::at(zstd_line_count(&path)),
+                LogLayout::Plain => TailCursor::at(file_len_or_zero(&path)),
+            }
         };
         let (tx, rx) = std::sync::mpsc::sync_channel(TAIL_CAPACITY);
         let _ = std::thread::Builder::new()
@@ -1702,7 +1953,7 @@ mod tests {
                 .append_event(&SessionId::new(abs.to_str().unwrap()), &ev),
         )
         .unwrap();
-        let content = std::fs::read_to_string(abs.join(LOG_FILE)).unwrap();
+        let content = rushi_common::logstream::read_log_text(&abs.join(LOG_FILE)).unwrap();
         assert!(
             content.contains("\"content\":\"first\""),
             "the event lands in the explicit dir, not the sessions root"
@@ -2232,7 +2483,7 @@ mod tests {
             .join("sessions")
             .join("s1")
             .join("tui-trace.jsonl");
-        let text = std::fs::read_to_string(trace_path).unwrap();
+        let text = rushi_common::logstream::read_log_text(&trace_path).unwrap();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 2, "one record per trace event");
         let first: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
@@ -2243,7 +2494,7 @@ mod tests {
         let second: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
         assert_eq!(second["kind"], "port");
         // The trace log is its own file: the event log holds no trace.
-        let log = std::fs::read_to_string(log_path(&c, "s1"));
+        let log = rushi_common::logstream::read_log_text(&log_path(&c, "s1"));
         assert!(log.is_err(), "append_trace must not touch the event log");
     }
 
@@ -2264,13 +2515,20 @@ mod tests {
             obj: serde_json::json!({"v":1,"type":"user_message","ts":"t","content":"hi"}),
         };
         block_on(&rt, c.port.append_event(&SessionId::new("s1"), &ev)).unwrap();
-        let content = std::fs::read_to_string(log_path(&c, "s1")).unwrap();
+        let content = rushi_common::logstream::read_log_text(&log_path(&c, "s1")).unwrap();
         let lines: Vec<&str> = content.lines().collect();
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("\"content\":\"hi\""));
         assert!(
             content.ends_with('\n'),
             "each appended event must own its newline"
+        );
+        // The new log is a zstd stream (kernel P1): one frame per
+        // commit, the zstd magic at the head.
+        let raw = std::fs::read(log_path(&c, "s1")).unwrap();
+        assert!(
+            rushi_common::logstream::is_zstd_stream(&raw),
+            "a log created by the 0.1.7 commit path is a zstd stream"
         );
     }
 
@@ -2285,7 +2543,7 @@ mod tests {
             };
             block_on(&rt, c.port.append_event(&sid, &ev)).unwrap();
         }
-        let content = std::fs::read_to_string(log_path(&c, "s2")).unwrap();
+        let content = rushi_common::logstream::read_log_text(&log_path(&c, "s2")).unwrap();
         let lines: Vec<&str> = content.lines().collect();
         assert_eq!(lines.len(), 3, "consecutive appends must not glue lines");
         for line in &lines {
@@ -2363,7 +2621,7 @@ mod tests {
         let rt = runtime();
         let ev = crate::event::produce::ext_status("vim_mode", serde_json::json!("insert"));
         block_on(&rt, c.port.append_event(&SessionId::new("s1"), &ev)).unwrap();
-        let content = std::fs::read_to_string(log_path(&c, "s1")).unwrap();
+        let content = rushi_common::logstream::read_log_text(&log_path(&c, "s1")).unwrap();
         let lines: Vec<&str> = content.lines().collect();
         assert_eq!(lines.len(), 1, "one line in the log: {lines:?}");
         let parsed: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
@@ -2880,9 +3138,222 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::sync_channel(4);
         drop(rx);
 
-        let mut offset: u64 = 0;
-        let mut carry = Vec::new();
-        let res = read_tail(&path, &mut offset, &mut carry, &tx);
+        let mut pos = TailPos {
+            layout: LogLayout::Plain,
+            decided: true,
+            byte_offset: 0,
+            carry: Vec::new(),
+            lines: 0,
+            len: 0,
+        };
+        let res = read_tail(&path, &mut pos, &tx);
+        assert!(
+            matches!(res, Err(TailErr::Disconnected)),
+            "expected Disconnected, got {res:?}"
+        );
+    }
+
+    /// Seed a zstd stream log, one frame per line, through the
+    /// kernel write path (`LogLine::commit`, P1).
+    fn seed_zstd_log(path: &Path, json_lines: &[&str]) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        for line in json_lines {
+            rushi_common::logline::LogLine::from_json(line)
+                .commit(path)
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn read_events_reads_a_zstd_stream_log() {
+        let c = make_cfg(None);
+        let rt = runtime();
+        seed_zstd_log(
+            &log_path(&c, "s-zstd"),
+            &[
+                r#"{"v":1,"type":"user_message","ts":"t","content":"one"}"#,
+                r#"{"v":1,"type":"user_message","ts":"t","content":"two"}"#,
+            ],
+        );
+        let raw = std::fs::read(log_path(&c, "s-zstd")).unwrap();
+        assert!(
+            rushi_common::logstream::is_zstd_stream(&raw),
+            "the seeded log is a zstd stream"
+        );
+        let evs = block_on(&rt, c.port.read_events(&SessionId::new("s-zstd"))).unwrap();
+        assert_eq!(evs.len(), 2, "the stream decodes to both lines");
+        assert_eq!(evs[0].get_str("content"), Some("one"));
+        assert_eq!(evs[1].get_str("content"), Some("two"));
+        // A legacy plain log reads verbatim under the same reader
+        // (kernel P2/P3).
+        let plain = c.dir.path().join("sessions").join("s-plain").join(LOG_FILE);
+        std::fs::create_dir_all(plain.parent().unwrap()).unwrap();
+        std::fs::write(
+            &plain,
+            r#"{"v":1,"type":"user_message","ts":"t","content":"old"}
+"#,
+        )
+        .unwrap();
+        let plain_evs = block_on(&rt, c.port.read_events(&SessionId::new("s-plain"))).unwrap();
+        assert_eq!(plain_evs.len(), 1);
+        assert_eq!(plain_evs[0].get_str("content"), Some("old"));
+    }
+
+    #[test]
+    fn read_events_drops_a_torn_tail_frame() {
+        let c = make_cfg(None);
+        let rt = runtime();
+        let path = log_path(&c, "s-torn");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // P4: the final frame is cut mid-frame. The complete frame
+        // still reads; the torn line drops.
+        let good = rushi_common::logstream::compress_frame(
+            r#"{"v":1,"type":"user_message","ts":"t","content":"good"}
+"#
+            .as_bytes(),
+        )
+        .unwrap();
+        let torn = rushi_common::logstream::compress_frame(
+            r#"{"v":1,"type":"user_message","ts":"t","content":"torn"}
+"#
+            .as_bytes(),
+        )
+        .unwrap();
+        let mut buf = good;
+        buf.extend_from_slice(&torn[..torn.len() / 2]);
+        std::fs::write(&path, &buf).unwrap();
+        let evs = block_on(&rt, c.port.read_events(&SessionId::new("s-torn"))).unwrap();
+        assert_eq!(evs.len(), 1, "the torn frame drops, the good line stays");
+        assert_eq!(evs[0].get_str("content"), Some("good"));
+    }
+
+    #[test]
+    fn log_line_count_counts_zstd_lines() {
+        let c = make_cfg(None);
+        let rt = runtime();
+        let path = log_path(&c, "s-count");
+        seed_zstd_log(
+            &path,
+            &[
+                r#"{"v":1,"type":"user_message","ts":"t","content":"a"}"#,
+                r#"{"v":1,"type":"user_message","ts":"t","content":"b"}"#,
+                r#"{"v":1,"type":"user_message","ts":"t","content":"c"}"#,
+            ],
+        );
+        let n = block_on(&rt, c.port.log_line_count(&SessionId::new("s-count"))).unwrap();
+        assert_eq!(n, 3, "the decoded lines count, not the frame bytes");
+        // A torn tail frame is not yet a written event (P4): the
+        // count stays at the last complete line.
+        let torn = rushi_common::logstream::compress_frame(
+            r#"{"v":1,"type":"user_message","ts":"t","content":"d"}
+"#
+            .as_bytes(),
+        )
+        .unwrap();
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(&torn[..torn.len() / 2])
+            .unwrap();
+        let n = block_on(&rt, c.port.log_line_count(&SessionId::new("s-count"))).unwrap();
+        assert_eq!(n, 3, "the torn frame holds no complete line");
+    }
+
+    #[test]
+    fn watch_sees_new_events_on_a_zstd_log() {
+        let c = make_cfg(None);
+        let path = log_path(&c, "s-wz");
+        seed_zstd_log(
+            &path,
+            &[r#"{"v":1,"type":"user_message","ts":"t","content":"old"}"#],
+        );
+        let sid = SessionId::new("s-wz");
+        let rx = c.port.watch(&sid, TailCursor::end());
+        std::thread::sleep(Duration::from_millis(200)); // let the tailer attach
+        rushi_common::logline::LogLine::from_json(
+            r#"{"v":1,"type":"user_message","ts":"t","content":"new"}"#,
+        )
+        .commit(&path)
+        .unwrap();
+        match wait_item(&rx) {
+            WatchItem::Event { event, cursor } => {
+                assert_eq!(event.kind(), EventKind::UserMessage);
+                assert_eq!(event.get_str("content"), Some("new"));
+                // The zstd cursor is the line position just past the
+                // emitted line: one old line plus this one.
+                assert_eq!(cursor, TailCursor::at(2));
+            }
+            other => panic!("expected event, got {other:?}"),
+        }
+        drop(rx);
+    }
+
+    /// The idle consolidation pass (kernel P5/P7) rewrites the stream
+    /// as one level-19 frame. The decoded text is unchanged, so the
+    /// line position survives the rewrite: the pre-rewrite lines must
+    /// not re-emit, and the frame appended after the rewrite (P6)
+    /// must still reach the tailer.
+    #[test]
+    fn watch_keeps_its_place_across_a_consolidation() {
+        let c = make_cfg(None);
+        let path = log_path(&c, "s-cons");
+        seed_zstd_log(
+            &path,
+            &[
+                r#"{"v":1,"type":"user_message","ts":"t","content":"a"}"#,
+                r#"{"v":1,"type":"user_message","ts":"t","content":"b"}"#,
+            ],
+        );
+        let sid = SessionId::new("s-cons");
+        let rx = c.port.watch(&sid, TailCursor::end());
+        std::thread::sleep(Duration::from_millis(200)); // let the tailer attach
+        rushi_common::logstream::consolidate(&path).unwrap();
+        rushi_common::logline::LogLine::from_json(
+            r#"{"v":1,"type":"user_message","ts":"t","content":"c"}"#,
+        )
+        .commit(&path)
+        .unwrap();
+        match wait_item(&rx) {
+            WatchItem::Event { event, cursor } => {
+                assert_eq!(
+                    event.get_str("content"),
+                    Some("c"),
+                    "the pre-rewrite lines must not re-emit"
+                );
+                assert_eq!(cursor, TailCursor::at(3));
+            }
+            other => panic!("expected event, got {other:?}"),
+        }
+        drop(rx);
+    }
+
+    #[test]
+    fn read_tail_zstd_returns_disconnected_when_receiver_dropped() {
+        let c = make_cfg(None);
+        let path = log_path(&c, "s-zdc");
+        seed_zstd_log(
+            &path,
+            &[r#"{"v":1,"type":"user_message","ts":"t","content":"x"}"#],
+        );
+        let (tx, rx) = std::sync::mpsc::sync_channel(4);
+        drop(rx);
+        let mut pos = TailPos {
+            layout: LogLayout::Zstd,
+            decided: true,
+            byte_offset: 0,
+            carry: Vec::new(),
+            lines: 0,
+            len: 0,
+        };
+        let res = read_tail_zstd(
+            &path,
+            &TailCursor::start(),
+            file_len_or_zero(&path),
+            &mut pos,
+            &tx,
+        );
         assert!(
             matches!(res, Err(TailErr::Disconnected)),
             "expected Disconnected, got {res:?}"
