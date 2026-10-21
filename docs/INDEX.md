@@ -4,7 +4,15 @@ Authoritative entry point for any agent starting a new session in
 this repo. Read this first. It tells you what exists, what is
 shipped, and what is next.
 
-## Repo state (2026-10-14)
+## Repo state (2026-10-21)
+
+**Zstd session log (2026-10-21, issue #39, implemented).** The
+TUI reads session logs through the shared kernel reader
+(`rushi_common::logstream::read_log_text`) and tails zstd logs on
+decoded lines. The kernel dep is pinned to `0.1.7` in
+`bin/tui/Cargo.toml` + `Cargo.lock`. The kernel side is PR #54
+(the zstd session log, the pub-exported `logstream` module).
+See `tui-session-log-zstd.md`.
 
 **Layered config load (2026-10-14, issue #35, implemented).** The
 TUI now reads the config through `rushi_common::config_layer`
@@ -131,6 +139,7 @@ Method and conventions: `tui-insta-snapshot-testing.md`.
 | `coauthor-guard.md` | Implemented | 2026-09-15 | Blocks co-author trailers not in `.githooks/coauthor-allowlist`, at commit time and at push time. The `commit-msg` and `pre-push` hooks plus the installer script. |
 | `tui-self-wired-entry.md` | Implemented | 2026-09-22 | Issue #22 adaptation: the `rushi-tui` entry command, the shared kernel config-path resolver (`rushi_common::paths`, kernel PR #30), and the self-wired Tier-1 loop (`rushi run <session>`, `--loop-cmd` override). |
 | `tui-loop-meta-identity.md` | Implemented | 2026-10-05 | Issue #31: the external loop probe and stop prefer the kernel's `loop.meta` identity record. The session argument accepts an explicit session dir (the tv `open` action). |
+| `tui-session-log-zstd.md` | Implemented | 2026-10-21 | Issue #39: the zstd session log (kernel PR #54). Every session-log read site moves to `rushi_common::logstream::read_log_text`; the tailer tails zstd logs on decoded-line positions; the plain path stays byte-offset. `rushi-common` pinned to `0.1.7`. |
 
 ## Status legend
 
