@@ -4,11 +4,12 @@
 #
 # Kernel dep (docs/tui-ext-repo-split.md section 4, item A1):
 # `rushi-common` is the kernel crate `crates/rushi`, published to
-# crates.io. Pinned to `0.1.6` (issue #35, kernel commit 8bfbe1e: the
-# layered config loader `config_layer`; 0.1.5 adds the shared tool-entry
-# helpers `resolve_tool_entry` and `tool_dirs_in`). To move to a newer
-# kernel release, bump the version in `bin/tui/Cargo.toml` and re-run
-# all gates.
+# crates.io. Pinned to `0.1.7` (issue #39, kernel PR #54: the zstd
+# session log, the pub-exported `logstream` module; 0.1.6 is issue
+# #35's layered config loader `config_layer` on the 0.1.5 tool-entry
+# helpers `resolve_tool_entry` and `tool_dirs_in`). To move to a
+# newer kernel release, bump the version in `bin/tui/Cargo.toml` and
+# re-run all gates.
 
 [workspace]
 resolver = "2"

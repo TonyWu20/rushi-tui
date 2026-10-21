@@ -1048,14 +1048,14 @@ mod tests {
     /// row, and the branch block is a child of the target row.
     #[test]
     fn tracked_tree_ui_update_session_shape() {
-        use std::io::Read;
+        // The shared reader (issue #39, kernel P3): the tracked log
+        // is plain today and a zstd stream tomorrow; both decode.
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../sessions/tree-ui-update/events.jsonl"
         );
-        let mut data = std::fs::File::open(path).expect("tracked session log");
-        let mut buf = String::new();
-        data.read_to_string(&mut buf).expect("read log");
+        let buf = rushi_common::logstream::read_log_text(std::path::Path::new(path))
+            .expect("tracked session log");
         let events: Vec<Event> = buf.lines().filter_map(Event::parse_line).collect();
         assert!(events.len() > 4915, "the tracked log is complete");
         let tree = SessionTree::build(&events, 1, 1, &empty_maps().0, &empty_maps().1);
