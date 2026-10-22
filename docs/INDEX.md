@@ -4,7 +4,18 @@ Authoritative entry point for any agent starting a new session in
 this repo. Read this first. It tells you what exists, what is
 shipped, and what is next.
 
-## Repo state (2026-10-21)
+## Repo state (2026-10-22)
+
+**Pending user message suppression (2026-10-22, stage 3,
+implemented).** The transcript omits the user panel of an
+unconsumed `user_message`; the pending block previews it. One
+appearance per message: preview while the loop is owed, full
+panel once it answers. The user report behind it: the new
+zstd-log TUI showed a sent message twice, the pending block
+and the transcript panel, while the log held one event.
+`App::pending_user_keys` derives the set; the build loop skips
+the panel and keeps the collapsed-turn tally row. See
+`tui-pending-user-messages.md` (section 5, property P7).
 
 **Zstd session log (2026-10-21, issue #39, implemented).** The
 TUI reads session logs through the shared kernel reader
@@ -98,7 +109,7 @@ Method and conventions: `tui-insta-snapshot-testing.md`.
 | `tui-working-status.md` | Implemented | 2026-09-16 | The TUI-derived `working` loop-phase status: request pending vs. response streaming. Shipped 2026-09-16: `PhaseState::Working` derived in `render.rs`, no kernel change. |
 | `tui-thinking-block.md` | Implemented | 2026-09-07 | Reasoning/thinking block capture and display. |
 | `tui-thinking-level-input-box.md` | Implemented | 2026-09-07 | Thinking-level control in the input-box border. |
-| `tui-pending-user-messages.md` | Implemented | 2026-09-07 | Queued user messages rendered while the loop is busy. |
+| `tui-pending-user-messages.md` | Implemented | 2026-10-22 | Queued user messages rendered while the loop is busy. Stage 3 (2026-10-22): the transcript omits the pending panel; one appearance per message. |
 | `tui-malformed-line-flash.md` | Implemented | 2026-09-07 | Root-cause and fix for the transient malformed-line flash. |
 | `tui-markdown-render.md` | Superseded | 2026-09-08 | Original markdown-render spec. Now in `highlight.rs`. |
 | `tui-tool-display-port.md` | Implemented | 2026-09-07 | Port of pi-tool-display: boxed tool results, fold/expand, presets. |

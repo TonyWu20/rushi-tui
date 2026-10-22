@@ -5,6 +5,7 @@
 //! actions; the tests here drive the state machine directly.
 
 use std::collections::{HashMap, VecDeque};
+use std::hash::Hasher;
 use std::rc::Rc;
 use std::time::Instant;
 
@@ -4118,15 +4119,11 @@ impl App {
 
     // ── pending user messages ─────────────────────────────────
 
-    /// The unconsumed `user_message` events of the active session,
-    /// in log order. A message is consumed when the loop answers
-    /// it: an `assistant_message` event follows it in the log. A
-    /// message sent while the loop is busy stays pending until the
-    /// next step answers it (the loop's steering behavior;
-    /// docs/tui_feature_requests_from_human.md 2026-08-31, stage 1).
-    /// The derivation is log-only, like
-    /// [`App::oldest_pending_approval`]: it survives a TUI restart.
-    pub fn pending_user_messages(&self) -> Vec<&Event> {
+    /// The pending-queue derivation, shared by
+    /// [`App::pending_user_messages`] and [`App::pending_user_keys`]:
+    /// the log index just past the last `assistant_message`, and the
+    /// ids the `user_message_retract` events retracted.
+    fn pending_user_derivation(&self) -> (usize, std::collections::HashSet<String>) {
         let last_answered = self
             .events
             .iter()
@@ -4138,6 +4135,19 @@ impl App {
             .filter(|e| e.kind() == EventKind::UserMessageRetract)
             .filter_map(|e| e.get_str("target").map(String::from))
             .collect();
+        (from, retracted)
+    }
+
+    /// The unconsumed `user_message` events of the active session,
+    /// in log order. A message is consumed when the loop answers
+    /// it: an `assistant_message` event follows it in the log. A
+    /// message sent while the loop is busy stays pending until the
+    /// next step answers it (the loop's steering behavior;
+    /// docs/tui_feature_requests_from_human.md 2026-08-31, stage 1).
+    /// The derivation is log-only, like
+    /// [`App::oldest_pending_approval`]: it survives a TUI restart.
+    pub fn pending_user_messages(&self) -> Vec<&Event> {
+        let (from, retracted) = self.pending_user_derivation();
         self.events[from..]
             .iter()
             .filter(|e| {
@@ -4146,6 +4156,43 @@ impl App {
                         .map(|id| !retracted.contains(id))
                         .unwrap_or(true)
             })
+            .collect()
+    }
+
+    /// The keys of the pending `user_message` events, the input of
+    /// the transcript suppression (docs/tui-pending-user-messages.md):
+    /// the transcript omits the user panel of an unconsumed message,
+    /// and the pending block previews it. The panel renders once the
+    /// loop answers the message and the key leaves the set.
+    ///
+    /// One pass over the log: the index of the last
+    /// `assistant_message` and the retracted ids, both in the same
+    /// walk. The suffix walk then collects the keys. The set is
+    /// rebuilt per call: the transcript build calls it per build.
+    pub fn pending_user_keys(&self) -> std::collections::HashSet<String> {
+        let mut last_assistant: Option<usize> = None;
+        let mut retracted: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for (i, e) in self.events.iter().enumerate() {
+            match e.kind() {
+                EventKind::AssistantMessage => last_assistant = Some(i),
+                EventKind::UserMessageRetract => {
+                    if let Some(target) = e.get_str("target") {
+                        retracted.insert(target.to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+        let from = last_assistant.map(|i| i + 1).unwrap_or(0);
+        self.events[from..]
+            .iter()
+            .filter(|e| {
+                e.kind() == EventKind::UserMessage
+                    && e.get_str("id")
+                        .map(|id| !retracted.contains(id))
+                        .unwrap_or(true)
+            })
+            .map(user_message_key)
             .collect()
     }
 
@@ -5987,8 +6034,11 @@ mod background_build_tests {
 
         // Commit an event at the same width: the events version
         // bumps, the width is unchanged. The miss must not wait
-        // out the width window.
-        app.set_active(sid, make_events(301), 301);
+        // out the width window. 302 events end in the answered
+        // assistant `reply 301`: a pending user message would sit
+        // in the pending block, not the transcript
+        // (docs/tui-pending-user-messages.md).
+        app.set_active(sid, make_events(302), 302);
         let _ = app.transcript_lines(80, None);
         assert!(app.transcript_rebuilding());
         assert!(
@@ -6004,7 +6054,7 @@ mod background_build_tests {
         assert!(!app.transcript_rebuilding());
         let full = joined_text(&mut app, 80);
         assert!(
-            full.contains("line 300"),
+            full.contains("reply 301"),
             "the committed event is in the build"
         );
     }
@@ -7260,4 +7310,18 @@ mod loop_state_tests {
             "the handle is kept for the `Exited` drain"
         );
     }
+}
+
+/// The identity key of a `user_message` for the pending set
+/// (docs/tui-pending-user-messages.md): the event `id` when it has
+/// one. A legacy line without an `id` falls back to a hash of its
+/// content, so a pending message still suppresses its panel.
+pub(crate) fn user_message_key(e: &Event) -> String {
+    if let Some(id) = e.get_str("id") {
+        return id.to_string();
+    }
+    let content = e.get_str("content").unwrap_or("");
+    let mut h = std::hash::DefaultHasher::new();
+    h.write(content.as_bytes());
+    format!("c{:x}", h.finish())
 }

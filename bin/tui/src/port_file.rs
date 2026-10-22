@@ -3329,6 +3329,80 @@ mod tests {
         drop(rx);
     }
 
+    /// The user flow: the session already holds a zstd log, the TUI
+    /// watches from the end, and the TUI itself sends a message
+    /// (`append_event` commits one frame). The delivered stream must
+    /// carry that message exactly once over the whole watch window.
+    #[test]
+    fn watch_zstd_delivers_the_tui_append_exactly_once() {
+        let c = make_cfg(None);
+        let path = log_path(&c, "s-once");
+        seed_zstd_log(
+            &path,
+            &[
+                r#"{"v":1,"type":"assistant_message","ts":"t","content":"a1"}"#,
+                r#"{"v":1,"type":"assistant_message","ts":"t","content":"a2"}"#,
+            ],
+        );
+        let sid = SessionId::new("s-once");
+        let rx = c.port.watch(&sid, TailCursor::end());
+        std::thread::sleep(Duration::from_millis(300)); // let the tailer attach
+                                                        // The TUI send path: one `LogLine::commit`, one frame.
+        rushi_common::logline::LogLine::from_json(
+            r#"{"v":1,"type":"user_message","ts":"t","id":"m1","content":"the message"}"#,
+        )
+        .commit(&path)
+        .unwrap();
+        // A kernel-style follow-up event after the user message.
+        std::thread::sleep(Duration::from_millis(300));
+        rushi_common::logline::LogLine::from_json(
+            r#"{"v":1,"type":"assistant_message","ts":"t","content":"a3"}"#,
+        )
+        .commit(&path)
+        .unwrap();
+        // Drain until a quiet window: every delivery in the watch
+        // window must land, so the counts are final after it.
+        let mut seen: Vec<String> = Vec::new();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut quiet_since: Option<std::time::Instant> = None;
+        while std::time::Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(WatchItem::Event { event, .. }) => {
+                    seen.push(event.compact());
+                    quiet_since = None;
+                }
+                Ok(_) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    let now = std::time::Instant::now();
+                    match quiet_since {
+                        Some(q) if now.duration_since(q) >= Duration::from_millis(1500) => break,
+                        _ => quiet_since = Some(now),
+                    }
+                }
+                Err(e) => panic!("watcher stopped: {e:?}"),
+            }
+        }
+        let mut once = 0usize;
+        let mut a3 = 0usize;
+        for line in &seen {
+            if line.contains("\"the message\"") {
+                once += 1;
+            }
+            if line.contains("\"a3\"") {
+                a3 += 1;
+            }
+        }
+        assert_eq!(
+            once, 1,
+            "the sent message must arrive exactly once: {seen:?}"
+        );
+        assert_eq!(
+            a3, 1,
+            "the follow-up event must arrive exactly once: {seen:?}"
+        );
+        drop(rx);
+    }
+
     #[test]
     fn read_tail_zstd_returns_disconnected_when_receiver_dropped() {
         let c = make_cfg(None);
