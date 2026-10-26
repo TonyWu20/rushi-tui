@@ -240,11 +240,11 @@
         "terminal-browser-agent": "terminal-browser-agent"
       },
       "locked": {
-        "lastModified": 1792280014,
-        "narHash": "sha256-k8px6siiTmxHJqZ64iKWPJHJHlX0pgiJqpW9kAk9cLw=",
+        "lastModified": 1792882316,
+        "narHash": "sha256-iXSLo0mqnJF2P4EdgveJYv8HvnraY1Ww2NkzLLvNpcI=",
         "ref": "refs/heads/main",
-        "rev": "1e16da9ac757bfd7137f166f137cbd0e6955199e",
-        "revCount": 113,
+        "rev": "b66b337a49ab480c1423df3464ca93ad3e45dfeb",
+        "revCount": 118,
         "type": "git",
         "url": "ssh://git@github.com/TonyWu20/rushi-config"
       },
@@ -374,11 +374,11 @@
         "rushiTui": "rushiTui"
       },
       "locked": {
-        "lastModified": 1792276633,
-        "narHash": "sha256-1eTpR6oWARiM773ljXXXKvw6jy2ZoSU7ev5XIxFA5YM=",
+        "lastModified": 1792688625,
+        "narHash": "sha256-Xs46puHFnzixoWVqdRHyQokY3TTHK4hk3SmyYOeA+AQ=",
         "owner": "TonyWu20",
         "repo": "rushi",
-        "rev": "9336a86fca118aad9b70110d209ed2506ed65411",
+        "rev": "21282ae7c9547901df1141bf6207eb3e7e49979d",
         "type": "github"
       },
       "original": {
@@ -562,11 +562,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1792005295,
-        "narHash": "sha256-/MLsO1maLDXH5B/H9N0IOY/sK6rVMIb47uJm/5KSby8=",
+        "lastModified": 1792780492,
+        "narHash": "sha256-+QTrT0oJ4qObljxvBiiNoETawqLJ/6fRVivhnReAVZE=",
         "owner": "TonyWu20",
         "repo": "rushi-simple-english",
-        "rev": "f4dee6867f9db4a62ded4569f00a8887f3db0fc0",
+        "rev": "406ddc7b10dddbd8ac8843c936218d84657e9af4",
         "type": "github"
       },
       "original": {
@@ -739,11 +739,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1791966052,
-        "narHash": "sha256-iZ/zYtKzlSbbditYBG7MWdCvlWhG2oJBcs6XMpFtPaE=",
+        "lastModified": 1792700001,
+        "narHash": "sha256-cml5CQblqLXwq25rcJ7duMhibzifIwhlP13J0a0oOPk=",
         "owner": "TonyWu20",
         "repo": "rushi-tui",
-        "rev": "4be0ed2fdb20aa0752414424713fba50f07530a5",
+        "rev": "5fd169d3bdf01e5e43cc421df73bdb8a6b6cc767",
         "type": "github"
       },
       "original": {
