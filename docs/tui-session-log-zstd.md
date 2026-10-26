@@ -82,13 +82,21 @@ byte stream is not a line stream:
   (a replacement, shorter log) shrinks the line count and
   resets to the start, like the plain path.
 - The layout is sniffed from the head on the first bytes and on
-  every rotation. A reappearing zstd file is a new inode: its
-  position state resets and the layout re-decides. The plain
-  path keeps its byte position across a recreate; its alignment
-  probe handles the new inode. P2 keeps the layout stable in
-  between. The zstd cursor carries the line position just past
-  the emitted line, the plain cursor the byte offset, per the
-  port contract.
+  every rotation. A reappearing zstd file (a Gone-then-recreated
+  log) is a new inode: its position state resets and the layout
+  re-decides. The plain path keeps its byte position across a
+  recreate; its alignment probe handles the new inode. P2 keeps
+  the layout stable in between. The zstd cursor carries the line
+  position just past the emitted line, the plain cursor the byte
+  offset, per the port contract.
+- The first creation of a fresh session log is not a
+  re-appearance. The watch can attach before the log file
+  exists; the first commit creates it. The position state the
+  first poll established stands. No `Resumed` item, no reset.
+  A reset there would re-decide from zero and re-emit the lines
+  the first poll already delivered (the brand-new-session
+  double-message report, 2026-10-24). The reset applies only to
+  a log that was observed, went Gone, and came back.
 
 Known hole (shared with the plain path): a rotation to a
 *longer* file is not detected; the tailer keeps its position

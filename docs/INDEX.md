@@ -4,7 +4,16 @@ Authoritative entry point for any agent starting a new session in
 this repo. Read this first. It tells you what exists, what is
 shipped, and what is next.
 
-## Repo state (2026-10-22)
+## Repo state (2026-10-24)
+
+**Fresh-session tailer first creation (2026-10-24,
+implemented).** The zstd tailer treated the first creation of a
+fresh session log as a `Resumed` re-appearance and reset its
+position, re-emitting the first lines. A brand-new session
+showed its sent message twice; the log held one event. The
+first creation now keeps the position state and sends no
+`Resumed`. The reset applies only to a log that was observed,
+went Gone, and came back. See `tui-session-log-zstd.md`.
 
 **Pending user message suppression (2026-10-22, stage 3,
 implemented).** The transcript omits the user panel of an

@@ -250,6 +250,11 @@ impl FileSessionPort {
 fn tail_session(path: PathBuf, start: TailCursor, tx: SyncSender<WatchItem>) {
     let mut pos = TailPos::new();
     let mut present = path.exists();
+    // Whether the log was ever observed. The first creation of a
+    // fresh session log (the watch attached before it existed) is
+    // not a re-appearance: no `Resumed` item and no position reset.
+    // Only a Gone-then-recreated log re-decides from zero.
+    let mut seen = present;
 
     // Debounced inotify wake source. The debouncer coalesces rapid
     // inotify events (from the log file and its parent directory)
@@ -269,25 +274,39 @@ fn tail_session(path: PathBuf, start: TailCursor, tx: SyncSender<WatchItem>) {
             Ok(()) => {
                 if !present {
                     present = true;
-                    let _ = tx.try_send(WatchItem::Resumed);
-                    // The log reappeared under a new inode; the inotify
-                    // watch still points at the dead inode, so
-                    // re-register it.
+                    let first_creation = !seen;
+                    seen = true;
+                    // The (re)appearing log is a new inode; the
+                    // inotify watch still points at the dead inode,
+                    // so re-register it.
                     if let Some(d) = debouncer.as_mut() {
                         register_watches(d.watcher(), &path);
                     }
-                    // A reappearing log is a new inode. For a zstd
-                    // stream the recorded line position belongs to
-                    // the dead file: re-decide on the fresh head
-                    // from zero. For a plain tail the byte position
-                    // is kept (the alignment check handles the new
-                    // inode) unless the recreate changed the layout:
-                    // a session recreated under a newer kernel
-                    // carries the zstd layout.
-                    let fresh = sniff_log_layout(&path);
-                    if fresh != pos.layout || pos.layout == LogLayout::Zstd {
-                        pos.reset();
-                        pos.decided = false;
+                    if first_creation {
+                        // The first creation of a fresh session log:
+                        // the watch attached before the log existed.
+                        // The position state (the watch start
+                        // cursor) stands; an undecided layout
+                        // decides on the fresh head. No `Resumed`
+                        // item, no reset: the first poll already
+                        // emitted the lines, and a reset would
+                        // re-decide from zero and re-emit them.
+                    } else {
+                        let _ = tx.try_send(WatchItem::Resumed);
+                        // A reappearing log is a new inode. For a
+                        // zstd stream the recorded line position
+                        // belongs to the dead file: re-decide on
+                        // the fresh head from zero. For a plain
+                        // tail the byte position is kept (the
+                        // alignment check handles the new inode)
+                        // unless the recreate changed the layout:
+                        // a session recreated under a newer kernel
+                        // carries the zstd layout.
+                        let fresh = sniff_log_layout(&path);
+                        if fresh != pos.layout || pos.layout == LogLayout::Zstd {
+                            pos.reset();
+                            pos.decided = false;
+                        }
                     }
                 }
             }
@@ -3399,6 +3418,83 @@ mod tests {
         assert_eq!(
             a3, 1,
             "the follow-up event must arrive exactly once: {seen:?}"
+        );
+        drop(rx);
+    }
+
+    /// A fresh session: the watch attaches before the log file
+    /// exists, then the first `commit` creates it. The creation must
+    /// not read as a `Resumed` re-appearance and re-emit the lines
+    /// already delivered by the first poll. Each event lands once.
+    #[test]
+    fn watch_fresh_session_first_creation_delivers_each_line_once() {
+        let c = make_cfg(None);
+        let path = log_path(&c, "s-fresh");
+        // No log yet: the tailer attaches to a missing file.
+        assert!(!path.exists());
+        let sid = SessionId::new("s-fresh");
+        let rx = c.port.watch(&sid, TailCursor::end());
+        std::thread::sleep(Duration::from_millis(300)); // let the tailer attach
+
+        // First creation of the log, as the TUI send path does
+        // (create the session dir, then commit one frame).
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        rushi_common::logline::LogLine::from_json(
+            r#"{"v":1,"type":"user_message","ts":"t","id":"m1","content":"first"}"#,
+        )
+        .commit(&path)
+        .unwrap();
+        // A follow-up event, still on the same inode.
+        std::thread::sleep(Duration::from_millis(300));
+        rushi_common::logline::LogLine::from_json(
+            r#"{"v":1,"type":"assistant_message","ts":"t","content":"second"}"#,
+        )
+        .commit(&path)
+        .unwrap();
+
+        let mut seen: Vec<String> = Vec::new();
+        let mut resumed = 0usize;
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut quiet_since: Option<std::time::Instant> = None;
+        while std::time::Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(WatchItem::Event { event, .. }) => {
+                    seen.push(event.compact());
+                    quiet_since = None;
+                }
+                Ok(WatchItem::Resumed) => resumed += 1,
+                Ok(_) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    let now = std::time::Instant::now();
+                    match quiet_since {
+                        Some(q) if now.duration_since(q) >= Duration::from_millis(1500) => break,
+                        _ => quiet_since = Some(now),
+                    }
+                }
+                Err(e) => panic!("watcher stopped: {e:?}"),
+            }
+        }
+        let mut first = 0usize;
+        let mut second = 0usize;
+        for line in &seen {
+            if line.contains("\"first\"") {
+                first += 1;
+            }
+            if line.contains("\"second\"") {
+                second += 1;
+            }
+        }
+        assert_eq!(
+            first, 1,
+            "the first line must arrive exactly once, no re-emit: {seen:?}"
+        );
+        assert_eq!(
+            second, 1,
+            "the follow-up line must arrive exactly once: {seen:?}"
+        );
+        assert_eq!(
+            resumed, 0,
+            "the first creation of a fresh log is not a Resumed re-appearance"
         );
         drop(rx);
     }
